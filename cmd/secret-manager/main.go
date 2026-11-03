@@ -44,11 +44,11 @@ const usage = `Usage: secret-manager <command> [flags]
 Server:
   server [--addr :8080] [--metrics-addr :8081] [--storage kubernetes|file]
          [--namespace NS] [--file secret-manager.json] [--controller=true]
-         [--history-limit 10] [--log-level info]
+         [--history-limit 10] [--last-used-flush 30m] [--log-level info]
          [--backup-dir DIR [--backup-interval 24h] [--backup-keep 7]
           [--backup-history]]
                                                run controller, API and Web UI
-                                               (admin token from ` + cli.EnvToken + `,
+                                               (Web UI admin token from ` + cli.EnvToken + `,
                                                optional encryption key from
                                                ` + envEncryptionKey + `)
 
@@ -87,6 +87,7 @@ func runServer(args []string) error {
 	filePath := fs.String("file", "secret-manager.json", "file holding the stored secrets (file storage)")
 	runController := fs.Bool("controller", true, "run the SecretSync controller")
 	historyLimit := fs.Int("history-limit", 10, "versions kept per path, current included, 0 to disable history")
+	lastUsedFlush := fs.Duration("last-used-flush", 30*time.Minute, "time between saves of the last use of every integration")
 	var sched server.BackupSchedule
 	fs.StringVar(&sched.Dir, "backup-dir", "", "directory receiving scheduled backups, empty to disable them")
 	fs.DurationVar(&sched.Interval, "backup-interval", 24*time.Hour, "time between scheduled backups")
@@ -100,6 +101,9 @@ func runServer(args []string) error {
 
 	if *historyLimit < 0 {
 		return errors.New("--history-limit must not be negative")
+	}
+	if *lastUsedFlush <= 0 {
+		return errors.New("--last-used-flush must be positive")
 	}
 	if sched.Dir != "" {
 		if sched.Interval <= 0 || sched.Keep < 1 {
@@ -178,7 +182,8 @@ func runServer(args []string) error {
 		}
 	}
 
-	handler, err := server.New(svc, tokens.New(backend), os.Getenv(cli.EnvToken))
+	integrations := tokens.New(backend)
+	handler, err := server.New(svc, integrations, os.Getenv(cli.EnvToken))
 	if err != nil {
 		return err
 	}
@@ -187,10 +192,19 @@ func runServer(args []string) error {
 
 	slog.Info("starting secret-manager", "version", version, "storage", *storageName, "controller", *runController,
 		"encryption", key != nil, "backup_dir", sched.Dir)
-	ctx := ctrl.SetupSignalHandler()
+	ctx, cancel := context.WithCancel(ctrl.SetupSignalHandler())
 	if sched.Dir != "" {
 		go handler.RunBackups(ctx, sched)
 	}
+	flushed := make(chan struct{})
+	go func() {
+		integrations.RunFlush(ctx, *lastUsedFlush)
+		close(flushed)
+	}()
+	defer func() {
+		cancel()
+		<-flushed
+	}()
 	if mgr != nil {
 		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error { return serve(ctx, httpServer) })); err != nil {
 			return err

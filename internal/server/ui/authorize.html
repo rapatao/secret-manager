@@ -1,0 +1,29 @@
+{{define "content"}}
+{{if .Done}}
+<div class="card"><div class="body">
+<h3>{{if .Denied}}Login denied{{else}}Login approved{{end}}</h3>
+<p>Return to the terminal{{if not .Denied}}; the CLI picks up its token in a few seconds{{end}}.</p>
+</div></div>
+{{else}}
+<h1>Authorize CLI login</h1>
+<div class="card">
+<form class="body stack" method="post" action="/authorize">
+{{with .UserCode}}
+<p>Check that the terminal shows this code. Deny the login if you did not start it.</p>
+<p class="user-code mono">{{.}}</p>
+<input type="hidden" name="user_code" value="{{.}}">
+{{else}}
+<p>A <code>secret-manager</code> CLI on this computer asks for a token. Deny the login if you did not start it.</p>
+<input type="hidden" name="redirect_uri" value="{{.Redirect}}">
+<input type="hidden" name="state" value="{{.State}}">
+<input type="hidden" name="code_challenge" value="{{.Challenge}}">
+{{end}}
+{{template "grant-fields" .}}
+<div class="dialog-actions">
+<button type="submit" name="decision" value="deny" formnovalidate>Deny</button>
+<button type="submit" name="confirm" value="yes" class="primary">Allow</button>
+</div>
+</form>
+</div>
+{{end}}
+{{end}}

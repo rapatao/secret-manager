@@ -18,7 +18,7 @@ One binary contains the controller, the REST API, the Web UI and the CLI. The co
 | Stores secrets | Yes, as Kubernetes Secrets | No, reads an external store (Vault, cloud providers, ...) | Yes, in PostgreSQL | Encrypted in git |
 | Extra components | None | The external store | PostgreSQL and Redis | None |
 | Web UI and CLI | Yes | No | Yes | CLI to encrypt (`kubeseal`) |
-| Users, roles, environments | No, one admin token plus tokens scoped to a path | From the external store | Yes | Git permissions |
+| Users, roles, environments | No, one admin token for the Web UI plus integration tokens scoped to a path | From the external store | Yes | Git permissions |
 | Secret history | Yes, last N versions per path | From the external store | Yes | Git history |
 | Restarts workloads on change | Yes | No, needs a tool like Reloader | Yes | No |
 
@@ -57,7 +57,7 @@ To add a backend (SQLite, Postgres, ...), implement `storage.Backend`, run `stor
 
 ## Install
 
-Create the admin token (at least 32 characters), then install the chart:
+Create the admin token (at least 32 characters) that signs in to the Web UI, then install the chart:
 
 ```sh
 kubectl create namespace secret-manager
@@ -104,13 +104,14 @@ The chart sets these; set them yourself when running `secret-manager server` out
 | `--file` | `secret-manager.json` | File holding the stored secrets and their versions (`file` storage) |
 | `--controller` | `true` | Run the `SecretSync` controller. Requires access to a cluster |
 | `--history-limit` | `10` | Versions kept per path, current included, `0` disables history |
+| `--last-used-flush` | `30m` | Time between saves of the last use of every [integration](#integrations), also saved on shutdown |
 | `--backup-dir` | | Directory receiving [scheduled backups](#scheduled-backups), empty disables them |
 | `--backup-interval` | `24h` | Time between scheduled backups |
 | `--backup-keep` | `7` | Scheduled backup files kept |
 | `--backup-history` | `false` | Include versions in scheduled backups |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error` |
 
-The admin token is read from `SECRET_MANAGER_TOKEN`, the optional [encryption](#encryption) key from `SECRET_MANAGER_ENCRYPTION_KEY`.
+The Web UI admin token is read from `SECRET_MANAGER_TOKEN`, the optional [encryption](#encryption) key from `SECRET_MANAGER_ENCRYPTION_KEY`.
 
 ## SecretSync
 
@@ -173,8 +174,7 @@ go install github.com/rapatao/secret-manager/cmd/secret-manager@latest
 ```
 
 ```sh
-export SECRET_MANAGER_URL=https://secrets.example.com
-export SECRET_MANAGER_TOKEN=...
+secret-manager servers login --server https://secrets.example.com   # approve in the browser, see Servers and login
 
 secret-manager list
 secret-manager set --path /tools GITHUB_TOKEN=abc OTHER=1
@@ -197,17 +197,28 @@ secret-manager version                                 # client and server versi
 
 ### Servers and login
 
-Instead of environment variables, log in once per server:
+Log in once per server:
 
 ```sh
-secret-manager servers login --server https://secrets.example.com    # prompts for the token
+secret-manager servers login --server https://secrets.example.com             # approve in a browser on this computer
+secret-manager servers login --server https://secrets.example.com --device    # approve from any browser
 echo "$TOKEN" | secret-manager servers login --server https://secrets.example.com --token-stdin
 secret-manager servers                                # list logged-in servers, marks the default
 secret-manager servers use https://secrets.example.com
 secret-manager servers logout --server https://secrets.example.com
 ```
 
-`servers login` checks the token against the server before storing it, then makes that server the default. You can be logged in to several servers at once: `servers use` switches the default, and `--server` picks one for a single command.
+`servers login` creates an [integration](#integrations) approved in the Web UI:
+
+1. The CLI opens the server's approval page in the default browser. Sign in with the admin token if needed.
+2. Pick the integration's name (default `cli-<hostname>`), path, access and expiry (default 90 days), then Allow, or Deny.
+3. The browser hands an authorization code to the CLI on `http://127.0.0.1:<random port>/callback`. The CLI exchanges it for the token with its PKCE verifier (RFC 7636). A code works once, and only with that verifier.
+
+With `--device`, over SSH (`SSH_CONNECTION` is set) or when no browser can be opened, the CLI prints the approval page URL and a code like `ABCD-2345` instead. Open the URL in any browser, check that the page shows the same code, and approve; the CLI polls the server and picks up the token. A login not approved within 5 minutes fails.
+
+`--token-stdin` stores an existing token instead, such as one created in the Web UI, after checking it against the server. Either way the server becomes the default. You can be logged in to several servers at once: `servers use` switches the default, and `--server` picks one for a single command. A request with an expired or revoked token fails with `401` and a hint to run `servers login` again.
+
+Without a login, set `SECRET_MANAGER_URL` and `SECRET_MANAGER_TOKEN` to a server and an integration token, as in CI.
 
 Tokens are stored in the OS keychain (macOS Keychain, Linux Secret Service, Windows Credential Manager) under the service `secretmanager.rapatao.com`, one entry per server. Without a usable keychain, as on headless Linux, they fall back to `~/.config/secretmanager.rapatao.com/credentials.json` with `0600` permissions and a warning is printed. The list of servers and the default are kept in `config.json` in the same directory (`$XDG_CONFIG_HOME` is honored).
 
@@ -215,7 +226,7 @@ Tokens are stored in the OS keychain (macOS Keychain, Linux Secret Service, Wind
 
 The server is `--server`, then `SECRET_MANAGER_URL`, then the default from `servers`.
 
-`SECRET_MANAGER_TOKEN` belongs to `SECRET_MANAGER_URL` and is only sent to that server. Any other server, chosen with `--server` or as the default, uses its token stored by `servers login`. Setting `SECRET_MANAGER_TOKEN` without `SECRET_MANAGER_URL` is an error, so a leftover token is never sent to the default server.
+`SECRET_MANAGER_TOKEN` belongs to `SECRET_MANAGER_URL` and is only sent to that server. Any other server, chosen with `--server` or as the default, uses its token stored by `servers login`. Setting `SECRET_MANAGER_TOKEN` without `SECRET_MANAGER_URL` is an error.
 
 | Set | Server | Token |
 |---|---|---|
@@ -224,7 +235,7 @@ The server is `--server`, then `SECRET_MANAGER_URL`, then the default from `serv
 | nothing | default | stored token for default |
 | `SECRET_MANAGER_TOKEN` only | - | error |
 
-The token is never accepted as a flag, so it doesn't end up in shell history or the process list.
+No command accepts the token as a flag.
 
 `run` adds the secrets to the current environment, overriding variables with the same name, and exits with the command's exit code.
 
@@ -244,7 +255,7 @@ Every write that changes a path (setting keys, deleting a key) stores the path's
 
 Deleting a path keeps its versions, so `rollback` can bring it back. Rolling back writes the old data as a new version, so it can itself be undone. Rolling back a synced path updates its targets like any other write.
 
-History starts when the feature is first used: paths written before have no versions until their next change.
+A path written while history is disabled has no versions until its next change.
 
 ## Backup
 
@@ -260,27 +271,73 @@ With `--backup-dir DIR`, the server writes a backup to `DIR/backup-<UTC time>.js
 
 In the chart, set `backup.enabled=true` (`backup.interval`, `backup.keep`, `backup.history`). Backups go to a `ReadWriteOnce` PersistentVolumeClaim named `<release>-backups` (`backup.persistence.size`, default `1Gi`, and `backup.persistence.storageClass`), or to `backup.persistence.existingClaim`. Helm keeps the claim when the release is uninstalled. The image has no shell, so to copy a file out, mount the claim in another pod. The same plain-text warning applies to these files.
 
-## Scoped tokens
+## Integrations
 
-The admin token can do everything. For CI jobs, other machines or `secret-manager run`, create a token limited to one path and the paths nested below it, optionally read-only:
+An integration is a token (`smt_...`) for API clients: the CLI, CI jobs, other machines, `secret-manager run`. The API accepts only integration tokens; the admin token signs in to the Web UI.
 
-```sh
-secret-manager tokens create --name ci --path /kubernetes/app --read-only
-secret-manager tokens                 # list
-secret-manager tokens revoke ci
-```
+| Setting | Values |
+|---|---|
+| Name | `[a-z0-9-]`, up to 63 characters, unique. Fixed once created |
+| Path | A path; the integration covers it and every path nested below it |
+| Read-only | Reads only, or reads and writes |
+| Expires | 7, 30 or 90 days, 1 year, the end of a chosen day (UTC), or never |
 
-`create` prints the token (`smt_...`) once; the server keeps only its SHA-256 hash, in the storage backend (a Secret named `sm-tokens` with the `kubernetes` backend). Use it like the admin token, with `SECRET_MANAGER_URL` and `SECRET_MANAGER_TOKEN` or `servers login`.
+What an integration can do:
 
-A scoped token can read the data and history of paths under its path, and, unless read-only, set and delete keys, delete those paths and roll them back. `list` shows only its paths. Everything else needs the admin token: backup, restore, managing tokens and the Web UI. A request outside the token's scope gets `403`. Tokens are loaded once and kept in memory, so changes made directly on the stored tokens need a server restart.
+| Operation | Path `P` | Path `/` |
+|---|---|---|
+| `info`, `list` (only paths under its path) | yes | yes |
+| Read data, keys and history | under `P` | every path |
+| Set and delete keys, delete paths, roll back (not read-only) | under `P` | every path |
+| Backup | no | yes |
+| Restore (not read-only) | no | yes |
+
+A request outside the integration's scope gets `403`; an unknown, revoked or expired token gets `401`. Managing integrations and approving logins happen only in the Web UI.
+
+### Creating integrations
+
+- `servers login` creates one after approval in the browser, see [Servers and login](#servers-and-login).
+- The Integrations page of the Web UI creates one after a confirmation dialog that shows its name, path, access and expiry. The token is shown once. Use it with `SECRET_MANAGER_URL` and `SECRET_MANAGER_TOKEN`, or `servers login --token-stdin`.
+
+The server keeps only the SHA-256 hash of each token, in the storage backend (a Secret named `sm-tokens` with the `kubernetes` backend). Integrations are loaded once and kept in memory, so changes made directly on the stored tokens need a server restart.
+
+### Managing integrations
+
+The Integrations page lists every integration with its path, access, creation time, expiry and last use. Expired integrations stay listed, marked expired, until revoked.
+
+- Edit changes the path, read-only access and expiry, keeping the token. The expiry can stay as it is or take any of the values above. Save opens a confirmation dialog listing the current and new values; clients get the new access on their next request. Save without changes closes the dialog. Cancel with unsaved changes asks whether to discard them or keep editing, and Cancel in the confirmation dialog discards the edit.
+- Revoke deletes the integration after a confirmation dialog.
+
+The last use is tracked in memory and saved every `--last-used-flush` (default `30m`) and on shutdown. It can lag behind, and a crash loses the uses since the last save.
 
 ## Web UI
 
-Open the server URL and sign in with the admin token. The UI lists paths and filters them as you type, matching anywhere in the path; the same field opens the typed path when it exists, or creates it after a confirmation dialog. It lets you delete paths, copy a key's value to the clipboard, and view and restore a path's versions; values stay hidden until expanded. On a path, adding keys, editing values and deleting keys are staged on the page: a deleted key is struck through until saved, and Undo brings it back. A new key cannot reuse the name of an existing key or of another new key; change existing keys in their own row. Save changes is enabled once something is staged and writes every staged change as one version, after a confirmation dialog that lists the keys added (`+`), changed (`~`) and deleted (`-`) with their current and new values. Deleting a path and restoring a version also ask for confirmation in a modal dialog; deleting a path is in the collapsed danger zone and also requires typing the path. The server rejects these actions when the confirmation is missing or does not match. It follows the system light or dark theme, and the header shows the server version. Filtering paths, editing keys and the copy button need JavaScript; browsers without invoker commands (`commandfor`) also use it to open the dialogs. Deleted paths that still have versions are listed separately, and restoring one of their versions brings them back. Sessions last 12 hours and survive server restarts; changing the admin token signs every session out. Logging out deletes the session cookie in the browser. The session cookie is `Secure`, so use HTTPS (an Ingress with TLS) or `localhost`.
+Open the server URL and sign in with the admin token. The header shows the server version next to the name, and links to Integrations and Sign out. The UI follows the system light or dark theme.
+
+Paths
+- One field filters paths as you type, matching anywhere in the path. It opens the typed path when it exists, or creates it after a confirmation dialog.
+- Deleted paths that still have versions are listed separately; restoring one of their versions brings them back.
+- Deleting a path is in the collapsed danger zone of its page, and requires typing the path in a confirmation dialog.
+
+Keys
+- Values stay hidden until expanded. The copy button copies a value to the clipboard.
+- Adding keys, editing values and deleting keys are staged on the page: a deleted key is struck through until saved, and Undo brings it back.
+- A new key cannot reuse the name of an existing key or of another new key; existing keys change in their own row.
+- Save changes is enabled once something is staged. It opens a confirmation dialog listing the keys added (`+`), changed (`~`) and deleted (`-`) with their current and new values, and writes every staged change as one version.
+
+History
+- Each version can be compared with the current data and restored after a confirmation dialog, see [History](#history).
+
+Integrations and logins
+- The Integrations page manages [integrations](#integrations). `/authorize` approves or denies CLI logins, see [Servers and login](#servers-and-login).
+
+The server rejects every change made without its confirmation, or with one that does not match. Filtering paths, editing keys, the copy button and the integration dialogs need JavaScript; browsers without invoker commands (`commandfor`) also use it to open the dialogs.
+
+Sessions last 12 hours and survive server restarts; changing the admin token signs every session out. Signing out deletes the session cookie in the browser. The session cookie is `Secure`: use HTTPS (an Ingress with TLS) or `localhost`.
 
 ## API
 
-All endpoints except `/healthz` and `/readyz` require `Authorization: Bearer <token>`, the admin token or a [scoped token](#scoped-tokens) allowed to use the endpoint and path.
+All endpoints except `/healthz`, `/readyz` and the two login endpoints require `Authorization: Bearer <token>`, an [integration](#integrations) token allowed to use the endpoint and path. The admin token is not accepted.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -295,26 +352,36 @@ All endpoints except `/healthz` and `/readyz` require `Authorization: Bearer <to
 | `GET` | `/api/v1/history?path=P` | `{"versions": [{"version": 3, "time": "...", "keys": [...]}]}`, newest first, without values |
 | `GET` | `/api/v1/history/{version}?path=P` | `{"version": 3, "time": "...", "data": {"KEY": "value"}}` |
 | `POST` | `/api/v1/history/{version}/rollback?path=P` | Replace the data at P with that version |
-| `GET` | `/api/v1/tokens` | `{"tokens": [{"name": "ci", "path": "/app", "readOnly": true, "created": "..."}]}`, admin token only |
-| `POST` | `/api/v1/tokens` | Create a token from `{"name": "ci", "path": "/app", "readOnly": true}`, returns it with `"token"`, admin token only |
-| `DELETE` | `/api/v1/tokens/{name}` | Revoke a token, admin token only |
+| `POST` | `/api/v1/authorize/device` | Start a device login from `{"name": "cli-box"}`, returns `{"deviceCode": "...", "userCode": "ABCD-2345", "verificationUri": "/authorize?user_code=ABCD-2345", "expiresIn": 300, "interval": 2}`. No token needed |
+| `POST` | `/api/v1/authorize/token` | Collect the token of an approved login, once: `{"code": "...", "codeVerifier": "..."}` for a loopback login, `{"deviceCode": "..."}` for a device login. Returns `{"name", "path", "readOnly", "expires", "token"}`; `400` with `authorization_pending` until a device login is approved, `403` with `access_denied` when denied. No token needed |
 | `GET` | `/healthz` | Liveness |
 | `GET` | `/readyz` | Readiness: 503 when the storage backend cannot be read |
 
 Paths look like `/a/b`, with segments of `[a-z0-9-]`. Keys match `[-._a-zA-Z0-9]+`.
 
+A loopback login starts in the browser at `/authorize?redirect_uri=http://127.0.0.1:PORT/callback&state=S&code_challenge=C&name=N`, where `C` is the base64url SHA-256 of the client's verifier. `redirect_uri` must be `http` on `127.0.0.1`, `::1` or `localhost` with a port. After approval the browser is redirected to `redirect_uri?code=...&state=S`, or `?error=access_denied&state=S`. Pending logins live in the server's memory for 5 minutes, at most 100 at a time, and are lost on restart.
+
 ### Compatibility
 
-Clients and servers of different versions work together. `/api/v1` endpoints keep their behavior, so an older CLI works against a newer server. A newer CLI works against an older server too, as long as the server has the features a command uses.
+Clients and servers of different versions work together, as long as the server has the features a command uses.
 
-`GET /api/v1/info` lists those features as capabilities: `paths`, `secrets`, `history`, `backup` and `tokens` today. Commands that need a feature added later check its capability first and fail with `server v1.2.0 at URL does not support X; upgrade the server` instead of an unclear error. Servers older than `/api/v1/info` are treated as having `paths`, `secrets` and `history`, and their version is shown as unknown. A capability never changes meaning and is never removed; changed behavior gets a new capability.
+`GET /api/v1/info` lists those features as capabilities: `paths`, `secrets`, `history`, `backup` and `integrations`. A command that needs a feature checks its capability first and fails with `server v1.2.0 at URL does not support X; upgrade the server`. Servers without `/api/v1/info` are treated as having `paths`, `secrets` and `history`, and their version is shown as unknown. A capability never changes meaning; changed behavior gets a new capability.
+
+Authentication depends on the `integrations` capability:
+
+| Server | API token | CLI login |
+|---|---|---|
+| With `integrations` | An integration token | `servers login` in the browser, or `--token-stdin` with an integration token |
+| Without `integrations` | The admin token | `servers login --token-stdin` with the admin token; browser login fails with `server does not support browser login; upgrade it or log in with --token-stdin` |
+
+A CLI without browser login works against a server with `integrations` using an integration token, through `SECRET_MANAGER_TOKEN` or its `servers login` prompt.
 
 `secret-manager version` prints the client version and, when a server is set (see [Resolution order](#resolution-order)), the server version and capabilities:
 
 ```
 client: v1.5.0
 server: v1.4.0 (https://secrets.example.com)
-capabilities: backup, history, paths, secrets, tokens
+capabilities: backup, history, integrations, paths, secrets
 ```
 
 ## Observability
@@ -343,7 +410,7 @@ Every change made through the API or the Web UI, every backup, every Web UI logi
 {"level":"WARN","msg":"audit","source":"ui","op":"login","remote":"10.42.0.7:51240","error":"invalid token"}
 ```
 
-`op` is one of `set`, `delete_key`, `delete_path`, `create_path`, `rollback`, `backup`, `restore`, `create_token`, `revoke_token` (with the token `name`), `login` and `auth` (API bearer token, including requests a scoped token is not allowed to make). Requests made with a scoped token carry its name in `token`. Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Other reads are not logged.
+`op` is one of `set`, `delete_key`, `delete_path`, `create_path`, `rollback`, `backup`, `restore`, `create_token`, `update_token`, `revoke_token` (with the integration `name`), `authorize` (a CLI login approved or denied in the Web UI), `login` and `auth` (API bearer token, including expired tokens and requests an integration is not allowed to make). Requests made with an integration token carry its name in `token`. Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Other reads are not logged.
 
 ## Security notes
 
@@ -352,9 +419,10 @@ Every change made through the API or the Web UI, every backup, every Web UI logi
 - The CLI caches the secrets it reads, encrypted with a key in the OS keychain, for up to 7 days. Anyone who can use your keychain can read them. Set `SECRET_MANAGER_CACHE_MAX_AGE=0` on shared machines.
 - Backup files hold every value in plain text. Encrypt them and keep them out of git.
 - With the `file` backend, restrict access to the file and its directory. Without an encryption key, values are stored in plain text in it.
-- With the controller enabled, the server needs cluster-wide permission to manage Secrets, because targets can live in any namespace. With `controller.enabled=false` it only needs Secrets in its own namespace.
+- With the controller enabled, the server can manage Secrets in every namespace, where `SecretSync` targets live. With `controller.enabled=false` it can only manage Secrets in its own namespace.
 - The metrics port has no authentication. It exposes no secret values, but restrict it with a NetworkPolicy if other workloads should not read it.
-- The admin token grants full access. Keep it long and random, and rotate it by updating its Secret and restarting the server. Give other clients a [scoped token](#scoped-tokens) instead, and revoke it when it is no longer used.
+- The admin token signs in to the Web UI, which can read every value and create integrations. Keep it long and random, and rotate it by updating its Secret and restarting the server. Give every client its own [integration](#integrations), as narrow and short-lived as it allows, and revoke it when it is no longer used.
+- Approve a CLI login only if you started it. For a device login, check that the code on the approval page matches the one in your terminal.
 
 ## Development
 

@@ -23,8 +23,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"golang.org/x/term"
-
 	"github.com/rapatao/secret-manager/internal/client"
 	"github.com/rapatao/secret-manager/internal/secrets"
 	"github.com/rapatao/secret-manager/internal/storage"
@@ -33,14 +31,17 @@ import (
 const (
 	// EnvURL holds the server URL.
 	EnvURL = "SECRET_MANAGER_URL"
-	// EnvToken holds the admin token.
+	// EnvToken holds an integration token.
 	EnvToken = "SECRET_MANAGER_TOKEN"
 )
 
 // Usage lists the client commands.
 const Usage = `Client commands:
   servers [list]                               list logged-in servers, marking the default
-  servers login --server URL [--token-stdin]   check and store a token, make URL the default
+  servers login --server URL [--device | --token-stdin]
+                                               approve a new integration in the browser,
+                                               or read a token from stdin; store the
+                                               token and make URL the default
   servers logout [--server URL]                remove the stored token
   servers use URL                              make a logged-in server the default
   list                                         list paths
@@ -58,11 +59,6 @@ const Usage = `Client commands:
   rollback --path P VERSION                    restore a version
   backup  [--history] [--output F]             print or write (0600) every path as JSON
   restore FILE|-                               replace the paths held in a backup
-  tokens  [list]                               list scoped tokens
-  tokens  create --name N --path P [--read-only]
-                                               create a token limited to the paths
-                                               under P and print it once
-  tokens  revoke NAME                          delete a token
   run     --path P [--recursive] -- CMD [ARGS...]
                                                run CMD with secrets as env vars
   version                                      print the client version and, when a
@@ -93,17 +89,20 @@ type CLI struct {
 	ConfigDir string
 	// Version is the client version printed by the version command.
 	Version string
+	// OpenBrowser opens a URL for servers login.
+	OpenBrowser func(string) error
 }
 
 // Default returns a CLI bound to the process stdio and environment.
 func Default() *CLI {
 	return &CLI{
-		Stdin:     os.Stdin,
-		Stdout:    os.Stdout,
-		Stderr:    os.Stderr,
-		Getenv:    os.Getenv,
-		Environ:   os.Environ,
-		ConfigDir: DefaultConfigDir(),
+		Stdin:       os.Stdin,
+		Stdout:      os.Stdout,
+		Stderr:      os.Stderr,
+		Getenv:      os.Getenv,
+		Environ:     os.Environ,
+		ConfigDir:   DefaultConfigDir(),
+		OpenBrowser: openBrowser,
 	}
 }
 
@@ -123,7 +122,6 @@ func (c *CLI) Run(ctx context.Context, args []string) int {
 		"version":  c.version,
 		"backup":   c.backup,
 		"restore":  c.restore,
-		"tokens":   c.tokens,
 	}
 	if len(args) == 0 {
 		fmt.Fprint(c.Stderr, Usage)
@@ -150,6 +148,10 @@ func (c *CLI) Run(ctx context.Context, args []string) int {
 		return 2
 	default:
 		fmt.Fprintln(c.Stderr, "error:", err)
+		var apiErr *client.Error
+		if errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+			fmt.Fprintln(c.Stderr, "Run servers login to get a new token.")
+		}
 		return 1
 	}
 }
@@ -301,23 +303,40 @@ func (c *CLI) serversUse(args []string) error {
 func (c *CLI) serversLogin(ctx context.Context, args []string) error {
 	f := c.flags("servers login", false, false)
 	fromStdin := f.fs.Bool("token-stdin", false, "read the token from stdin")
+	device := f.fs.Bool("device", false, "approve the login from another device instead of a browser on this computer")
 	if err := f.parseFlags(args); err != nil {
 		return err
 	}
 	if f.fs.NArg() > 0 {
 		return fmt.Errorf("%w: servers login takes no arguments", errUsage)
 	}
-
-	token, err := c.readToken(*fromStdin)
-	if err != nil {
-		return err
+	if *fromStdin && *device {
+		return fmt.Errorf("%w: --token-stdin and --device cannot be combined", errUsage)
 	}
-	if _, err := client.New(f.server, token).Paths(ctx); err != nil {
-		var apiErr *client.Error
-		if errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
-			return fmt.Errorf("login to %s failed: invalid token", f.server)
+
+	var token, granted string
+	if *fromStdin {
+		var err error
+		if token, err = c.readToken(); err != nil {
+			return err
 		}
-		return fmt.Errorf("login to %s failed: %w", f.server, err)
+		if _, err := client.New(f.server, token).Paths(ctx); err != nil {
+			var apiErr *client.Error
+			if errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+				msg := "invalid token"
+				if strings.HasPrefix(apiErr.Message, "token expired") {
+					msg = apiErr.Message
+				}
+				return fmt.Errorf("login to %s failed: %s", f.server, msg)
+			}
+			return fmt.Errorf("login to %s failed: %w", f.server, err)
+		}
+	} else {
+		login, err := c.browserLogin(ctx, f.server, *device)
+		if err != nil {
+			return fmt.Errorf("login to %s failed: %w", f.server, err)
+		}
+		token, granted = login.Token, describeLogin(login)
 	}
 
 	fallback, err := f.store.saveToken(f.server, token)
@@ -337,35 +356,31 @@ func (c *CLI) serversLogin(ctx context.Context, args []string) error {
 		fmt.Fprintf(c.Stderr, "warning: OS keychain unavailable (%v); token stored in %s with 0600 permissions\n",
 			fallback, filepath.Join(f.store.dir, "credentials.json"))
 	}
-	fmt.Fprintf(c.Stdout, "Logged in to %s\n", f.server)
+	fmt.Fprintf(c.Stdout, "Logged in to %s%s\n", f.server, granted)
 	return nil
 }
 
-func (c *CLI) readToken(fromStdin bool) (string, error) {
-	if fromStdin {
-		line, err := bufio.NewReader(c.Stdin).ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			return "", err
-		}
-		if token := strings.TrimSpace(line); token != "" {
-			return token, nil
-		}
-		return "", fmt.Errorf("%w: empty token on stdin", errUsage)
+func describeLogin(l client.Login) string {
+	access := "read-write"
+	if l.ReadOnly {
+		access = "read-only"
 	}
-	in, ok := c.Stdin.(*os.File)
-	if !ok || !term.IsTerminal(int(in.Fd())) {
-		return "", fmt.Errorf("%w: stdin is not a terminal; use --token-stdin", errUsage)
+	expires := "never expires"
+	if !l.Expires.IsZero() {
+		expires = "expires " + l.Expires.Format(time.RFC3339)
 	}
-	fmt.Fprint(c.Stderr, "Token: ")
-	b, err := term.ReadPassword(int(in.Fd()))
-	fmt.Fprintln(c.Stderr)
-	if err != nil {
+	return fmt.Sprintf(" as integration %s (%s, %s, %s)", l.Name, l.Path, access, expires)
+}
+
+func (c *CLI) readToken() (string, error) {
+	line, err := bufio.NewReader(c.Stdin).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}
-	if token := strings.TrimSpace(string(b)); token != "" {
+	if token := strings.TrimSpace(line); token != "" {
 		return token, nil
 	}
-	return "", fmt.Errorf("%w: empty token", errUsage)
+	return "", fmt.Errorf("%w: empty token on stdin", errUsage)
 }
 
 func (c *CLI) serversLogout(args []string) error {
@@ -752,67 +767,6 @@ func (c *CLI) restore(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(c.Stdout, "Restored %d paths\n", n)
 	return nil
-}
-
-func (c *CLI) tokens(ctx context.Context, args []string) error {
-	sub, rest := "list", args
-	if len(args) > 0 {
-		sub, rest = args[0], args[1:]
-	}
-	f := c.flags("tokens "+sub, false, false)
-	var name, path *string
-	var readOnly *bool
-	if sub == "create" {
-		name = f.fs.String("name", "", "token name, [a-z0-9-]")
-		path = f.fs.String("path", "", "path the token is limited to, nested paths included")
-		readOnly = f.fs.Bool("read-only", false, "only allow reads")
-	}
-	api, err := f.parse(rest)
-	if err != nil {
-		return err
-	}
-	switch {
-	case sub == "list" && f.fs.NArg() == 0:
-	case sub == "create" && f.fs.NArg() == 0:
-		if *name == "" || *path == "" {
-			return fmt.Errorf("%w: tokens create needs --name and --path", errUsage)
-		}
-	case sub == "revoke" && f.fs.NArg() == 1:
-	case sub == "list", sub == "create", sub == "revoke":
-		return fmt.Errorf("%w: tokens %s: wrong arguments", errUsage, sub)
-	default:
-		return fmt.Errorf("%w: unknown tokens command %q", errUsage, sub)
-	}
-	if err := api.Require(ctx, "tokens"); err != nil {
-		return err
-	}
-
-	switch sub {
-	case "create":
-		t, err := api.CreateToken(ctx, *name, *path, *readOnly)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintln(c.Stdout, t.Token)
-		fmt.Fprintf(c.Stderr, "Token %s for %s created. It is shown only once.\n", t.Name, t.Path)
-		return nil
-	case "revoke":
-		return api.RevokeToken(ctx, f.fs.Arg(0))
-	}
-	list, err := api.Tokens(ctx)
-	if err != nil {
-		return err
-	}
-	w := tabwriter.NewWriter(c.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tPATH\tACCESS\tCREATED")
-	for _, t := range list {
-		access := "read-write"
-		if t.ReadOnly {
-			access = "read-only"
-		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", t.Name, t.Path, access, t.Created.Format(time.RFC3339))
-	}
-	return w.Flush()
 }
 
 func parseVersion(s string) (int, error) {

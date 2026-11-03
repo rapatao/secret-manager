@@ -35,7 +35,7 @@ var uiFS embed.FS
 var pages = map[string]*template.Template{}
 
 func init() {
-	for _, name := range []string{"login", "index", "path"} {
+	for _, name := range []string{"login", "index", "path", "integrations", "authorize"} {
 		pages[name] = template.Must(template.ParseFS(uiFS, "ui/layout.html", "ui/"+name+".html"))
 	}
 }
@@ -95,7 +95,11 @@ func (s *Server) session(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, err := r.Cookie(sessionCookie)
 		if err != nil || !s.sessions.valid(c.Value) {
-			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			login := "/login"
+			if r.Method == http.MethodGet {
+				login += "?" + url.Values{"next": {r.URL.RequestURI()}}.Encode()
+			}
+			http.Redirect(w, r, login, http.StatusSeeOther)
 			return
 		}
 		next(w, r)
@@ -106,14 +110,22 @@ func (s *Server) uiScript(w http.ResponseWriter, r *http.Request) {
 	http.ServeFileFS(w, r, uiFS, "ui/ui.js")
 }
 
-func (s *Server) uiLoginForm(w http.ResponseWriter, _ *http.Request) {
-	s.render(w, http.StatusOK, "login", nil)
+func (s *Server) uiLoginForm(w http.ResponseWriter, r *http.Request) {
+	s.render(w, http.StatusOK, "login", map[string]any{"Next": r.URL.Query().Get("next")})
+}
+
+// localPath returns next when it is a path on this server, else "/".
+func localPath(next string) string {
+	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.HasPrefix(next, "/\\") {
+		return "/"
+	}
+	return next
 }
 
 func (s *Server) uiLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.validToken(r.PostFormValue("token")) {
 		s.audit(r, "ui", "login", "", nil, errInvalidToken)
-		s.render(w, http.StatusUnauthorized, "login", map[string]any{"Error": "invalid token"})
+		s.render(w, http.StatusUnauthorized, "login", map[string]any{"Error": "invalid token", "Next": r.PostFormValue("next")})
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
@@ -126,7 +138,7 @@ func (s *Server) uiLogin(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 	})
 	s.audit(r, "ui", "login", "", nil, nil)
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, localPath(r.PostFormValue("next")), http.StatusSeeOther)
 }
 
 func (s *Server) uiLogout(w http.ResponseWriter, r *http.Request) {

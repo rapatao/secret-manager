@@ -1,12 +1,17 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -19,11 +24,15 @@ import (
 	"github.com/rapatao/secret-manager/internal/client"
 	"github.com/rapatao/secret-manager/internal/secrets"
 	"github.com/rapatao/secret-manager/internal/server"
+	"github.com/rapatao/secret-manager/internal/storage"
 	k8sstorage "github.com/rapatao/secret-manager/internal/storage/kubernetes"
 	"github.com/rapatao/secret-manager/internal/tokens"
 )
 
-const token = "0123456789abcdef0123456789abcdef"
+const adminToken = "0123456789abcdef0123456789abcdef"
+
+// token is a read-write integration token for /, stored by newHarness.
+const token = "smt_clitestfullaccess"
 
 func TestMain(m *testing.M) {
 	keyring.MockInit()
@@ -41,6 +50,7 @@ type harness struct {
 	stdout   bytes.Buffer
 	stderr   bytes.Buffer
 	stdin    string
+	browser  func(string) error
 }
 
 func newHarness(t *testing.T) *harness {
@@ -48,7 +58,11 @@ func newHarness(t *testing.T) *harness {
 	backend := k8sstorage.New(fake.NewClientBuilder().Build(), "sm")
 	svc := secrets.New(backend, nil)
 	svc.KeepVersions = 10
-	srv, err := server.New(svc, tokens.New(backend), token)
+	sum := sha256.Sum256([]byte(token))
+	if err := backend.PutTokens(context.Background(), []storage.Token{{Name: "full", Hash: hex.EncodeToString(sum[:]), Path: "/"}}); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := server.New(svc, tokens.New(backend), adminToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,24 +72,20 @@ func newHarness(t *testing.T) *harness {
 	return &harness{t: t, ts: ts, env: map[string]string{}, url: ts.URL, envURL: ts.URL, envToken: token, dir: t.TempDir()}
 }
 
-// withToken returns a harness for the same server using token.
-func (h *harness) withToken(token string) *harness {
-	return &harness{t: h.t, ts: h.ts, env: map[string]string{}, url: h.url, envURL: h.envURL, envToken: token, dir: h.t.TempDir()}
-}
-
 func (h *harness) run(args ...string) int {
 	h.stdout.Reset()
 	h.stderr.Reset()
 	env := map[string]string{EnvURL: h.envURL, EnvToken: h.envToken}
 	maps.Copy(env, h.env)
 	c := &CLI{
-		Stdin:     strings.NewReader(h.stdin),
-		Stdout:    &h.stdout,
-		Stderr:    &h.stderr,
-		Getenv:    func(k string) string { return env[k] },
-		Environ:   func() []string { return []string{"PATH=/usr/bin:/bin", "KEEP=1", "OVERRIDE=old"} },
-		ConfigDir: h.dir,
-		Version:   "1.5.0",
+		Stdin:       strings.NewReader(h.stdin),
+		Stdout:      &h.stdout,
+		Stderr:      &h.stderr,
+		Getenv:      func(k string) string { return env[k] },
+		Environ:     func() []string { return []string{"PATH=/usr/bin:/bin", "KEEP=1", "OVERRIDE=old"} },
+		ConfigDir:   h.dir,
+		Version:     "1.5.0",
+		OpenBrowser: h.browser,
 	}
 	return c.Run(context.Background(), args)
 }
@@ -363,9 +373,9 @@ func TestLoginFallsBackToFile(t *testing.T) {
 	}
 }
 
-func TestLoginRequiresTerminalOrStdinFlag(t *testing.T) {
+func TestLoginFlags(t *testing.T) {
 	h := newHarness(t)
-	if code := h.run("servers", "login", "--server", h.url); code != 2 || !strings.Contains(h.stderr.String(), "--token-stdin") {
+	if code := h.run("servers", "login", "--server", h.url, "--device", "--token-stdin"); code != 2 {
 		t.Fatalf("exit %d, stderr %q", code, h.stderr.String())
 	}
 }
@@ -427,7 +437,7 @@ func TestServersListAndUse(t *testing.T) {
 
 func TestVersion(t *testing.T) {
 	h := newHarness(t)
-	want := "client: 1.5.0\nserver: 1.4.0 (" + h.url + ")\ncapabilities: backup, history, paths, secrets, tokens\n"
+	want := "client: 1.5.0\nserver: 1.4.0 (" + h.url + ")\ncapabilities: backup, history, integrations, paths, secrets\n"
 	if got := h.mustRun("version"); got != want {
 		t.Fatalf("version: %q", got)
 	}
@@ -590,46 +600,136 @@ func TestUnreachable(t *testing.T) {
 	}
 }
 
-func TestTokens(t *testing.T) {
+// uiSession signs in to the Web UI of h and returns the session cookie.
+func uiSession(t *testing.T, h *harness) *http.Cookie {
+	t.Helper()
+	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	res, err := c.PostForm(h.url+"/login", url.Values{"token": {adminToken}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	for _, ck := range res.Cookies() {
+		if ck.Name == "sm_session" {
+			return ck
+		}
+	}
+	t.Fatalf("no session cookie: %d", res.StatusCode)
+	return nil
+}
+
+// approve posts the approval form of a CLI login and returns the status and
+// redirect Location.
+func approve(t *testing.T, h *harness, form url.Values) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, h.url+"/authorize", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(uiSession(t, h))
+	c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	res, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	return res.StatusCode, res.Header.Get("Location")
+}
+
+// follow requests the loopback redirect of an approval, as the browser does.
+func follow(_ int, location string) error {
+	next, err := http.Get(location)
+	if err != nil {
+		return err
+	}
+	return next.Body.Close()
+}
+
+func TestBrowserLogin(t *testing.T) {
+	keyring.MockInit()
 	h := newHarness(t)
 	h.mustRun("set", "--path", "/app", "A=1")
 	h.mustRun("set", "--path", "/other", "B=2")
+	h.envURL, h.envToken = "", ""
 
-	secret := strings.TrimSpace(h.mustRun("tokens", "create", "--name", "ci", "--path", "/app", "--read-only"))
-	if !strings.HasPrefix(secret, tokens.Prefix) {
-		t.Fatalf("created token %q", secret)
+	h.browser = func(authURL string) error {
+		u, err := url.Parse(authURL)
+		if err != nil {
+			return err
+		}
+		form := u.Query()
+		if !strings.HasPrefix(form.Get("name"), "cli") {
+			t.Errorf("suggested name %q", form.Get("name"))
+		}
+		form.Set("name", "laptop")
+		form.Set("path", "/app")
+		form.Set("read-only", "on")
+		form.Set("expires", "7d")
+		form.Set("confirm", "yes")
+		return follow(approve(t, h, form))
 	}
-	out := h.mustRun("tokens")
-	if !strings.Contains(out, "NAME") || !strings.Contains(out, "ci    /app  read-only") {
-		t.Fatalf("tokens list: %q", out)
+	out := h.mustRun("servers", "login", "--server", h.url)
+	if !strings.HasPrefix(out, "Logged in to "+h.url+" as integration laptop (/app, read-only, expires ") {
+		t.Fatalf("login output %q", out)
 	}
-
-	scoped := h.withToken(secret)
-	if got := scoped.mustRun("get", "--path", "/app", "A"); got != "1\n" {
-		t.Fatalf("scoped get: %q", got)
+	if got := h.mustRun("get", "--path", "/app", "A"); got != "1\n" {
+		t.Fatalf("get with login token: %q", got)
 	}
-	if got := scoped.mustRun("list"); got != "/app\n" {
+	if got := h.mustRun("list"); got != "/app\n" {
 		t.Fatalf("scoped list: %q", got)
 	}
-	if code := scoped.run("get", "--path", "/other"); code != 1 {
-		t.Fatalf("scoped get outside path: exit %d", code)
-	}
-	if code := scoped.run("set", "--path", "/app", "A=2"); code != 1 {
+	if code := h.run("set", "--path", "/app", "A=2"); code != 1 {
 		t.Fatalf("read-only set: exit %d", code)
 	}
 
-	h.mustRun("tokens", "revoke", "ci")
-	if code := scoped.run("list"); code != 1 {
-		t.Fatalf("revoked token: exit %d", code)
+	h.browser = func(authURL string) error {
+		u, _ := url.Parse(authURL)
+		form := u.Query()
+		form.Set("decision", "deny")
+		return follow(approve(t, h, form))
 	}
-	for _, args := range [][]string{
-		{"tokens", "create", "--name", "x"},
-		{"tokens", "revoke"},
-		{"tokens", "list", "extra"},
-		{"tokens", "bogus"},
-	} {
-		if code := h.run(args...); code != 2 {
-			t.Errorf("%v: exit %d, want 2", args, code)
-		}
+	if code := h.run("servers", "login", "--server", h.url); code != 1 || !strings.Contains(h.stderr.String(), "login denied") {
+		t.Fatalf("denied login: exit %d, stderr %q", code, h.stderr.String())
+	}
+}
+
+func TestDeviceLogin(t *testing.T) {
+	keyring.MockInit()
+	h := newHarness(t)
+	r, w := io.Pipe()
+	c := &CLI{
+		Stdin:     strings.NewReader(""),
+		Stdout:    io.Discard,
+		Stderr:    w,
+		Getenv:    func(string) string { return "" },
+		Environ:   os.Environ,
+		ConfigDir: h.dir,
+	}
+	done := make(chan int, 1)
+	go func() {
+		done <- c.Run(context.Background(), []string{"servers", "login", "--server", h.url, "--device"})
+		w.Close()
+	}()
+
+	line, err := bufio.NewReader(r).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _, _ = io.Copy(io.Discard, r) }()
+	fields := strings.Fields(line)
+	u, err := url.Parse(fields[1])
+	if err != nil || !strings.HasPrefix(fields[1], h.url+"/authorize?user_code=") {
+		t.Fatalf("device prompt %q", line)
+	}
+	userCode := u.Query().Get("user_code")
+	if !strings.Contains(line, "code "+userCode) {
+		t.Fatalf("device prompt without user code: %q", line)
+	}
+	if status, _ := approve(t, h, url.Values{"user_code": {userCode}, "confirm": {"yes"}, "name": {"box"}, "path": {"/"}, "expires": {"never"}}); status != http.StatusOK {
+		t.Fatalf("approve: %d", status)
+	}
+	if code := <-done; code != 0 {
+		t.Fatalf("device login: exit %d", code)
+	}
+	if stored, err := keyring.Get(keyringService, h.url); err != nil || !strings.HasPrefix(stored, tokens.Prefix) {
+		t.Fatalf("stored token %q, %v", stored, err)
 	}
 }

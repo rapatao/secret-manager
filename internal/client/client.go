@@ -35,7 +35,8 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("server returned %d: %s", e.Status, e.Message)
 }
 
-// New returns a Client for the server at baseURL using the admin token.
+// New returns a Client for the server at baseURL using token, which may be
+// empty for the login calls.
 func New(baseURL, token string) *Client {
 	return &Client{
 		baseURL: strings.TrimSuffix(baseURL, "/"),
@@ -166,33 +167,79 @@ func (c *Client) Restore(ctx context.Context, backup json.RawMessage) (int, erro
 	return out.Paths, err
 }
 
-// Token is a scoped access token. Token is only set by CreateToken.
-type Token struct {
+// Login is the integration token issued for an approved CLI login.
+type Login struct {
 	Name     string    `json:"name"`
 	Path     string    `json:"path"`
 	ReadOnly bool      `json:"readOnly"`
-	Created  time.Time `json:"created"`
-	Token    string    `json:"token,omitempty"`
+	Expires  time.Time `json:"expires"`
+	Token    string    `json:"token"`
 }
 
-// Tokens lists the scoped tokens.
-func (c *Client) Tokens(ctx context.Context) ([]Token, error) {
-	var out struct{ Tokens []Token }
-	err := c.do(ctx, http.MethodGet, "/api/v1/tokens", nil, nil, &out)
-	return out.Tokens, err
+// Device is a device login waiting for approval of UserCode in the Web UI.
+type Device struct {
+	DeviceCode string `json:"deviceCode"`
+	UserCode   string `json:"userCode"`
+	// VerificationURI is the absolute URL of the approval page.
+	VerificationURI string `json:"verificationUri"`
+	ExpiresIn       int    `json:"expiresIn"`
+	Interval        int    `json:"interval"`
 }
 
-// CreateToken creates a token for the paths under path and returns it with
-// its value, which the server does not keep.
-func (c *Client) CreateToken(ctx context.Context, name, path string, readOnly bool) (Token, error) {
-	var out Token
-	err := c.do(ctx, http.MethodPost, "/api/v1/tokens", nil, Token{Name: name, Path: path, ReadOnly: readOnly}, &out)
-	return out, err
+// ErrPending is returned by PollDevice until the login is approved.
+var ErrPending = errors.New("login not approved yet")
+
+// ErrNoBrowserLogin is returned by the login calls when the server predates
+// browser logins.
+var ErrNoBrowserLogin = errors.New("server does not support browser login; upgrade it or log in with --token-stdin")
+
+// URL returns the server URL.
+func (c *Client) URL() string { return c.baseURL }
+
+func loginError(err error) error {
+	var apiErr *Error
+	if errors.As(err, &apiErr) && (apiErr.Status == http.StatusNotFound || apiErr.Status == http.StatusMethodNotAllowed) {
+		return ErrNoBrowserLogin
+	}
+	return err
 }
 
-// RevokeToken deletes the token named name.
-func (c *Client) RevokeToken(ctx context.Context, name string) error {
-	return c.do(ctx, http.MethodDelete, "/api/v1/tokens/"+url.PathEscape(name), nil, nil, nil)
+// CheckBrowserLogin returns ErrNoBrowserLogin when the server cannot issue
+// tokens through the browser.
+func (c *Client) CheckBrowserLogin(ctx context.Context) error {
+	err := c.do(ctx, http.MethodPost, "/api/v1/authorize/token", nil, struct{}{}, nil)
+	if apiErr := (*Error)(nil); errors.As(err, &apiErr) && apiErr.Status == http.StatusBadRequest {
+		return nil
+	}
+	return loginError(err)
+}
+
+// ExchangeCode returns the token of a loopback login approved with code,
+// proving the login was started here with the PKCE verifier.
+func (c *Client) ExchangeCode(ctx context.Context, code, verifier string) (Login, error) {
+	var out Login
+	err := c.do(ctx, http.MethodPost, "/api/v1/authorize/token", nil, map[string]string{"code": code, "codeVerifier": verifier}, &out)
+	return out, loginError(err)
+}
+
+// StartDevice starts a device login suggesting name for the integration.
+func (c *Client) StartDevice(ctx context.Context, name string) (Device, error) {
+	var out Device
+	if err := c.do(ctx, http.MethodPost, "/api/v1/authorize/device", nil, map[string]string{"name": name}, &out); err != nil {
+		return Device{}, loginError(err)
+	}
+	out.VerificationURI = c.baseURL + out.VerificationURI
+	return out, nil
+}
+
+// PollDevice returns the token of an approved device login, or ErrPending.
+func (c *Client) PollDevice(ctx context.Context, d Device) (Login, error) {
+	var out Login
+	err := c.do(ctx, http.MethodPost, "/api/v1/authorize/token", nil, map[string]string{"deviceCode": d.DeviceCode}, &out)
+	if apiErr := (*Error)(nil); errors.As(err, &apiErr) && apiErr.Message == "authorization_pending" {
+		return Login{}, ErrPending
+	}
+	return out, loginError(err)
 }
 
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, in, out any) error {
@@ -212,7 +259,9 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

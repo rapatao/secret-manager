@@ -5,6 +5,7 @@
 <h1>secret-manager</h1>
 <div class="card"><div class="body">
 <form class="stack" method="post" action="/login">
+{{with .Next}}<input type="hidden" name="next" value="{{.}}">{{end}}
 <label>Admin token <input type="password" name="token" autocomplete="current-password" required autofocus></label>
 <button type="submit" class="primary">Sign in</button>
 </form>

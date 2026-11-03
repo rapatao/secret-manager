@@ -37,7 +37,7 @@ const BackupFormat = 1
 // GET /api/v1/info. Clients check them before using a feature added after
 // the first release. A shipped capability never changes meaning and is never
 // removed; changed behavior gets a new name.
-var Capabilities = []string{"backup", "history", "paths", "secrets", "tokens"}
+var Capabilities = []string{"backup", "history", "integrations", "paths", "secrets"}
 
 // Server serves the API under /api/v1 and the Web UI under /.
 type Server struct {
@@ -48,12 +48,13 @@ type Server struct {
 	tokens   *tokens.Store
 	token    []byte
 	sessions *sessions
+	grants   *grants
 	mux      *http.ServeMux
 	log      *slog.Logger
 }
 
-// New returns a Server authenticating with the admin token and with the
-// scoped tokens in tks.
+// New returns a Server whose Web UI signs in with the admin token and whose
+// API authenticates with the integration tokens in tks.
 func New(svc *secrets.Service, tks *tokens.Store, token string) (*Server, error) {
 	if len(token) < MinTokenLength {
 		return nil, errors.New("admin token must have at least 32 characters")
@@ -63,6 +64,7 @@ func New(svc *secrets.Service, tks *tokens.Store, token string) (*Server, error)
 		tokens:   tks,
 		token:    []byte(token),
 		sessions: newSessions([]byte(token), 12*time.Hour),
+		grants:   newGrants(5 * time.Minute),
 		mux:      http.NewServeMux(),
 		log:      slog.Default(),
 	}
@@ -86,14 +88,13 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /api/v1/secrets", s.bearer(readPath, s.apiGet))
 	s.mux.Handle("PUT /api/v1/secrets", s.bearer(writePath, s.apiSet))
 	s.mux.Handle("DELETE /api/v1/secrets/{key}", s.bearer(writePath, s.apiDeleteKey))
-	s.mux.Handle("GET /api/v1/backup", s.bearer(adminOnly, s.apiBackup))
-	s.mux.Handle("POST /api/v1/restore", s.bearer(adminOnly, s.apiRestore))
+	s.mux.Handle("GET /api/v1/backup", s.bearer(readAll, s.apiBackup))
+	s.mux.Handle("POST /api/v1/restore", s.bearer(writeAll, s.apiRestore))
 	s.mux.Handle("GET /api/v1/history", s.bearer(readPath, s.apiHistory))
 	s.mux.Handle("GET /api/v1/history/{version}", s.bearer(readPath, s.apiVersion))
 	s.mux.Handle("POST /api/v1/history/{version}/rollback", s.bearer(writePath, s.apiRollback))
-	s.mux.Handle("GET /api/v1/tokens", s.bearer(adminOnly, s.apiListTokens))
-	s.mux.Handle("POST /api/v1/tokens", s.bearer(adminOnly, s.apiCreateToken))
-	s.mux.Handle("DELETE /api/v1/tokens/{name}", s.bearer(adminOnly, s.apiRevokeToken))
+	s.mux.HandleFunc("POST /api/v1/authorize/device", s.apiAuthorizeDevice)
+	s.mux.HandleFunc("POST /api/v1/authorize/token", s.apiAuthorizeToken)
 
 	s.mux.Handle("GET /ui.js", s.ui(s.uiScript))
 	s.mux.Handle("GET /login", s.ui(s.uiLoginForm))
@@ -105,6 +106,12 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /path/delete", s.ui(s.session(s.uiDeletePath)))
 	s.mux.Handle("POST /key", s.ui(s.session(s.uiSetKey)))
 	s.mux.Handle("POST /path/rollback", s.ui(s.session(s.uiRollback)))
+	s.mux.Handle("GET /integrations", s.ui(s.session(s.uiIntegrations)))
+	s.mux.Handle("POST /integrations", s.ui(s.session(s.uiCreateIntegration)))
+	s.mux.Handle("POST /integrations/update", s.ui(s.session(s.uiUpdateIntegration)))
+	s.mux.Handle("POST /integrations/revoke", s.ui(s.session(s.uiRevokeIntegration)))
+	s.mux.Handle("GET /authorize", s.ui(s.session(s.uiAuthorizeForm)))
+	s.mux.Handle("POST /authorize", s.ui(s.session(s.uiAuthorize)))
 }
 
 // readyz reports whether the storage backend can be read.
@@ -124,20 +131,21 @@ func (s *Server) validToken(got string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), s.token) == 1
 }
 
-// need is the access a route requires from a scoped token. The admin token
-// passes every check.
+// need is the access a route requires from a token.
 type need int
 
 const (
 	anyToken need = iota
 	readPath
 	writePath
-	adminOnly
+	// readAll and writeAll need a token for the path /.
+	readAll
+	writeAll
 )
 
 type tokenKey struct{}
 
-// scopedToken returns the scoped token that authenticated r, if any.
+// scopedToken returns the token that authenticated r, if any.
 func scopedToken(r *http.Request) (tokens.Token, bool) {
 	t, ok := r.Context().Value(tokenKey{}).(tokens.Token)
 	return t, ok
@@ -146,14 +154,16 @@ func scopedToken(r *http.Request) (tokens.Token, bool) {
 func (s *Server) bearer(n need, next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if ok && s.validToken(got) {
-			next(w, r)
-			return
-		}
 		var t tokens.Token
 		if ok {
 			var err error
-			if t, ok, err = s.tokens.Lookup(r.Context(), got); err != nil {
+			t, ok, err = s.tokens.Lookup(r.Context(), got)
+			if errors.Is(err, tokens.ErrExpired) {
+				s.audit(r, "api", "auth", "", nil, err)
+				writeError(w, http.StatusUnauthorized, err.Error())
+				return
+			}
+			if err != nil {
 				s.serviceError(w, r, err)
 				return
 			}
@@ -174,15 +184,17 @@ func (s *Server) bearer(n need, next http.HandlerFunc) http.Handler {
 }
 
 func allowed(t tokens.Token, n need, path string) error {
-	switch n {
-	case anyToken:
+	if n == anyToken {
 		return nil
-	case adminOnly:
-		return fmt.Errorf("token %s cannot do this; it needs the admin token", t.Name)
-	case writePath:
-		if t.ReadOnly {
-			return fmt.Errorf("token %s is read-only", t.Name)
-		}
+	}
+	if (n == writePath || n == writeAll) && t.ReadOnly {
+		return fmt.Errorf("token %s is read-only", t.Name)
+	}
+	if t.Path == "/" {
+		return nil
+	}
+	if n == readAll || n == writeAll {
+		path = "/"
 	}
 	if p, err := secrets.NormalizePath(path); err != nil || !storage.Under(p, t.Path) {
 		return fmt.Errorf("token %s is limited to %s", t.Name, t.Path)
@@ -381,53 +393,6 @@ func parseVersion(v string) (int, error) {
 		return 0, fmt.Errorf("%w: version %q must be a positive integer", secrets.ErrInvalid, v)
 	}
 	return n, nil
-}
-
-type tokenJSON struct {
-	Name     string    `json:"name"`
-	Path     string    `json:"path"`
-	ReadOnly bool      `json:"readOnly"`
-	Created  time.Time `json:"created"`
-	Token    string    `json:"token,omitempty"`
-}
-
-func (s *Server) apiListTokens(w http.ResponseWriter, r *http.Request) {
-	list, err := s.tokens.List(r.Context())
-	if err != nil {
-		s.serviceError(w, r, err)
-		return
-	}
-	out := []tokenJSON{}
-	for _, t := range list {
-		out = append(out, tokenJSON{Name: t.Name, Path: t.Path, ReadOnly: t.ReadOnly, Created: t.Created})
-	}
-	writeJSON(w, http.StatusOK, map[string][]tokenJSON{"tokens": out})
-}
-
-func (s *Server) apiCreateToken(w http.ResponseWriter, r *http.Request) {
-	var in tokenJSON
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&in); err != nil {
-		writeError(w, http.StatusBadRequest, `body must be {"name": ..., "path": ..., "readOnly": ...}`)
-		return
-	}
-	t, secret, err := s.tokens.Create(r.Context(), in.Name, in.Path, in.ReadOnly)
-	s.audit(r, "api", "create_token", in.Path, nil, err, "name", in.Name)
-	if err != nil {
-		s.serviceError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, tokenJSON{Name: t.Name, Path: t.Path, ReadOnly: t.ReadOnly, Created: t.Created, Token: secret})
-}
-
-func (s *Server) apiRevokeToken(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	err := s.tokens.Revoke(r.Context(), name)
-	s.audit(r, "api", "revoke_token", "", nil, err, "name", name)
-	if err != nil {
-		s.serviceError(w, r, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 var errInvalidToken = errors.New("invalid token")

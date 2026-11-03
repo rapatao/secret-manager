@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,6 +13,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -21,11 +24,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/rapatao/secret-manager/internal/secrets"
+	"github.com/rapatao/secret-manager/internal/storage"
 	k8sstorage "github.com/rapatao/secret-manager/internal/storage/kubernetes"
 	"github.com/rapatao/secret-manager/internal/tokens"
 )
 
 const token = "0123456789abcdef0123456789abcdef"
+
+// apiToken is a read-write integration token for /, stored by newLoggedServer.
+const apiToken = "smt_testfullaccess"
 
 type syncBuffer struct {
 	mu  sync.Mutex
@@ -54,6 +61,10 @@ func newLoggedServer(t *testing.T) (*httptest.Server, *syncBuffer) {
 	backend := k8sstorage.New(fake.NewClientBuilder().Build(), "sm")
 	svc := secrets.New(backend, nil)
 	svc.KeepVersions = 10
+	sum := sha256.Sum256([]byte(apiToken))
+	if err := backend.PutTokens(context.Background(), []storage.Token{{Name: "full", Hash: hex.EncodeToString(sum[:]), Path: "/"}}); err != nil {
+		t.Fatal(err)
+	}
 	s, err := New(svc, tokens.New(backend), token)
 	if err != nil {
 		t.Fatal(err)
@@ -105,20 +116,20 @@ func TestAPIAuth(t *testing.T) {
 func TestAPIRoundTrip(t *testing.T) {
 	ts := newTestServer(t)
 
-	if code, body := do(t, ts, "PUT", "/api/v1/secrets?path=/app", token, `{"A":"1","B":"2"}`); code != http.StatusNoContent {
+	if code, body := do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"A":"1","B":"2"}`); code != http.StatusNoContent {
 		t.Fatalf("set: %d %s", code, body)
 	}
-	if code, _ := do(t, ts, "PUT", "/api/v1/secrets?path=/app/db", token, `{"B":"db"}`); code != http.StatusNoContent {
+	if code, _ := do(t, ts, "PUT", "/api/v1/secrets?path=/app/db", apiToken, `{"B":"db"}`); code != http.StatusNoContent {
 		t.Fatalf("set nested: %d", code)
 	}
 
-	code, body := do(t, ts, "GET", "/api/v1/paths", token, "")
+	code, body := do(t, ts, "GET", "/api/v1/paths", apiToken, "")
 	if code != http.StatusOK || strings.TrimSpace(body) != `{"paths":["/app","/app/db"]}` {
 		t.Fatalf("paths: %d %s", code, body)
 	}
 
 	var got struct{ Data map[string]string }
-	_, body = do(t, ts, "GET", "/api/v1/secrets?path=/app&recursive=true", token, "")
+	_, body = do(t, ts, "GET", "/api/v1/secrets?path=/app&recursive=true", apiToken, "")
 	if err := json.Unmarshal([]byte(body), &got); err != nil {
 		t.Fatal(err)
 	}
@@ -126,27 +137,27 @@ func TestAPIRoundTrip(t *testing.T) {
 		t.Fatalf("recursive get: %s", body)
 	}
 
-	if code, _ := do(t, ts, "DELETE", "/api/v1/secrets/A?path=/app", token, ""); code != http.StatusNoContent {
+	if code, _ := do(t, ts, "DELETE", "/api/v1/secrets/A?path=/app", apiToken, ""); code != http.StatusNoContent {
 		t.Fatalf("delete key: %d", code)
 	}
-	_, body = do(t, ts, "GET", "/api/v1/secrets?path=/app", token, "")
+	_, body = do(t, ts, "GET", "/api/v1/secrets?path=/app", apiToken, "")
 	if strings.TrimSpace(body) != `{"data":{"B":"2"}}` {
 		t.Fatalf("after delete key: %s", body)
 	}
 
-	if code, _ := do(t, ts, "DELETE", "/api/v1/paths?path=/app", token, ""); code != http.StatusNoContent {
+	if code, _ := do(t, ts, "DELETE", "/api/v1/paths?path=/app", apiToken, ""); code != http.StatusNoContent {
 		t.Fatalf("delete path: %d", code)
 	}
-	if code, _ := do(t, ts, "GET", "/api/v1/secrets?path=/app", token, ""); code != http.StatusNotFound {
+	if code, _ := do(t, ts, "GET", "/api/v1/secrets?path=/app", apiToken, ""); code != http.StatusNotFound {
 		t.Fatalf("get deleted path: %d", code)
 	}
 }
 
 func TestAPIHistory(t *testing.T) {
 	ts := newTestServer(t)
-	do(t, ts, "PUT", "/api/v1/secrets?path=/app", token, `{"A":"1"}`)
-	do(t, ts, "PUT", "/api/v1/secrets?path=/app", token, `{"A":"2","B":"x"}`)
-	do(t, ts, "DELETE", "/api/v1/paths?path=/app", token, "")
+	do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"A":"1"}`)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"A":"2","B":"x"}`)
+	do(t, ts, "DELETE", "/api/v1/paths?path=/app", apiToken, "")
 
 	var list struct {
 		Versions []struct {
@@ -155,7 +166,7 @@ func TestAPIHistory(t *testing.T) {
 			Data    map[string]string
 		}
 	}
-	code, body := do(t, ts, "GET", "/api/v1/history?path=/app", token, "")
+	code, body := do(t, ts, "GET", "/api/v1/history?path=/app", apiToken, "")
 	if err := json.Unmarshal([]byte(body), &list); code != http.StatusOK || err != nil {
 		t.Fatalf("history: %d %s", code, body)
 	}
@@ -163,15 +174,15 @@ func TestAPIHistory(t *testing.T) {
 		t.Fatalf("history must list keys without values: %s", body)
 	}
 
-	code, body = do(t, ts, "GET", "/api/v1/history/1?path=/app", token, "")
+	code, body = do(t, ts, "GET", "/api/v1/history/1?path=/app", apiToken, "")
 	if code != http.StatusOK || !strings.Contains(body, `"data":{"A":"1"}`) {
 		t.Fatalf("version: %d %s", code, body)
 	}
 
-	if code, body := do(t, ts, "POST", "/api/v1/history/1/rollback?path=/app", token, ""); code != http.StatusNoContent {
+	if code, body := do(t, ts, "POST", "/api/v1/history/1/rollback?path=/app", apiToken, ""); code != http.StatusNoContent {
 		t.Fatalf("rollback: %d %s", code, body)
 	}
-	_, body = do(t, ts, "GET", "/api/v1/secrets?path=/app", token, "")
+	_, body = do(t, ts, "GET", "/api/v1/secrets?path=/app", apiToken, "")
 	if strings.TrimSpace(body) != `{"data":{"A":"1"}}` {
 		t.Fatalf("after rollback: %s", body)
 	}
@@ -183,7 +194,7 @@ func TestAPIHistory(t *testing.T) {
 		"/api/v1/history?path=bad":      http.StatusBadRequest,
 		"/api/v1/history/1?path=/other": http.StatusNotFound,
 	} {
-		if code, body := do(t, ts, "GET", path, token, ""); code != want {
+		if code, body := do(t, ts, "GET", path, apiToken, ""); code != want {
 			t.Errorf("GET %s: %d %s, want %d", path, code, body, want)
 		}
 	}
@@ -202,7 +213,7 @@ func TestAPIErrors(t *testing.T) {
 		{"GET", "/api/v1/secrets?path=/missing", ``, http.StatusNotFound},
 	}
 	for _, tc := range cases {
-		if code, body := do(t, ts, tc.method, tc.path, token, tc.body); code != tc.want {
+		if code, body := do(t, ts, tc.method, tc.path, apiToken, tc.body); code != tc.want {
 			t.Errorf("%s %s %s: %d %s, want %d", tc.method, tc.path, tc.body, code, body, tc.want)
 		}
 	}
@@ -281,7 +292,7 @@ func TestUIFlow(t *testing.T) {
 	}
 	postForm(t, c, ts, "/path", url.Values{"path": {"/other"}, "confirm": {"yes"}}, origin)
 	_, body := get(t, c, ts.URL+"/")
-	if !strings.Contains(body, `<span class="muted mono">v9.9.9-test</span>`) {
+	if !strings.Contains(body, `Secret-Manager</a><span class="muted mono">(v9.9.9-test)</span>`) || !strings.Contains(body, `href="/integrations">Integrations</a>`) {
 		t.Fatalf("header missing server version:\n%s", body)
 	}
 	if !strings.Contains(body, `<tr data-path="/app">`) || !strings.Contains(body, `<tr data-path="/other">`) || strings.Contains(body, ">Search<") {
@@ -461,9 +472,9 @@ func TestUICrossOrigin(t *testing.T) {
 
 func TestAuditLog(t *testing.T) {
 	ts, logs := newLoggedServer(t)
-	do(t, ts, "PUT", "/api/v1/secrets?path=/app", token, `{"PASS":"hunter2","USER":"bob"}`)
-	do(t, ts, "DELETE", "/api/v1/secrets/USER?path=/app", token, "")
-	do(t, ts, "DELETE", "/api/v1/paths?path=/BAD", token, "")
+	do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"PASS":"hunter2","USER":"bob"}`)
+	do(t, ts, "DELETE", "/api/v1/secrets/USER?path=/app", apiToken, "")
+	do(t, ts, "DELETE", "/api/v1/paths?path=/BAD", apiToken, "")
 	do(t, ts, "GET", "/api/v1/paths", "wrong-token", "")
 	c := uiClient(t, ts)
 	postForm(t, c, ts, "/login", url.Values{"token": {"wrong"}}, ts.URL)
@@ -543,7 +554,7 @@ func TestReadyz(t *testing.T) {
 func TestFailureLogHasRequestContext(t *testing.T) {
 	s, logs := brokenServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/secrets?path=/app", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Authorization", "Bearer "+apiToken)
 	if code := serve(s, req); code != http.StatusInternalServerError {
 		t.Fatalf("code %d", code)
 	}
@@ -562,23 +573,23 @@ func TestAPIInfo(t *testing.T) {
 	if code, _ := do(t, ts, "GET", "/api/v1/info", "", ""); code != http.StatusUnauthorized {
 		t.Fatalf("info without token: %d", code)
 	}
-	code, body := do(t, ts, "GET", "/api/v1/info", token, "")
-	if code != http.StatusOK || strings.TrimSpace(body) != `{"capabilities":["backup","history","paths","secrets","tokens"],"version":"v9.9.9-test"}` {
+	code, body := do(t, ts, "GET", "/api/v1/info", apiToken, "")
+	if code != http.StatusOK || strings.TrimSpace(body) != `{"capabilities":["backup","history","integrations","paths","secrets"],"version":"v9.9.9-test"}` {
 		t.Fatalf("info: %d %s", code, body)
 	}
 }
 
 func TestAPIBackupRestore(t *testing.T) {
 	src, logs := newLoggedServer(t)
-	do(t, src, "PUT", "/api/v1/secrets?path=/app", token, `{"A":"1"}`)
-	do(t, src, "PUT", "/api/v1/secrets?path=/app", token, `{"A":"2"}`)
+	do(t, src, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"A":"1"}`)
+	do(t, src, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"A":"2"}`)
 
-	code, plain := do(t, src, "GET", "/api/v1/backup", token, "")
+	code, plain := do(t, src, "GET", "/api/v1/backup", apiToken, "")
 	if code != http.StatusOK || !strings.Contains(plain, `"format":1`) ||
 		!strings.Contains(plain, `"paths":[{"path":"/app","data":{"A":"2"}}]`) {
 		t.Fatalf("backup: %d %s", code, plain)
 	}
-	_, full := do(t, src, "GET", "/api/v1/backup?history=true", token, "")
+	_, full := do(t, src, "GET", "/api/v1/backup?history=true", apiToken, "")
 	if strings.Count(full, `{"version":`) != 2 {
 		t.Fatalf("backup with history: %s", full)
 	}
@@ -587,18 +598,18 @@ func TestAPIBackupRestore(t *testing.T) {
 	}
 
 	dst := newTestServer(t)
-	if code, body := do(t, dst, "POST", "/api/v1/restore", token, full); code != http.StatusOK || strings.TrimSpace(body) != `{"paths":1}` {
+	if code, body := do(t, dst, "POST", "/api/v1/restore", apiToken, full); code != http.StatusOK || strings.TrimSpace(body) != `{"paths":1}` {
 		t.Fatalf("restore: %d %s", code, body)
 	}
-	if _, body := do(t, dst, "GET", "/api/v1/secrets?path=/app", token, ""); strings.TrimSpace(body) != `{"data":{"A":"2"}}` {
+	if _, body := do(t, dst, "GET", "/api/v1/secrets?path=/app", apiToken, ""); strings.TrimSpace(body) != `{"data":{"A":"2"}}` {
 		t.Fatalf("restored data: %s", body)
 	}
-	if _, body := do(t, dst, "GET", "/api/v1/history?path=/app", token, ""); strings.Count(body, `"version":`) != 2 {
+	if _, body := do(t, dst, "GET", "/api/v1/history?path=/app", apiToken, ""); strings.Count(body, `"version":`) != 2 {
 		t.Fatalf("restored history: %s", body)
 	}
 
 	for _, body := range []string{`nope`, `{"format":2,"paths":[]}`, `{"format":1,"paths":[{"path":"bad"}]}`} {
-		if code, _ := do(t, dst, "POST", "/api/v1/restore", token, body); code != http.StatusBadRequest {
+		if code, _ := do(t, dst, "POST", "/api/v1/restore", apiToken, body); code != http.StatusBadRequest {
 			t.Errorf("restore %s: status %d", body, code)
 		}
 	}
@@ -621,25 +632,35 @@ func TestSessionSurvivesRestart(t *testing.T) {
 	}
 }
 
-func createToken(t *testing.T, ts *httptest.Server, body string) string {
+var newTokenRe = regexp.MustCompile(`id="new-token" class="mono" value="([^"]+)"`)
+
+// createToken creates an integration in the Web UI and returns its token.
+func createToken(t *testing.T, ts *httptest.Server, form url.Values) string {
 	t.Helper()
-	code, out := do(t, ts, "POST", "/api/v1/tokens", token, body)
-	var created struct{ Token string }
-	if err := json.Unmarshal([]byte(out), &created); code != http.StatusCreated || err != nil || created.Token == "" {
-		t.Fatalf("create token %s: %d %s", body, code, out)
+	c := uiClient(t, ts)
+	postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL)
+	if form.Get("expires") == "" {
+		form.Set("expires", "never")
 	}
-	return created.Token
+	form.Set("confirm", "yes")
+	code, body := postForm(t, c, ts, "/integrations", form, ts.URL)
+	m := newTokenRe.FindStringSubmatch(body)
+	if code != http.StatusCreated || m == nil {
+		t.Fatalf("create integration %v: %d\n%s", form, code, body)
+	}
+	return m[1]
 }
 
 func TestScopedTokens(t *testing.T) {
 	ts, logs := newLoggedServer(t)
-	do(t, ts, "PUT", "/api/v1/secrets?path=/app", token, `{"A":"1"}`)
-	do(t, ts, "PUT", "/api/v1/secrets?path=/app/db", token, `{"B":"2"}`)
-	do(t, ts, "PUT", "/api/v1/secrets?path=/apple", token, `{"C":"3"}`)
-	do(t, ts, "PUT", "/api/v1/secrets?path=/other", token, `{"D":"4"}`)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"A":"1"}`)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/app/db", apiToken, `{"B":"2"}`)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/apple", apiToken, `{"C":"3"}`)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/other", apiToken, `{"D":"4"}`)
 
-	ro := createToken(t, ts, `{"name":"ci","path":"/app","readOnly":true}`)
-	rw := createToken(t, ts, `{"name":"dev","path":"/app/db"}`)
+	ro := createToken(t, ts, url.Values{"name": {"ci"}, "path": {"/app"}, "read-only": {"on"}})
+	rw := createToken(t, ts, url.Values{"name": {"dev"}, "path": {"/app/db"}})
+	rootRO := createToken(t, ts, url.Values{"name": {"root-ro"}, "path": {"/"}, "read-only": {"on"}})
 
 	cases := []struct {
 		auth, method, path, body string
@@ -658,13 +679,14 @@ func TestScopedTokens(t *testing.T) {
 		{ro, "DELETE", "/api/v1/paths?path=/app", "", http.StatusForbidden},
 		{ro, "POST", "/api/v1/history/1/rollback?path=/app", "", http.StatusForbidden},
 		{ro, "GET", "/api/v1/backup", "", http.StatusForbidden},
-		{ro, "GET", "/api/v1/tokens", "", http.StatusForbidden},
 		{rw, "PUT", "/api/v1/secrets?path=/app/db", `{"B":"x"}`, http.StatusNoContent},
 		{rw, "PUT", "/api/v1/secrets?path=/app/db/new", `{"E":"5"}`, http.StatusNoContent},
 		{rw, "DELETE", "/api/v1/secrets/E?path=/app/db/new", "", http.StatusNoContent},
 		{rw, "PUT", "/api/v1/secrets?path=/app", `{"A":"x"}`, http.StatusForbidden},
 		{rw, "POST", "/api/v1/restore", `{"format":1,"paths":[]}`, http.StatusForbidden},
-		{rw, "POST", "/api/v1/tokens", `{"name":"x","path":"/"}`, http.StatusForbidden},
+		{rootRO, "GET", "/api/v1/backup", "", http.StatusOK},
+		{rootRO, "POST", "/api/v1/restore", `{"format":1,"paths":[]}`, http.StatusForbidden},
+		{token, "GET", "/api/v1/info", "", http.StatusUnauthorized},
 		{"smt_unknown", "GET", "/api/v1/info", "", http.StatusUnauthorized},
 	}
 	for _, tc := range cases {
@@ -680,26 +702,71 @@ func TestScopedTokens(t *testing.T) {
 		t.Fatalf("scoped write not audited with token name: %s", logs)
 	}
 
-	_, body := do(t, ts, "GET", "/api/v1/tokens", token, "")
-	if strings.Contains(body, "hash") || strings.Contains(body, ro) || !strings.Contains(body, `"name":"ci","path":"/app","readOnly":true`) {
-		t.Fatalf("token list: %s", body)
+	c := uiClient(t, ts)
+	postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL)
+	_, body := get(t, c, ts.URL+"/integrations")
+	if strings.Contains(body, ro) || !strings.Contains(body, "<code>ci</code>") || !strings.Contains(body, "read-only") {
+		t.Fatalf("integration list:\n%s", body)
 	}
-	if code, _ := do(t, ts, "POST", "/api/v1/tokens", token, `{"name":"ci","path":"/x"}`); code != http.StatusBadRequest {
-		t.Fatalf("duplicate token: %d", code)
+	if _, body := postForm(t, c, ts, "/integrations", url.Values{"name": {"ci"}, "path": {"/x"}, "expires": {"never"}, "confirm": {"yes"}}, ts.URL); !strings.Contains(body, "already exists") {
+		t.Fatalf("duplicate integration:\n%s", body)
 	}
-	if code, _ := do(t, ts, "DELETE", "/api/v1/tokens/ci", token, ""); code != http.StatusNoContent {
+	edit := url.Values{"name": {"ci"}, "path": {"/other"}, "expires": {"keep"}}
+	if _, body := postForm(t, c, ts, "/integrations/update", edit, ts.URL); !strings.Contains(body, "confirm the action first") {
+		t.Fatalf("updated without confirmation:\n%s", body)
+	}
+	edit.Set("confirm", "yes")
+	if code, body := postForm(t, c, ts, "/integrations/update", edit, ts.URL); code != http.StatusOK || strings.Contains(body, `class="error"`) {
+		t.Fatalf("update: %d\n%s", code, body)
+	}
+	for _, tc := range []struct {
+		path string
+		want int
+	}{{"/other", http.StatusOK}, {"/app", http.StatusForbidden}} {
+		if code, _ := do(t, ts, "GET", "/api/v1/secrets?path="+tc.path, ro, ""); code != tc.want {
+			t.Errorf("updated token on %s: %d, want %d", tc.path, code, tc.want)
+		}
+	}
+	if code, _ := do(t, ts, "PUT", "/api/v1/secrets?path=/other", ro, `{"D":"5"}`); code != http.StatusNoContent {
+		t.Errorf("updated token without read-only: %d", code)
+	}
+	if _, body := postForm(t, c, ts, "/integrations", url.Values{"name": {"k"}, "path": {"/"}, "expires": {"keep"}, "confirm": {"yes"}}, ts.URL); !strings.Contains(body, "pick an expiry") {
+		t.Fatalf("create accepted keep:\n%s", body)
+	}
+	if _, body := postForm(t, c, ts, "/integrations/update", url.Values{"name": {"nope"}, "path": {"/"}, "expires": {"keep"}, "confirm": {"yes"}}, ts.URL); !strings.Contains(body, "not found") {
+		t.Fatalf("update of missing integration:\n%s", body)
+	}
+	if _, body := postForm(t, c, ts, "/integrations/revoke", url.Values{"name": {"ci"}}, ts.URL); !strings.Contains(body, "confirm the action first") {
+		t.Fatalf("revoked without confirmation:\n%s", body)
+	}
+	if code, _ := postForm(t, c, ts, "/integrations/revoke", url.Values{"name": {"ci"}, "confirm": {"ci"}}, ts.URL); code != http.StatusOK {
 		t.Fatalf("revoke: %d", code)
 	}
 	if code, _ := do(t, ts, "GET", "/api/v1/secrets?path=/app", ro, ""); code != http.StatusUnauthorized {
 		t.Fatalf("revoked token: %d", code)
 	}
-	if code, _ := do(t, ts, "DELETE", "/api/v1/tokens/ci", token, ""); code != http.StatusNotFound {
-		t.Fatalf("revoke missing: %d", code)
+	if code, _ := postForm(t, uiClient(t, ts), ts, "/login", url.Values{"token": {rw}}, ts.URL); code != http.StatusUnauthorized {
+		t.Fatalf("integration token logged into the UI: %d", code)
 	}
-	ts2 := newTestServer(t)
-	c := uiClient(t, ts2)
-	scoped := createToken(t, ts2, `{"name":"ui","path":"/"}`)
-	if code, _ := postForm(t, c, ts2, "/login", url.Values{"token": {scoped}}, ts2.URL); code != http.StatusUnauthorized {
-		t.Fatalf("scoped token logged into the UI: %d", code)
+}
+
+func TestIntegrationExpiry(t *testing.T) {
+	ts := newTestServer(t)
+	tomorrow := time.Now().UTC().Add(24 * time.Hour).Format(time.DateOnly)
+	custom := createToken(t, ts, url.Values{"name": {"custom"}, "path": {"/"}, "expires": {"custom"}, "expires-date": {tomorrow}})
+	if code, _ := do(t, ts, "GET", "/api/v1/paths", custom, ""); code != http.StatusOK {
+		t.Fatalf("custom expiry token: %d", code)
+	}
+	c := uiClient(t, ts)
+	postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL)
+	for _, form := range []url.Values{
+		{"name": {"a"}, "expires": {"custom"}, "expires-date": {"2001-01-01"}, "confirm": {"yes"}},
+		{"name": {"b"}, "expires": {"custom"}, "confirm": {"yes"}},
+		{"name": {"c"}, "expires": {"2w"}, "confirm": {"yes"}},
+		{"name": {"d"}, "path": {"/"}, "expires": {"never"}},
+	} {
+		if code, body := postForm(t, c, ts, "/integrations", form, ts.URL); code != http.StatusOK || !strings.Contains(body, `class="error"`) {
+			t.Errorf("create %v: %d, want an error", form, code)
+		}
 	}
 }

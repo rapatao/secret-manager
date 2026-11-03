@@ -6,8 +6,8 @@ image:
 
 imagePullSecrets: []
 
-# Secret holding the admin token (at least 32 characters) used by the CLI and
-# the Web UI. Create it before installing, e.g.:
+# Secret holding the admin token (at least 32 characters) that signs in to the
+# Web UI. Create it before installing, e.g.:
 #   kubectl create secret generic secret-manager-token \
 #     --from-literal=token="$(openssl rand -base64 36)"
 auth:
@@ -43,6 +43,10 @@ logLevel: info
 # Versions kept per path, current included. Each version is a Secret in the
 # release namespace. 0 disables history.
 historyLimit: 10
+
+# Time between saves of the last use of every integration, shown in the Web
+# UI. Uses are tracked in memory and also saved on shutdown.
+lastUsedFlush: 30m
 
 # Writes a backup of every path to a PersistentVolume every interval and keeps
 # the newest files. Backups hold secret values in plain JSON.

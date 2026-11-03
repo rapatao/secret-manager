@@ -106,7 +106,8 @@ document.addEventListener("click", async (e) => {
   }
   const copy = e.target.closest("button.copy");
   if (!copy) return;
-  await navigator.clipboard.writeText(copy.closest("tr").querySelector("textarea").value);
+  const source = copy.dataset.copy ? document.getElementById(copy.dataset.copy) : copy.closest("tr").querySelector("textarea");
+  await navigator.clipboard.writeText(source.value);
   copy.textContent = "Copied";
   setTimeout(() => (copy.textContent = "Copy"), 1500);
 });
@@ -159,4 +160,132 @@ document.addEventListener("submit", (e) => {
     form.submit();
   };
   dialog.showModal();
+});
+
+const keptExpiry = (select) => select.options[0].text.replace(/^Keep current \((.*)\)$/, "$1");
+
+function grantSummary(form) {
+  const expires = form.elements.expires;
+  const label = {
+    keep: () => keptExpiry(expires),
+    custom: () => form.elements["expires-date"].value + " (end of day, UTC)",
+  }[expires.value];
+  return {
+    Path: form.elements.path.value,
+    Access: form.elements["read-only"].checked ? "read-only" : "read-write",
+    Expires: label ? label() : expires.selectedOptions[0].text,
+  };
+}
+
+function confirmIntegration(form, { title, question, button, current, onCancel }) {
+  const dialog = document.getElementById("confirm-integration");
+  dialog.querySelector(".confirm-title").textContent = title;
+  dialog.querySelector(".confirm-question").textContent = question;
+  dialog.querySelector(".confirm-button").textContent = button;
+  const table = dialog.querySelector("table");
+  table.toggleAttribute("data-create", !current);
+  const rows = table.querySelector("tbody");
+  rows.replaceChildren();
+  for (const [field, value] of Object.entries(grantSummary(form))) {
+    const row = rows.insertRow();
+    row.insertCell().textContent = field;
+    row.insertCell().className = "current";
+    if (current) {
+      row.cells[1].textContent = current[field];
+      row.classList.toggle("changed", current[field] !== value);
+    }
+    row.insertCell().textContent = value;
+  }
+  confirming = { form, onCancel };
+  dialog.showModal();
+}
+
+let confirming = null;
+
+function settleConfirm(confirmed) {
+  const pending = confirming;
+  confirming = null;
+  if (!pending) return;
+  if (!confirmed) {
+    pending.onCancel?.();
+    return;
+  }
+  pending.form.append(Object.assign(document.createElement("input"), { type: "hidden", name: "confirm", value: "yes" }));
+  pending.form.submit();
+}
+
+document.getElementById("confirm-integration")?.addEventListener("cancel", () => settleConfirm(false));
+
+function discardEdit(form) {
+  form.reset();
+  form.closest("dialog").close();
+}
+
+function editCurrent(form) {
+  return { Path: form.dataset.path, Access: form.dataset.access, Expires: keptExpiry(form.elements.expires) };
+}
+
+function editChanged(form) {
+  const current = editCurrent(form);
+  const next = grantSummary(form);
+  return Object.keys(current).some((field) => current[field] !== next[field]);
+}
+
+let discarding = null;
+
+function requestDiscard(form) {
+  if (!editChanged(form)) {
+    discardEdit(form);
+    return;
+  }
+  discarding = form;
+  const dialog = document.getElementById("discard-edit");
+  dialog.querySelector(".discard-name").textContent = form.dataset.name;
+  dialog.showModal();
+}
+
+for (const form of document.querySelectorAll("form.edit-integration")) {
+  form.closest("dialog").addEventListener("cancel", (e) => {
+    e.preventDefault();
+    requestDiscard(form);
+  });
+}
+
+document.addEventListener("submit", (e) => {
+  const form = e.target;
+  if (form.closest("#confirm-integration")) {
+    settleConfirm(e.submitter?.value === "confirm");
+    return;
+  }
+  if (form.closest("#discard-edit")) {
+    if (e.submitter?.value === "discard" && discarding) discardEdit(discarding);
+    return;
+  }
+  if (form.elements.confirm) return;
+  const cancel = e.submitter?.getAttribute("formmethod") === "dialog";
+  if (cancel && form.classList.contains("edit-integration")) {
+    e.preventDefault();
+    requestDiscard(form);
+    return;
+  }
+  if (cancel) return;
+  if (form.id === "create-integration") {
+    e.preventDefault();
+    const name = form.elements.name.value;
+    confirmIntegration(form, { title: "Create integration", question: `Create integration ${name} with this access?`, button: "Create" });
+  } else if (form.classList.contains("edit-integration")) {
+    e.preventDefault();
+    const d = form.dataset;
+    if (!editChanged(form)) {
+      discardEdit(form);
+      return;
+    }
+    confirmIntegration(form, {
+      onCancel: () => discardEdit(form),
+      title: "Save changes",
+      question: `Change the access of integration ${d.name}? Clients using its token get it on their next request.`,
+      button: "Save",
+      current: editCurrent(form),
+    });
+  }
 });

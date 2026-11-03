@@ -41,13 +41,16 @@ type Backend interface {
 }
 
 // Token is an access token limited to the paths under Path. Hash is the hex
-// SHA-256 of the token; the token itself is never stored.
+// SHA-256 of the token; the token itself is never stored. A zero Expires
+// never expires.
 type Token struct {
 	Name     string    `json:"name"`
 	Hash     string    `json:"hash"`
 	Path     string    `json:"path"`
 	ReadOnly bool      `json:"readOnly"`
 	Created  time.Time `json:"created"`
+	Expires  time.Time `json:"expires,omitzero"`
+	LastUsed time.Time `json:"lastUsed,omitzero"`
 }
 
 // Version is a snapshot of the data stored at a path.
