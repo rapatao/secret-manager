@@ -315,6 +315,41 @@ func TestUIFlow(t *testing.T) {
 	}
 }
 
+func TestUIDeletedPath(t *testing.T) {
+	ts := newTestServer(t)
+	c := uiClient(t, ts)
+	origin := ts.URL
+	postForm(t, c, ts, "/login", url.Values{"token": {token}}, origin)
+	postForm(t, c, ts, "/key", url.Values{"path": {"/gone"}, "key": {"A"}, "value": {"1"}}, origin)
+	postForm(t, c, ts, "/path", url.Values{"path": {"/kept"}}, origin)
+	if code, _ := postForm(t, c, ts, "/path/delete", url.Values{"path": {"/gone"}}, origin); code != http.StatusOK {
+		t.Fatalf("delete path: %d", code)
+	}
+
+	_, body := get(t, c, ts.URL+"/")
+	if !strings.Contains(body, "Deleted paths") || !strings.Contains(body, ">/gone<") {
+		t.Fatalf("deleted path not listed:\n%s", body)
+	}
+	_, body = get(t, c, ts.URL+"/?q=kept")
+	if strings.Contains(body, ">/gone<") {
+		t.Fatalf("search not filtering deleted paths:\n%s", body)
+	}
+
+	code, body := get(t, c, ts.URL+"/path?path=/gone")
+	if code != http.StatusOK || !strings.Contains(body, "This path was deleted") ||
+		!strings.Contains(body, `name="version" value="1"`) || strings.Contains(body, "Add key") {
+		t.Fatalf("deleted path page: %d\n%s", code, body)
+	}
+	postForm(t, c, ts, "/path/rollback", url.Values{"path": {"/gone"}, "version": {"1"}}, origin)
+	_, body = get(t, c, ts.URL+"/")
+	if strings.Contains(body, "Deleted paths") {
+		t.Fatalf("restored path still listed as deleted:\n%s", body)
+	}
+	if code, _ := get(t, c, ts.URL+"/path?path=/never"); code != http.StatusNotFound {
+		t.Fatalf("missing path: %d", code)
+	}
+}
+
 func TestUICrossOrigin(t *testing.T) {
 	ts := newTestServer(t)
 	c := uiClient(t, ts)

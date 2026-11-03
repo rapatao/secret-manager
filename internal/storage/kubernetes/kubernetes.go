@@ -191,6 +191,22 @@ func (b *Backend) AddVersion(ctx context.Context, path string, at time.Time, dat
 	return nil
 }
 
+// VersionedPaths implements storage.Backend.
+func (b *Backend) VersionedPaths(ctx context.Context) ([]string, error) {
+	var list corev1.SecretList
+	if err := b.c.List(ctx, &list, client.InNamespace(b.ns), client.MatchingLabels{HistoryLabel: "true"}); err != nil {
+		return nil, fmt.Errorf("list versions: %w", err)
+	}
+	var paths []string
+	for _, s := range list.Items {
+		if p := s.Annotations[PathAnnotation]; p != "" && !slices.Contains(paths, p) {
+			paths = append(paths, p)
+		}
+	}
+	slices.Sort(paths)
+	return paths, nil
+}
+
 // Versions implements storage.Backend.
 func (b *Backend) Versions(ctx context.Context, path string) ([]storage.Version, error) {
 	// ponytail: lists every history Secret in the namespace; add a label

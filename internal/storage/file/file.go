@@ -161,6 +161,20 @@ func (b *Backend) AddVersion(_ context.Context, path string, at time.Time, data 
 	return b.commit()
 }
 
+// VersionedPaths implements storage.Backend.
+func (b *Backend) VersionedPaths(_ context.Context) ([]string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []string
+	for p, vs := range b.state.Versions {
+		if len(vs) > 0 {
+			out = append(out, p)
+		}
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
 // Versions implements storage.Backend.
 func (b *Backend) Versions(_ context.Context, path string) ([]storage.Version, error) {
 	b.mu.Lock()

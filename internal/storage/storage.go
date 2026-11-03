@@ -30,6 +30,9 @@ type Backend interface {
 	// Versions returns the stored versions of path, newest first. Versions
 	// outlive Delete.
 	Versions(ctx context.Context, path string) ([]Version, error)
+	// VersionedPaths returns, sorted, every path with at least one stored
+	// version, deleted paths included.
+	VersionedPaths(ctx context.Context) ([]string, error)
 }
 
 // Version is a snapshot of the data stored at a path.

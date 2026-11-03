@@ -137,28 +137,39 @@ func (s *Server) uiIndex(w http.ResponseWriter, r *http.Request) {
 		s.uiError(w, r, err)
 		return
 	}
+	deleted, err := s.secrets.DeletedPaths(r.Context())
+	if err != nil {
+		s.uiError(w, r, err)
+		return
+	}
 	q := r.URL.Query().Get("q")
-	paths = slices.DeleteFunc(paths, func(p string) bool { return !strings.Contains(p, q) })
-	render(w, http.StatusOK, "index", map[string]any{"Paths": paths, "Query": q, "Error": r.URL.Query().Get("error")})
+	unmatched := func(p string) bool { return !strings.Contains(p, q) }
+	render(w, http.StatusOK, "index", map[string]any{
+		"Paths":   slices.DeleteFunc(paths, unmatched),
+		"Deleted": slices.DeleteFunc(deleted, unmatched),
+		"Query":   q,
+		"Error":   r.URL.Query().Get("error"),
+	})
 }
 
 type entry struct{ Key, Value string }
 
 func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
-	data, err := s.secrets.Get(r.Context(), path, false)
+	versions, err := s.secrets.History(r.Context(), path)
 	if err != nil {
+		s.uiError(w, r, err)
+		return
+	}
+	data, err := s.secrets.Get(r.Context(), path, false)
+	deleted := errors.Is(err, secrets.ErrNotFound) && len(versions) > 0
+	if err != nil && !deleted {
 		s.uiError(w, r, err)
 		return
 	}
 	var entries []entry
 	for _, k := range slices.Sorted(maps.Keys(data)) {
 		entries = append(entries, entry{k, data[k]})
-	}
-	versions, err := s.secrets.History(r.Context(), path)
-	if err != nil {
-		s.uiError(w, r, err)
-		return
 	}
 	var history []uiVersion
 	for _, v := range versions {
@@ -168,7 +179,7 @@ func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 		}
 		history = append(history, h)
 	}
-	render(w, http.StatusOK, "path", map[string]any{"Path": path, "Entries": entries, "History": history, "Error": r.URL.Query().Get("error")})
+	render(w, http.StatusOK, "path", map[string]any{"Path": path, "Deleted": deleted, "Entries": entries, "History": history, "Error": r.URL.Query().Get("error")})
 }
 
 type uiVersion struct {
