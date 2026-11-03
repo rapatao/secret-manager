@@ -131,7 +131,7 @@ func (s *Server) uiLogout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) uiIndex(w http.ResponseWriter, r *http.Request) {
 	paths, err := s.secrets.ListPaths(r.Context())
 	if err != nil {
-		uiError(w, err)
+		s.uiError(w, r, err)
 		return
 	}
 	render(w, http.StatusOK, "index", map[string]any{"Paths": paths, "Error": r.URL.Query().Get("error")})
@@ -143,7 +143,7 @@ func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	data, err := s.secrets.Get(r.Context(), path, false)
 	if err != nil {
-		uiError(w, err)
+		s.uiError(w, r, err)
 		return
 	}
 	var entries []entry
@@ -158,7 +158,7 @@ func (s *Server) uiCreatePath(w http.ResponseWriter, r *http.Request) {
 	err := s.secrets.SetKeys(r.Context(), path, nil)
 	s.audit(r, "ui", "create_path", path, nil, err)
 	if err != nil {
-		redirectWithError(w, r, "/?", err)
+		s.redirectWithError(w, r, "/?", err)
 		return
 	}
 	normalized, _ := secrets.NormalizePath(path)
@@ -170,7 +170,7 @@ func (s *Server) uiDeletePath(w http.ResponseWriter, r *http.Request) {
 	err := s.secrets.DeletePath(r.Context(), path)
 	s.audit(r, "ui", "delete_path", path, nil, err)
 	if err != nil {
-		redirectWithError(w, r, "/?", err)
+		s.redirectWithError(w, r, "/?", err)
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -182,7 +182,7 @@ func (s *Server) uiSetKey(w http.ResponseWriter, r *http.Request) {
 	err := s.secrets.SetKeys(r.Context(), path, map[string]string{key: r.PostFormValue("value")})
 	s.audit(r, "ui", "set", path, []string{key}, err)
 	if err != nil {
-		redirectWithError(w, r, pathURL(path)+"&", err)
+		s.redirectWithError(w, r, pathURL(path)+"&", err)
 		return
 	}
 	http.Redirect(w, r, pathURL(path), http.StatusSeeOther)
@@ -194,7 +194,7 @@ func (s *Server) uiDeleteKey(w http.ResponseWriter, r *http.Request) {
 	err := s.secrets.DeleteKey(r.Context(), path, key)
 	s.audit(r, "ui", "delete_key", path, []string{key}, err)
 	if err != nil {
-		redirectWithError(w, r, pathURL(path)+"&", err)
+		s.redirectWithError(w, r, pathURL(path)+"&", err)
 		return
 	}
 	http.Redirect(w, r, pathURL(path), http.StatusSeeOther)
@@ -204,22 +204,22 @@ func pathURL(path string) string {
 	return "/path?path=" + url.QueryEscape(path)
 }
 
-func redirectWithError(w http.ResponseWriter, r *http.Request, prefix string, err error) {
+func (s *Server) redirectWithError(w http.ResponseWriter, r *http.Request, prefix string, err error) {
 	if !errors.Is(err, secrets.ErrInvalid) && !errors.Is(err, secrets.ErrNotFound) {
-		uiError(w, err)
+		s.uiError(w, r, err)
 		return
 	}
 	http.Redirect(w, r, prefix+"error="+url.QueryEscape(err.Error()), http.StatusSeeOther)
 }
 
-func uiError(w http.ResponseWriter, err error) {
+func (s *Server) uiError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, secrets.ErrInvalid):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 	case errors.Is(err, secrets.ErrNotFound):
 		http.Error(w, err.Error(), http.StatusNotFound)
 	default:
-		slog.Error("secret operation failed", "error", err)
+		s.logFailure(r, err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
 }

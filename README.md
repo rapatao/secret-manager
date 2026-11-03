@@ -161,6 +161,7 @@ All endpoints except `/healthz` require `Authorization: Bearer <token>`.
 | `DELETE` | `/api/v1/secrets/{key}?path=P` | Delete one key |
 | `DELETE` | `/api/v1/paths?path=P` | Delete a path (nested paths are kept) |
 | `GET` | `/healthz` | Liveness |
+| `GET` | `/readyz` | Readiness: 503 when the storage backend cannot be read |
 
 Paths look like `/a/b`, with segments of `[a-z0-9-]`. Keys match `[-._a-zA-Z0-9]+`.
 
@@ -176,6 +177,10 @@ Prometheus metrics are served on `:8081/metrics` (`--metrics-addr`, `0` disables
 | `secretmanager_deployment_restarts_total` | Deployments restarted because a synced Secret changed |
 
 With the Prometheus Operator, set `metrics.serviceMonitor.enabled=true` (and `metrics.serviceMonitor.labels` to match your Prometheus selector) to create a `ServiceMonitor`.
+
+### Logs
+
+Logs are JSON on stderr. `--log-level` (chart value `logLevel`) sets the level: `debug`, `info` (default), `warn` or `error`. Unexpected errors are logged as `secret operation failed` with the request `method`, `url` and secret `path`.
 
 ### Audit log
 

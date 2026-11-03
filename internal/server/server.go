@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -53,6 +54,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+	s.mux.HandleFunc("GET /readyz", s.readyz)
 
 	s.mux.Handle("GET /api/v1/paths", s.bearer(s.apiListPaths))
 	s.mux.Handle("DELETE /api/v1/paths", s.bearer(s.apiDeletePath))
@@ -69,6 +71,19 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /path/delete", s.ui(s.session(s.uiDeletePath)))
 	s.mux.Handle("POST /key", s.ui(s.session(s.uiSetKey)))
 	s.mux.Handle("POST /key/delete", s.ui(s.session(s.uiDeleteKey)))
+}
+
+// readyz reports whether the storage backend can be read.
+func (s *Server) readyz(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	// ponytail: lists every path; add a Backend.Ping if stores grow to thousands of paths.
+	if _, err := s.secrets.ListPaths(ctx); err != nil {
+		s.log.Error("readiness check failed", "error", err)
+		http.Error(w, "storage unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) validToken(got string) bool {
@@ -90,7 +105,7 @@ func (s *Server) bearer(next http.HandlerFunc) http.Handler {
 func (s *Server) apiListPaths(w http.ResponseWriter, r *http.Request) {
 	paths, err := s.secrets.ListPaths(r.Context())
 	if err != nil {
-		serviceError(w, err)
+		s.serviceError(w, r, err)
 		return
 	}
 	if paths == nil {
@@ -102,7 +117,7 @@ func (s *Server) apiListPaths(w http.ResponseWriter, r *http.Request) {
 func (s *Server) apiGet(w http.ResponseWriter, r *http.Request) {
 	data, err := s.secrets.Get(r.Context(), r.URL.Query().Get("path"), r.URL.Query().Get("recursive") == "true")
 	if err != nil {
-		serviceError(w, err)
+		s.serviceError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]map[string]string{"data": data})
@@ -118,7 +133,7 @@ func (s *Server) apiSet(w http.ResponseWriter, r *http.Request) {
 	err := s.secrets.SetKeys(r.Context(), path, values)
 	s.audit(r, "api", "set", path, slices.Sorted(maps.Keys(values)), err)
 	if err != nil {
-		serviceError(w, err)
+		s.serviceError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -129,7 +144,7 @@ func (s *Server) apiDeleteKey(w http.ResponseWriter, r *http.Request) {
 	err := s.secrets.DeleteKey(r.Context(), path, key)
 	s.audit(r, "api", "delete_key", path, []string{key}, err)
 	if err != nil {
-		serviceError(w, err)
+		s.serviceError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -140,7 +155,7 @@ func (s *Server) apiDeletePath(w http.ResponseWriter, r *http.Request) {
 	err := s.secrets.DeletePath(r.Context(), path)
 	s.audit(r, "api", "delete_path", path, nil, err)
 	if err != nil {
-		serviceError(w, err)
+		s.serviceError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -168,16 +183,21 @@ func (s *Server) audit(r *http.Request, source, op, path string, keys []string, 
 	s.log.Info("audit", attrs...)
 }
 
-func serviceError(w http.ResponseWriter, err error) {
+func (s *Server) serviceError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, secrets.ErrInvalid):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, secrets.ErrNotFound):
 		writeError(w, http.StatusNotFound, err.Error())
 	default:
-		slog.Error("secret operation failed", "error", err)
+		s.logFailure(r, err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 	}
+}
+
+// logFailure logs an unexpected error with the request it failed.
+func (s *Server) logFailure(r *http.Request, err error) {
+	s.log.Error("secret operation failed", "method", r.Method, "url", r.URL.Path, "path", r.FormValue("path"), "error", err)
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
