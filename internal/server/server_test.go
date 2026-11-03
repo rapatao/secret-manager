@@ -426,7 +426,43 @@ func TestAPIInfo(t *testing.T) {
 		t.Fatalf("info without token: %d", code)
 	}
 	code, body := do(t, ts, "GET", "/api/v1/info", token, "")
-	if code != http.StatusOK || strings.TrimSpace(body) != `{"capabilities":["history","paths","secrets"],"version":""}` {
+	if code != http.StatusOK || strings.TrimSpace(body) != `{"capabilities":["backup","history","paths","secrets"],"version":""}` {
 		t.Fatalf("info: %d %s", code, body)
+	}
+}
+
+func TestAPIBackupRestore(t *testing.T) {
+	src, logs := newLoggedServer(t)
+	do(t, src, "PUT", "/api/v1/secrets?path=/app", token, `{"A":"1"}`)
+	do(t, src, "PUT", "/api/v1/secrets?path=/app", token, `{"A":"2"}`)
+
+	code, plain := do(t, src, "GET", "/api/v1/backup", token, "")
+	if code != http.StatusOK || !strings.Contains(plain, `"format":1`) ||
+		!strings.Contains(plain, `"paths":[{"path":"/app","data":{"A":"2"}}]`) {
+		t.Fatalf("backup: %d %s", code, plain)
+	}
+	_, full := do(t, src, "GET", "/api/v1/backup?history=true", token, "")
+	if strings.Count(full, `"version":`) != 2 {
+		t.Fatalf("backup with history: %s", full)
+	}
+	if !strings.Contains(logs.String(), `"op":"backup"`) {
+		t.Fatalf("backup not audited: %s", logs)
+	}
+
+	dst := newTestServer(t)
+	if code, body := do(t, dst, "POST", "/api/v1/restore", token, full); code != http.StatusOK || strings.TrimSpace(body) != `{"paths":1}` {
+		t.Fatalf("restore: %d %s", code, body)
+	}
+	if _, body := do(t, dst, "GET", "/api/v1/secrets?path=/app", token, ""); strings.TrimSpace(body) != `{"data":{"A":"2"}}` {
+		t.Fatalf("restored data: %s", body)
+	}
+	if _, body := do(t, dst, "GET", "/api/v1/history?path=/app", token, ""); strings.Count(body, `"version":`) != 2 {
+		t.Fatalf("restored history: %s", body)
+	}
+
+	for _, body := range []string{`nope`, `{"format":2,"paths":[]}`, `{"format":1,"paths":[{"path":"bad"}]}`} {
+		if code, _ := do(t, dst, "POST", "/api/v1/restore", token, body); code != http.StatusBadRequest {
+			t.Errorf("restore %s: status %d", body, code)
+		}
 	}
 }

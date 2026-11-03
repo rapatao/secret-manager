@@ -7,6 +7,7 @@ A small, self-hosted key-value secret manager for Kubernetes.
 - Deployments that opt in are restarted when a Secret they use changes.
 - `secret-manager run` injects secrets as environment variables into local commands.
 - Every write is kept as a version, so a path can be inspected or rolled back, even after it is deleted.
+- `secret-manager backup` and `restore` copy every path, optionally with its versions, to and from a JSON file.
 
 One binary contains the controller, the REST API, the Web UI and the CLI.
 
@@ -157,6 +158,8 @@ secret-manager run --path /tools -- make updates
 secret-manager history --path /tools                   # list versions
 secret-manager history --path /tools 3                 # print version 3 as dotenv
 secret-manager rollback --path /tools 3
+secret-manager backup --history --output backup.json  # every path and its versions, see Backup
+secret-manager restore backup.json
 secret-manager version                                 # client and server versions, server capabilities
 ```
 
@@ -201,6 +204,14 @@ Deleting a path keeps its versions, so `rollback` can bring it back. Rolling bac
 
 History starts when the feature is first used: paths written before have no versions until their next change.
 
+## Backup
+
+`secret-manager backup` prints every path and its data as JSON; `--output F` writes it to `F` with `0600` permissions instead. `--history` adds the versions of each path. Versions of deleted paths are not included.
+
+`secret-manager restore F` (`-` for stdin) replaces the data of every path in the file. Paths not in the file are kept. Each changed path is recorded as a new version and its targets are synced, like any other write. Versions in the file are restored only for paths that have none yet, renumbered from 1 and limited to `--history-limit`; a path that already has versions only gets a new one for the restored data. Restoring the same file twice changes nothing. Every path and key is checked before anything is written.
+
+The file holds every value in plain text. Encrypt it before storing it elsewhere, for example `secret-manager backup | age -r KEY > backup.json.age`. To move to a new server, or to keep a copy before an upgrade, back up from the old server and restore on the new one; any client version with `backup` can talk to both, see [Compatibility](#compatibility). There is no schedule: run `backup` from cron or a CI job.
+
 ## Web UI
 
 Open the server URL and sign in with the admin token. The UI lists paths and lets you create and delete paths and keys, and view and restore a path's versions; values stay hidden until expanded. It follows the system light or dark theme and needs no JavaScript. Deleted paths are not listed; restore them with the CLI or the API. Sessions last 12 hours and are lost when the server restarts. The session cookie is `Secure`, so use HTTPS (an Ingress with TLS) or `localhost`.
@@ -217,6 +228,8 @@ All endpoints except `/healthz` and `/readyz` require `Authorization: Bearer <to
 | `PUT` | `/api/v1/secrets?path=P` | Merge a JSON object of string values into P |
 | `DELETE` | `/api/v1/secrets/{key}?path=P` | Delete one key |
 | `DELETE` | `/api/v1/paths?path=P` | Delete a path (nested paths are kept) |
+| `GET` | `/api/v1/backup?history=true` | `{"format": 1, "version": "...", "time": "...", "paths": [{"path": "/a", "data": {...}, "versions": [...]}]}`, `versions` only with `history=true` |
+| `POST` | `/api/v1/restore` | Restore a backup document, returns `{"paths": N}` |
 | `GET` | `/api/v1/history?path=P` | `{"versions": [{"version": 3, "time": "...", "keys": [...]}]}`, newest first, without values |
 | `GET` | `/api/v1/history/{version}?path=P` | `{"version": 3, "time": "...", "data": {"KEY": "value"}}` |
 | `POST` | `/api/v1/history/{version}/rollback?path=P` | Replace the data at P with that version |
@@ -229,14 +242,14 @@ Paths look like `/a/b`, with segments of `[a-z0-9-]`. Keys match `[-._a-zA-Z0-9]
 
 Clients and servers of different versions work together. `/api/v1` endpoints keep their behavior, so an older CLI works against a newer server. A newer CLI works against an older server too, as long as the server has the features a command uses.
 
-`GET /api/v1/info` lists those features as capabilities: `paths`, `secrets` and `history` today. Commands that need a feature added later check its capability first and fail with `server 1.2.0 at URL does not support X; upgrade the server` instead of an unclear error. Servers older than `/api/v1/info` are treated as having `paths`, `secrets` and `history`. A capability never changes meaning and is never removed; changed behavior gets a new capability.
+`GET /api/v1/info` lists those features as capabilities: `paths`, `secrets`, `history` and `backup` today. Commands that need a feature added later check its capability first and fail with `server 1.2.0 at URL does not support X; upgrade the server` instead of an unclear error. Servers older than `/api/v1/info` are treated as having `paths`, `secrets` and `history`. A capability never changes meaning and is never removed; changed behavior gets a new capability.
 
 `secret-manager version` prints the client version and, when a server is set (see [Resolution order](#resolution-order)), the server version and capabilities:
 
 ```
 client: 1.5.0
 server: 1.4.0 (https://secrets.example.com)
-capabilities: history, paths, secrets
+capabilities: backup, history, paths, secrets
 ```
 
 ## Observability
@@ -265,12 +278,13 @@ Every change made through the API or the Web UI, and every failed authentication
 {"level":"WARN","msg":"audit","source":"ui","op":"login","remote":"10.42.0.7:51240","error":"invalid token"}
 ```
 
-`op` is one of `set`, `delete_key`, `delete_path`, `create_path`, `rollback`, `login` and `auth` (API bearer token). Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Reads are not logged.
+`op` is one of `set`, `delete_key`, `delete_path`, `create_path`, `rollback`, `backup`, `restore`, `login` and `auth` (API bearer token). Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Other reads are not logged.
 
 ## Security notes
 
 - With the `kubernetes` backend, values are only as protected as Secrets in your cluster. Enable encryption at rest (k3s: `--secrets-encryption`) and restrict who can read Secrets in the server namespace.
 - Old values stay readable in history Secrets after they are changed or deleted. To purge a leaked value, delete its versions: `kubectl -n secret-manager get secrets -l secretmanager.rapatao.com/history=true` lists them.
+- Backup files hold every value in plain text. Encrypt them and keep them out of git.
 - The server needs cluster-wide permission to manage Secrets, because targets can live in any namespace.
 - The metrics port has no authentication. It exposes no secret values, but restrict it with a NetworkPolicy if other workloads should not read it.
 - The admin token grants full access. Keep it long and random, and rotate it by updating its Secret and restarting the server.

@@ -146,6 +146,26 @@ func (c *Client) Rollback(ctx context.Context, path string, n int) error {
 	return c.do(ctx, http.MethodPost, "/api/v1/history/"+strconv.Itoa(n)+"/rollback", url.Values{"path": {path}}, nil, nil)
 }
 
+// Backup returns a backup document holding every path, with its versions
+// when withHistory.
+func (c *Client) Backup(ctx context.Context, withHistory bool) (json.RawMessage, error) {
+	var q url.Values
+	if withHistory {
+		q = url.Values{"history": {"true"}}
+	}
+	var out json.RawMessage
+	err := c.do(ctx, http.MethodGet, "/api/v1/backup", q, nil, &out)
+	return out, err
+}
+
+// Restore writes a backup document made by Backup and returns the number of
+// paths it held.
+func (c *Client) Restore(ctx context.Context, backup json.RawMessage) (int, error) {
+	var out struct{ Paths int }
+	err := c.do(ctx, http.MethodPost, "/api/v1/restore", nil, backup, &out)
+	return out.Paths, err
+}
+
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, in, out any) error {
 	var body io.Reader
 	if in != nil {

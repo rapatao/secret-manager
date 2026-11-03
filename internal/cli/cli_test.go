@@ -390,7 +390,7 @@ func TestServersListAndUse(t *testing.T) {
 
 func TestVersion(t *testing.T) {
 	h := newHarness(t)
-	want := "client: 1.5.0\nserver: 1.4.0 (" + h.url + ")\ncapabilities: history, paths, secrets\n"
+	want := "client: 1.5.0\nserver: 1.4.0 (" + h.url + ")\ncapabilities: backup, history, paths, secrets\n"
 	if got := h.mustRun("version"); got != want {
 		t.Fatalf("version: %q", got)
 	}
@@ -409,5 +409,45 @@ func TestVersionAgainstServerWithoutInfo(t *testing.T) {
 	want := "client: 1.5.0\nserver: unknown, older than the client (" + ts.URL + ")\ncapabilities: history, paths, secrets\n"
 	if got := h.mustRun("version"); got != want {
 		t.Fatalf("version: %q", got)
+	}
+}
+
+func TestBackupRestore(t *testing.T) {
+	src := newHarness(t)
+	src.mustRun("set", "--path", "/tools", "A=1")
+	src.mustRun("set", "--path", "/tools", "A=2")
+	file := filepath.Join(src.dir, "backup.json")
+	src.mustRun("backup", "--history", "--output", file)
+	if fi, err := os.Stat(file); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("backup file: %v %v", fi, err)
+	}
+	if out := src.mustRun("backup"); !strings.Contains(out, `"path":"/tools"`) || strings.Contains(out, `"versions"`) {
+		t.Fatalf("backup to stdout: %s", out)
+	}
+
+	dst := newHarness(t)
+	if got := dst.mustRun("restore", file); got != "Restored 1 paths\n" {
+		t.Fatalf("restore: %q", got)
+	}
+	if got := dst.mustRun("get", "--path", "/tools", "A"); got != "2\n" {
+		t.Fatalf("restored value: %q", got)
+	}
+	if got := dst.mustRun("history", "--path", "/tools"); strings.Count(got, "\n") != 3 {
+		t.Fatalf("restored history: %q", got)
+	}
+
+	dst.stdin = "not json"
+	if code := dst.run("restore", "-"); code != 1 || !strings.Contains(dst.stderr.String(), "is not a JSON backup") {
+		t.Fatalf("restore invalid: %d %s", code, dst.stderr.String())
+	}
+}
+
+func TestBackupNeedsCapability(t *testing.T) {
+	h := newHarness(t)
+	ts := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(ts.Close)
+	h.envURL = ts.URL
+	if code := h.run("backup"); code != 1 || !strings.Contains(h.stderr.String(), "does not support backup; upgrade the server") {
+		t.Fatalf("backup on old server: %d %s", code, h.stderr.String())
 	}
 }
