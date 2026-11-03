@@ -11,6 +11,7 @@ permissions:
 jobs:
   go:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -20,14 +21,31 @@ jobs:
         run: make check-generated
       - name: Test
         run: make test
-      - uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.15.0
       - name: Build
         run: make build
 
+  # The binary is installed directly instead of through golangci-lint-action,
+  # which depends on the Actions cache service that Gitea runners may lack.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOLANGCI_LINT_VERSION: v2.15.0
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Install golangci-lint
+        run: |
+          curl -sSfL "https://raw.githubusercontent.com/golangci/golangci-lint/${GOLANGCI_LINT_VERSION}/install.sh" \
+            | sh -s -- -b "$(go env GOPATH)/bin" "$GOLANGCI_LINT_VERSION"
+      - name: Lint
+        run: make lint
+
   chart:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
@@ -35,6 +53,7 @@ jobs:
 
   image:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-qemu-action@v4
