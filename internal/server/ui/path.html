@@ -54,12 +54,13 @@
 <div class="card">
 <h2>History</h2>
 <table>
-<thead><tr><th>Version</th><th>Written</th><th>Data</th><th></th></tr></thead>
+<thead><tr><th>Version</th><th>Written</th><th>Changes</th><th>Data</th><th></th></tr></thead>
 <tbody>
 {{range $v := .}}
 <tr>
 <td><span class="badge">v{{$v.Number}}</span></td>
 <td class="muted">{{$v.Time}}</td>
+<td class="mono">{{range $v.Changes}}<span class="change">{{.Op}}{{.Key}}</span> {{else}}<span class="muted">-</span>{{end}}</td>
 <td>
 <details><summary>{{len $v.Entries}} keys</summary>
 <table>

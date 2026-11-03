@@ -25,6 +25,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/rapatao/secret-manager/internal/client"
+	"github.com/rapatao/secret-manager/internal/secrets"
 )
 
 const (
@@ -46,6 +47,9 @@ const Usage = `Client commands:
   delete  --path P (KEY... | --all)            delete keys, or the whole path
   export  --path P [--recursive] [--format dotenv|json]
   history --path P [VERSION]                   list versions, or print one as dotenv
+  history --path P --diff VERSION [VERSION2]   list keys added (+), removed (-) or
+                                               changed (~) since VERSION, up to
+                                               VERSION2 or the current data
   rollback --path P VERSION                    restore a version
   backup  [--history] [--output F]             print or write (0600) every path as JSON
   restore FILE|-                               replace the paths held in a backup
@@ -512,9 +516,13 @@ func (c *CLI) export(ctx context.Context, args []string) error {
 
 func (c *CLI) history(ctx context.Context, args []string) error {
 	f := c.flags("history", true, false)
+	diff := f.fs.Bool("diff", false, "list the keys changed from VERSION to VERSION2 or the current data")
 	api, err := f.parse(args)
 	if err != nil {
 		return err
+	}
+	if *diff {
+		return c.historyDiff(ctx, f, api)
 	}
 	switch f.fs.NArg() {
 	case 0:
@@ -541,6 +549,36 @@ func (c *CLI) history(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("%w: history takes at most one VERSION", errUsage)
 	}
+}
+
+func (c *CLI) historyDiff(ctx context.Context, f *flags, api *client.Client) error {
+	if n := f.fs.NArg(); n != 1 && n != 2 {
+		return fmt.Errorf("%w: history --diff takes VERSION and an optional VERSION2", errUsage)
+	}
+	var snapshots []map[string]string
+	for _, arg := range f.fs.Args() {
+		n, err := parseVersion(arg)
+		if err != nil {
+			return err
+		}
+		v, err := api.Version(ctx, f.path, n)
+		if err != nil {
+			return err
+		}
+		snapshots = append(snapshots, v.Data)
+	}
+	if len(snapshots) == 1 {
+		current, err := api.Get(ctx, f.path, false)
+		var apiErr *client.Error
+		if err != nil && (!errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound) {
+			return err
+		}
+		snapshots = append(snapshots, current)
+	}
+	for _, ch := range secrets.Diff(snapshots[0], snapshots[1]) {
+		fmt.Fprintf(c.Stdout, "%s %s\n", ch.Op, ch.Key)
+	}
+	return nil
 }
 
 func (c *CLI) rollback(ctx context.Context, args []string) error {
