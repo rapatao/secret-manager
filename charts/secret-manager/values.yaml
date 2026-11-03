@@ -35,6 +35,12 @@ logLevel: info
 # release namespace. 0 disables history.
 historyLimit: 10
 
+# Runs the SecretSync controller, which writes Secrets in any namespace and
+# restarts Deployments, with cluster-wide RBAC. When false, the server only
+# stores secrets and its RBAC is limited to Secrets in the release namespace.
+controller:
+  enabled: true
+
 # Prometheus metrics are served on port 8081 (Service port "metrics").
 metrics:
   serviceMonitor:

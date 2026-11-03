@@ -9,7 +9,7 @@ A small, self-hosted key-value secret manager for Kubernetes.
 - Every write is kept as a version, so a path can be inspected or rolled back, even after it is deleted.
 - `secret-manager backup` and `restore` copy every path, optionally with its versions, to and from a JSON file.
 
-One binary contains the controller, the REST API, the Web UI and the CLI.
+One binary contains the controller, the REST API, the Web UI and the CLI. The controller is optional, and with the `file` storage backend the server runs without Kubernetes.
 
 ## Compared to other tools
 
@@ -36,9 +36,11 @@ Writes made through the API reach target Secrets immediately. Every `SecretSync`
 
 ### Storage
 
-Storage is pluggable behind a small interface (`internal/storage.Backend`). The only backend today is `kubernetes`: each path is a Secret in the server's namespace (`/kubernetes/app` is stored as `sm.kubernetes.app`, labeled `secretmanager.rapatao.com/store=true`). There is no database or volume to run.
+Storage is pluggable behind a small interface (`internal/storage.Backend`), selected with `--storage`.
 
-Each write that changes a path is also stored as a version, unless history is disabled: a Secret named `smh.<path>.<version>` (`/kubernetes/app` version 3 is `smh.kubernetes.app.3`), labeled `secretmanager.rapatao.com/history=true`. See [History](#history).
+`kubernetes` (default): each path is a Secret in the server's namespace (`/kubernetes/app` is stored as `sm.kubernetes.app`, labeled `secretmanager.rapatao.com/store=true`). There is no database or volume to run. Each write that changes a path is also stored as a version, unless history is disabled: a Secret named `smh.<path>.<version>` (`/kubernetes/app` version 3 is `smh.kubernetes.app.3`), labeled `secretmanager.rapatao.com/history=true`. See [History](#history).
+
+`file`: every path and version is kept in one JSON file (`--file`, mode `0600`), loaded into memory at start and rewritten atomically on every write.
 
 To add a backend (SQLite, Postgres, ...), implement `storage.Backend`, run `storagetest.Run` against it in its tests, and add a case to the `--storage` switch in `cmd/secret-manager/main.go`.
 
@@ -67,6 +69,17 @@ kubectl apply -f /tmp/sm/secret-manager/crds
 
 The server runs as a single replica: writes are serialized in process.
 
+Set `controller.enabled=false` to only store secrets: the `SecretSync` controller does not run, no Secret outside the release namespace is written, no Deployment is restarted, and the chart installs a Role limited to Secrets in the release namespace instead of a ClusterRole. Add `--skip-crds` to `helm install` to leave out the `SecretSync` CRD.
+
+### Without Kubernetes
+
+```sh
+export SECRET_MANAGER_TOKEN="$(openssl rand -base64 36)"
+secret-manager server --storage=file --file=/var/lib/secret-manager/store.json --controller=false
+```
+
+The CLI, Web UI, history and backups work the same; `SecretSync` is not available.
+
 ### Server flags
 
 The chart sets these; set them yourself when running `secret-manager server` outside it.
@@ -75,8 +88,10 @@ The chart sets these; set them yourself when running `secret-manager server` out
 |------|---------|-------------|
 | `--addr` | `:8080` | Listen address of the API and Web UI |
 | `--metrics-addr` | `:8081` | Listen address of the Prometheus metrics, `0` disables them |
-| `--namespace` | `$POD_NAMESPACE` | Namespace holding the stored secrets and their versions |
-| `--storage` | `kubernetes` | Storage backend |
+| `--storage` | `kubernetes` | Storage backend: `kubernetes` or `file` |
+| `--namespace` | `$POD_NAMESPACE` | Namespace holding the stored secrets and their versions (`kubernetes` storage) |
+| `--file` | `secret-manager.json` | File holding the stored secrets and their versions (`file` storage) |
+| `--controller` | `true` | Run the `SecretSync` controller. Requires access to a cluster |
 | `--history-limit` | `10` | Versions kept per path, current included, `0` disables history |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error` |
 
@@ -294,7 +309,8 @@ Every change made through the API or the Web UI, every backup, every Web UI logi
 - Old values stay readable in history Secrets after they are changed or deleted. To purge a leaked value, delete its versions: `kubectl -n secret-manager get secrets -l secretmanager.rapatao.com/history=true` lists them.
 - The CLI caches the secrets it reads, encrypted with a key in the OS keychain, for up to 7 days. Anyone who can use your keychain can read them. Set `SECRET_MANAGER_CACHE_MAX_AGE=0` on shared machines.
 - Backup files hold every value in plain text. Encrypt them and keep them out of git.
-- The server needs cluster-wide permission to manage Secrets, because targets can live in any namespace.
+- With the `file` backend, values are stored in plain text in the file. Restrict access to it and to its directory, and encrypt the disk it lives on.
+- With the controller enabled, the server needs cluster-wide permission to manage Secrets, because targets can live in any namespace. With `controller.enabled=false` it only needs Secrets in its own namespace.
 - The metrics port has no authentication. It exposes no secret values, but restrict it with a NetworkPolicy if other workloads should not read it.
 - The admin token grants full access. Keep it long and random, and rotate it by updating its Secret and restarting the server.
 
@@ -307,6 +323,7 @@ make generate   # deepcopy and CRD (controller-gen, pinned as a go tool)
 make test
 make lint
 make build      # bin/secret-manager
+make run        # local server on :8080, file storage in .local/, no cluster
 make docker
 make helm-lint
 make check-generated   # fails if generated files are out of date
