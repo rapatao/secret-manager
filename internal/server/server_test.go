@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -473,5 +474,22 @@ func TestAPIBackupRestore(t *testing.T) {
 		if code, _ := do(t, dst, "POST", "/api/v1/restore", token, body); code != http.StatusBadRequest {
 			t.Errorf("restore %s: status %d", body, code)
 		}
+	}
+}
+
+func TestSessionSurvivesRestart(t *testing.T) {
+	id := newSessions([]byte(token), time.Hour).create()
+	if !newSessions([]byte(token), time.Hour).valid(id) {
+		t.Fatal("session rejected after restart with same token")
+	}
+	if newSessions([]byte(token+"x"), time.Hour).valid(id) {
+		t.Fatal("session accepted after token change")
+	}
+	if newSessions([]byte(token), time.Hour).valid("9" + id) {
+		t.Fatal("tampered session accepted")
+	}
+	expired := newSessions([]byte(token), -time.Hour)
+	if expired.valid(expired.create()) {
+		t.Fatal("expired session accepted")
 	}
 }

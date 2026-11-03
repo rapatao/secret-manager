@@ -57,7 +57,7 @@ func New(svc *secrets.Service, token string) (*Server, error) {
 	s := &Server{
 		secrets:  svc,
 		token:    []byte(token),
-		sessions: newSessions(12 * time.Hour),
+		sessions: newSessions([]byte(token), 12*time.Hour),
 		mux:      http.NewServeMux(),
 		log:      slog.Default(),
 	}

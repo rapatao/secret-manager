@@ -1,8 +1,11 @@
 package server
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"embed"
+	"encoding/base64"
 	"errors"
 	"html/template"
 	"log/slog"
@@ -10,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,41 +38,72 @@ func init() {
 	}
 }
 
+// sessions issues cookies signed with a key derived from the admin token, so
+// they survive restarts and are invalidated when the token changes.
 type sessions struct {
-	mu  sync.Mutex
-	ttl time.Duration
-	ids map[string]time.Time
+	mu      sync.Mutex
+	ttl     time.Duration
+	key     []byte
+	revoked map[string]time.Time
 }
 
-func newSessions(ttl time.Duration) *sessions {
-	return &sessions{ttl: ttl, ids: map[string]time.Time{}}
+func newSessions(token []byte, ttl time.Duration) *sessions {
+	m := hmac.New(sha256.New, token)
+	m.Write([]byte("secret-manager ui session"))
+	return &sessions{ttl: ttl, key: m.Sum(nil), revoked: map[string]time.Time{}}
+}
+
+func (s *sessions) sign(payload string) string {
+	m := hmac.New(sha256.New, s.key)
+	m.Write([]byte(payload))
+	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }
 
 func (s *sessions) create() string {
-	id := rand.Text()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := time.Now()
-	for k, exp := range s.ids {
-		if now.After(exp) {
-			delete(s.ids, k)
-		}
+	payload := strconv.FormatInt(time.Now().Add(s.ttl).Unix(), 10) + "." + rand.Text()
+	return payload + "." + s.sign(payload)
+}
+
+func (s *sessions) expiry(id string) (time.Time, bool) {
+	i := strings.LastIndexByte(id, '.')
+	if i < 0 || !hmac.Equal([]byte(id[i+1:]), []byte(s.sign(id[:i]))) {
+		return time.Time{}, false
 	}
-	s.ids[id] = now.Add(s.ttl)
-	return id
+	unix, _, _ := strings.Cut(id[:i], ".")
+	sec, err := strconv.ParseInt(unix, 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	exp := time.Unix(sec, 0)
+	return exp, time.Now().Before(exp)
 }
 
 func (s *sessions) valid(id string) bool {
+	if _, ok := s.expiry(id); !ok {
+		return false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	exp, ok := s.ids[id]
-	return ok && time.Now().Before(exp)
+	_, revoked := s.revoked[id]
+	return !revoked
 }
 
+// ponytail: revocations live in memory, so a logged-out cookie captured before
+// logout is accepted again after a restart until it expires.
 func (s *sessions) delete(id string) {
+	exp, ok := s.expiry(id)
+	if !ok {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.ids, id)
+	now := time.Now()
+	for k, e := range s.revoked {
+		if now.After(e) {
+			delete(s.revoked, k)
+		}
+	}
+	s.revoked[id] = exp
 }
 
 // ui sets security headers and rejects cross-origin form posts.
