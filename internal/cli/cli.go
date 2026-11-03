@@ -54,6 +54,10 @@ const Usage = `Client commands:
   version                                      print the client version and, when a
                                                server is set, its version and capabilities
 
+get, export and run fall back to the last secrets read, kept encrypted for
+$` + EnvCacheMaxAge + ` (default 168h, 0 disables), when the server is
+unreachable. servers logout removes them.
+
 Every command accepts --server URL. Without it, $` + EnvURL + ` or the
 default server is used. $` + EnvToken + ` is only sent to $` + EnvURL + `;
 any other server uses the token stored by servers login.
@@ -359,6 +363,13 @@ func (c *CLI) serversLogout(args []string) error {
 	if err := f.store.removeToken(f.server); err != nil {
 		return err
 	}
+	ch, err := c.cache()
+	if err != nil {
+		return err
+	}
+	if err := ch.clear(f.server); err != nil {
+		return err
+	}
 	cfg, err := f.store.config()
 	if err != nil {
 		return err
@@ -399,7 +410,7 @@ func (c *CLI) get(ctx context.Context, args []string) error {
 	if f.fs.NArg() > 1 {
 		return fmt.Errorf("%w: get takes at most one KEY", errUsage)
 	}
-	data, err := api.Get(ctx, f.path, f.recursive)
+	data, err := c.getSecrets(ctx, f, api)
 	if err != nil {
 		return err
 	}
@@ -487,7 +498,7 @@ func (c *CLI) export(ctx context.Context, args []string) error {
 	if *format != "dotenv" && *format != "json" {
 		return fmt.Errorf("%w: unknown format %q", errUsage, *format)
 	}
-	data, err := api.Get(ctx, f.path, f.recursive)
+	data, err := c.getSecrets(ctx, f, api)
 	if err != nil {
 		return err
 	}
@@ -658,7 +669,7 @@ func (c *CLI) run(ctx context.Context, args []string) error {
 	if f.fs.NArg() == 0 {
 		return fmt.Errorf("%w: missing command", errUsage)
 	}
-	data, err := api.Get(ctx, f.path, f.recursive)
+	data, err := c.getSecrets(ctx, f, api)
 	if err != nil {
 		return err
 	}

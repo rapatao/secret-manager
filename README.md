@@ -5,7 +5,7 @@ A small, self-hosted key-value secret manager for Kubernetes.
 - Secrets are organized by path (`/kubernetes/app`, `/tools`) and managed with a CLI or a Web UI.
 - A `SecretSync` resource syncs one or more paths into Kubernetes Secrets, in any namespace, optionally shaped with Go templates.
 - Deployments that opt in are restarted when a Secret they use changes.
-- `secret-manager run` injects secrets as environment variables into local commands.
+- `secret-manager run` injects secrets as environment variables into local commands, and keeps working from an encrypted cache while the server is unreachable.
 - Every write is kept as a version, so a path can be inspected or rolled back, even after it is deleted.
 - `secret-manager backup` and `restore` copy every path, optionally with its versions, to and from a JSON file.
 
@@ -196,6 +196,14 @@ The token is never accepted as a flag, so it doesn't end up in shell history or 
 
 `run` adds the secrets to the current environment, overriding variables with the same name, and exits with the command's exit code.
 
+### Offline cache
+
+`get`, `export` and `run` keep the last secrets they read from each server and path. When the server is unreachable (connection error, or a `502`, `503` or `504` from the Ingress), they use the cached secrets and print a warning with the time they were read. Any other answer, such as `401` or `404`, is reported as an error and the cache is not used. Writes do not update the cache; the next successful read does.
+
+Cached secrets are used for up to 7 days after they were read. `SECRET_MANAGER_CACHE_MAX_AGE` changes that, as a Go duration (`24h`, `30m`); `0` disables the cache, so nothing is written or read. Expired entries are removed when found.
+
+Entries are encrypted with AES-256-GCM and stored in the `cache` directory next to `config.json`, `0600` files in a `0700` directory. The key is kept only in the OS keychain (account `offline-cache-key` under `secretmanager.rapatao.com`), so without a usable keychain nothing is cached. `servers logout` removes the cached secrets of that server; delete the `cache` directory to remove all of them.
+
 ## History
 
 Every write that changes a path (setting keys, deleting a key, a rollback) stores the path's new data as a version numbered one above the previous. Writes that change nothing, and changes made directly on the stored Secrets, are not recorded. The newest versions are kept, current one included, up to `--history-limit` (chart value `historyLimit`, default `10`). Lowering the limit removes the extra versions of a path on its next write. `0` stops recording; versions already stored stay until removed by hand (`kubectl delete secret -l secretmanager.rapatao.com/history=true`).
@@ -284,6 +292,7 @@ Every change made through the API or the Web UI, and every failed authentication
 
 - With the `kubernetes` backend, values are only as protected as Secrets in your cluster. Enable encryption at rest (k3s: `--secrets-encryption`) and restrict who can read Secrets in the server namespace.
 - Old values stay readable in history Secrets after they are changed or deleted. To purge a leaked value, delete its versions: `kubectl -n secret-manager get secrets -l secretmanager.rapatao.com/history=true` lists them.
+- The CLI caches the secrets it reads, encrypted with a key in the OS keychain, for up to 7 days. Anyone who can use your keychain can read them. Set `SECRET_MANAGER_CACHE_MAX_AGE=0` on shared machines.
 - Backup files hold every value in plain text. Encrypt them and keep them out of git.
 - The server needs cluster-wide permission to manage Secrets, because targets can live in any namespace.
 - The metrics port has no authentication. It exposes no secret values, but restrict it with a NetworkPolicy if other workloads should not read it.
