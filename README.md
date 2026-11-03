@@ -323,6 +323,7 @@ make generate   # deepcopy and CRD (controller-gen, pinned as a go tool)
 make test
 make lint
 make build      # bin/secret-manager
+make run        # local server on :8080, file storage in .local/, no cluster
 make docker
 make helm-lint
 make check-generated   # fails if generated files are out of date
