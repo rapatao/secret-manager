@@ -18,7 +18,7 @@ One binary contains the controller, the REST API, the Web UI and the CLI. The co
 | Stores secrets | Yes, as Kubernetes Secrets | No, reads an external store (Vault, cloud providers, ...) | Yes, in PostgreSQL | Encrypted in git |
 | Extra components | None | The external store | PostgreSQL and Redis | None |
 | Web UI and CLI | Yes | No | Yes | CLI to encrypt (`kubeseal`) |
-| Users, roles, environments | No, one admin token | From the external store | Yes | Git permissions |
+| Users, roles, environments | No, one admin token plus tokens scoped to a path | From the external store | Yes | Git permissions |
 | Secret history | Yes, last N versions per path | From the external store | Yes | Git history |
 | Restarts workloads on change | Yes | No, needs a tool like Reloader | Yes | No |
 
@@ -258,13 +258,27 @@ With `--backup-dir DIR`, the server writes a backup to `DIR/backup-<UTC time>.js
 
 In the chart, set `backup.enabled=true` (`backup.interval`, `backup.keep`, `backup.history`). Backups go to a `ReadWriteOnce` PersistentVolumeClaim named `<release>-backups` (`backup.persistence.size`, default `1Gi`, and `backup.persistence.storageClass`), or to `backup.persistence.existingClaim`. Helm keeps the claim when the release is uninstalled. The image has no shell, so to copy a file out, mount the claim in another pod. The same plain-text warning applies to these files.
 
+## Scoped tokens
+
+The admin token can do everything. For CI jobs, other machines or `secret-manager run`, create a token limited to one path and the paths nested below it, optionally read-only:
+
+```sh
+secret-manager tokens create --name ci --path /kubernetes/app --read-only
+secret-manager tokens                 # list
+secret-manager tokens revoke ci
+```
+
+`create` prints the token (`smt_...`) once; the server keeps only its SHA-256 hash, in the storage backend (a Secret named `sm-tokens` with the `kubernetes` backend). Use it like the admin token, with `SECRET_MANAGER_URL` and `SECRET_MANAGER_TOKEN` or `servers login`.
+
+A scoped token can read the data and history of paths under its path, and, unless read-only, set and delete keys, delete those paths and roll them back. `list` shows only its paths. Everything else needs the admin token: backup, restore, managing tokens and the Web UI. A request outside the token's scope gets `403`. Tokens are loaded once and kept in memory, so changes made directly on the stored tokens need a server restart.
+
 ## Web UI
 
 Open the server URL and sign in with the admin token. The UI lists paths, filters them by a search term matched anywhere in the path, and lets you create and delete paths and keys, copy a key's value to the clipboard, and view and restore a path's versions; values stay hidden until expanded. It follows the system light or dark theme. Only the copy button needs JavaScript. Deleted paths that still have versions are listed separately, and restoring one of their versions brings them back. Sessions last 12 hours and survive server restarts; changing the admin token signs every session out. Logging out deletes the session cookie in the browser. The session cookie is `Secure`, so use HTTPS (an Ingress with TLS) or `localhost`.
 
 ## API
 
-All endpoints except `/healthz` and `/readyz` require `Authorization: Bearer <token>`.
+All endpoints except `/healthz` and `/readyz` require `Authorization: Bearer <token>`, the admin token or a [scoped token](#scoped-tokens) allowed to use the endpoint and path.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -279,6 +293,9 @@ All endpoints except `/healthz` and `/readyz` require `Authorization: Bearer <to
 | `GET` | `/api/v1/history?path=P` | `{"versions": [{"version": 3, "time": "...", "keys": [...]}]}`, newest first, without values |
 | `GET` | `/api/v1/history/{version}?path=P` | `{"version": 3, "time": "...", "data": {"KEY": "value"}}` |
 | `POST` | `/api/v1/history/{version}/rollback?path=P` | Replace the data at P with that version |
+| `GET` | `/api/v1/tokens` | `{"tokens": [{"name": "ci", "path": "/app", "readOnly": true, "created": "..."}]}`, admin token only |
+| `POST` | `/api/v1/tokens` | Create a token from `{"name": "ci", "path": "/app", "readOnly": true}`, returns it with `"token"`, admin token only |
+| `DELETE` | `/api/v1/tokens/{name}` | Revoke a token, admin token only |
 | `GET` | `/healthz` | Liveness |
 | `GET` | `/readyz` | Readiness: 503 when the storage backend cannot be read |
 
@@ -288,14 +305,14 @@ Paths look like `/a/b`, with segments of `[a-z0-9-]`. Keys match `[-._a-zA-Z0-9]
 
 Clients and servers of different versions work together. `/api/v1` endpoints keep their behavior, so an older CLI works against a newer server. A newer CLI works against an older server too, as long as the server has the features a command uses.
 
-`GET /api/v1/info` lists those features as capabilities: `paths`, `secrets`, `history` and `backup` today. Commands that need a feature added later check its capability first and fail with `server v1.2.0 at URL does not support X; upgrade the server` instead of an unclear error. Servers older than `/api/v1/info` are treated as having `paths`, `secrets` and `history`, and their version is shown as unknown. A capability never changes meaning and is never removed; changed behavior gets a new capability.
+`GET /api/v1/info` lists those features as capabilities: `paths`, `secrets`, `history`, `backup` and `tokens` today. Commands that need a feature added later check its capability first and fail with `server v1.2.0 at URL does not support X; upgrade the server` instead of an unclear error. Servers older than `/api/v1/info` are treated as having `paths`, `secrets` and `history`, and their version is shown as unknown. A capability never changes meaning and is never removed; changed behavior gets a new capability.
 
 `secret-manager version` prints the client version and, when a server is set (see [Resolution order](#resolution-order)), the server version and capabilities:
 
 ```
 client: v1.5.0
 server: v1.4.0 (https://secrets.example.com)
-capabilities: backup, history, paths, secrets
+capabilities: backup, history, paths, secrets, tokens
 ```
 
 ## Observability
@@ -324,7 +341,7 @@ Every change made through the API or the Web UI, every backup, every Web UI logi
 {"level":"WARN","msg":"audit","source":"ui","op":"login","remote":"10.42.0.7:51240","error":"invalid token"}
 ```
 
-`op` is one of `set`, `delete_key`, `delete_path`, `create_path`, `rollback`, `backup`, `restore`, `login` and `auth` (API bearer token). Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Other reads are not logged.
+`op` is one of `set`, `delete_key`, `delete_path`, `create_path`, `rollback`, `backup`, `restore`, `create_token`, `revoke_token` (with the token `name`), `login` and `auth` (API bearer token, including requests a scoped token is not allowed to make). Requests made with a scoped token carry its name in `token`. Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Other reads are not logged.
 
 ## Security notes
 
@@ -335,7 +352,7 @@ Every change made through the API or the Web UI, every backup, every Web UI logi
 - With the `file` backend, restrict access to the file and its directory. Without an encryption key, values are stored in plain text in it.
 - With the controller enabled, the server needs cluster-wide permission to manage Secrets, because targets can live in any namespace. With `controller.enabled=false` it only needs Secrets in its own namespace.
 - The metrics port has no authentication. It exposes no secret values, but restrict it with a NetworkPolicy if other workloads should not read it.
-- The admin token grants full access. Keep it long and random, and rotate it by updating its Secret and restarting the server.
+- The admin token grants full access. Keep it long and random, and rotate it by updating its Secret and restarting the server. Give other clients a [scoped token](#scoped-tokens) instead, and revoke it when it is no longer used.
 
 ## Development
 

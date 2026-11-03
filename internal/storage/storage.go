@@ -33,6 +33,21 @@ type Backend interface {
 	// VersionedPaths returns, sorted, every path with at least one stored
 	// version, deleted paths included.
 	VersionedPaths(ctx context.Context) ([]string, error)
+
+	// Tokens returns every stored access token, or none.
+	Tokens(ctx context.Context) ([]Token, error)
+	// PutTokens replaces every stored access token.
+	PutTokens(ctx context.Context, tokens []Token) error
+}
+
+// Token is an access token limited to the paths under Path. Hash is the hex
+// SHA-256 of the token; the token itself is never stored.
+type Token struct {
+	Name     string    `json:"name"`
+	Hash     string    `json:"hash"`
+	Path     string    `json:"path"`
+	ReadOnly bool      `json:"readOnly"`
+	Created  time.Time `json:"created"`
 }
 
 // Version is a snapshot of the data stored at a path.

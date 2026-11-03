@@ -17,6 +17,7 @@ type memBackend struct {
 	mu       sync.Mutex
 	data     map[string]map[string]string
 	versions map[string][]storage.Version
+	tokens   []storage.Token
 	failPut  bool
 }
 
@@ -47,6 +48,19 @@ func (m *memBackend) VersionedPaths(_ context.Context) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return slices.Sorted(maps.Keys(m.versions)), nil
+}
+
+func (m *memBackend) Tokens(_ context.Context) ([]storage.Token, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.tokens), nil
+}
+
+func (m *memBackend) PutTokens(_ context.Context, tokens []storage.Token) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tokens = slices.Clone(tokens)
+	return nil
 }
 
 func (m *memBackend) Get(_ context.Context, path string) (map[string]string, error) {

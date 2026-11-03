@@ -201,3 +201,14 @@ func (b *Backend) Versions(ctx context.Context, path string) ([]storage.Version,
 func (b *Backend) VersionedPaths(ctx context.Context) ([]string, error) {
 	return b.inner.VersionedPaths(ctx)
 }
+
+// Tokens implements storage.Backend. Tokens are stored as hashes, so they are
+// not encrypted.
+func (b *Backend) Tokens(ctx context.Context) ([]storage.Token, error) {
+	return b.inner.Tokens(ctx)
+}
+
+// PutTokens implements storage.Backend.
+func (b *Backend) PutTokens(ctx context.Context, tokens []storage.Token) error {
+	return b.inner.PutTokens(ctx, tokens)
+}
