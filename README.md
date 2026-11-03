@@ -42,6 +42,17 @@ Storage is pluggable behind a small interface (`internal/storage.Backend`), sele
 
 `file`: every path and version is kept in one JSON file (`--file`, mode `0600`), loaded into memory at start and rewritten atomically on every write.
 
+### Encryption
+
+Set `SECRET_MANAGER_ENCRYPTION_KEY` to a base64 AES-256 key (`openssl rand -base64 32`) to encrypt every stored value, in paths and versions, with AES-256-GCM before it reaches the storage backend. Paths, key names and version times stay readable. In the chart, put the key in a Secret and set `encryption.existingSecret` (and `encryption.key`, default `key`):
+
+```sh
+kubectl -n secret-manager create secret generic secret-manager-encryption \
+  --from-literal=key="$(openssl rand -base64 32)"
+```
+
+The API, the Web UI, `SecretSync` targets and backups still see plain values. On start, the server encrypts every path still holding a plaintext value. Versions written before the key was set stay plaintext until they are pruned by newer ones. Values written with a key cannot be read without it: a server started without the key, or with another one, answers `500` for them and logs the path and key. Keep a copy of the key outside the cluster; losing it loses the data. Changing the key is not supported: to move to a new key, `backup`, start the server with the new key on an empty store, then `restore`.
+
 To add a backend (SQLite, Postgres, ...), implement `storage.Backend`, run `storagetest.Run` against it in its tests, and add a case to the `--storage` switch in `cmd/secret-manager/main.go`.
 
 ## Install
@@ -99,7 +110,7 @@ The chart sets these; set them yourself when running `secret-manager server` out
 | `--backup-history` | `false` | Include versions in scheduled backups |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error` |
 
-The admin token is read from `SECRET_MANAGER_TOKEN`.
+The admin token is read from `SECRET_MANAGER_TOKEN`, the optional [encryption](#encryption) key from `SECRET_MANAGER_ENCRYPTION_KEY`.
 
 ## SecretSync
 
@@ -317,11 +328,11 @@ Every change made through the API or the Web UI, every backup, every Web UI logi
 
 ## Security notes
 
-- With the `kubernetes` backend, values are only as protected as Secrets in your cluster. Enable encryption at rest (k3s: `--secrets-encryption`) and restrict who can read Secrets in the server namespace.
+- Without [encryption](#encryption), values are only as protected as the storage backend: Secrets in your cluster, or the `file` backend's file. Set an encryption key, or enable encryption at rest in the cluster (k3s: `--secrets-encryption`), and restrict who can read Secrets in the server namespace. The encryption key is as sensitive as the admin token.
 - Old values stay readable in history Secrets after they are changed or deleted. To purge a leaked value, delete its versions: `kubectl -n secret-manager get secrets -l secretmanager.rapatao.com/history=true` lists them.
 - The CLI caches the secrets it reads, encrypted with a key in the OS keychain, for up to 7 days. Anyone who can use your keychain can read them. Set `SECRET_MANAGER_CACHE_MAX_AGE=0` on shared machines.
 - Backup files hold every value in plain text. Encrypt them and keep them out of git.
-- With the `file` backend, values are stored in plain text in the file. Restrict access to it and to its directory, and encrypt the disk it lives on.
+- With the `file` backend, restrict access to the file and its directory. Without an encryption key, values are stored in plain text in it.
 - With the controller enabled, the server needs cluster-wide permission to manage Secrets, because targets can live in any namespace. With `controller.enabled=false` it only needs Secrets in its own namespace.
 - The metrics port has no authentication. It exposes no secret values, but restrict it with a NetworkPolicy if other workloads should not read it.
 - The admin token grants full access. Keep it long and random, and rotate it by updating its Secret and restarting the server.
