@@ -1,9 +1,12 @@
-{{define "nav"}}<form class="inline" method="post" action="/logout"><button type="submit">Sign out</button></form>{{end}}
 {{define "content"}}
-<h2><code>{{.Path}}</code></h2>
-<table>
-<tr><th>Key</th><th>Value</th><th></th></tr>
+<p class="muted"><a href="/">Paths</a> /</p>
+<h1 class="mono">{{.Path}}</h1>
 {{$path := .Path}}
+<div class="card">
+<h2>Keys <span class="badge">{{len .Entries}}</span></h2>
+<table>
+<thead><tr><th>Key</th><th>Value</th><th></th></tr></thead>
+<tbody>
 {{range .Entries}}
 <tr>
 <td><code>{{.Key}}</code></td>
@@ -13,37 +16,45 @@
 <input type="hidden" name="path" value="{{$path}}">
 <input type="hidden" name="key" value="{{.Key}}">
 <textarea name="value" rows="3">{{.Value}}</textarea>
-<button type="submit">Save</button>
+<button type="submit" class="primary small">Save</button>
 </form>
 </details>
 </td>
-<td>
+<td class="actions">
 <form class="inline" method="post" action="/key/delete">
 <input type="hidden" name="path" value="{{$path}}">
 <input type="hidden" name="key" value="{{.Key}}">
-<button type="submit" class="danger">Delete</button>
+<button type="submit" class="danger small">Delete</button>
 </form>
 </td>
 </tr>
 {{else}}
-<tr><td colspan="3">No keys yet.</td></tr>
+<tr><td colspan="3" class="empty">No keys yet.</td></tr>
 {{end}}
+</tbody>
 </table>
-<h3>Add key</h3>
-<form method="post" action="/key">
+</div>
+<div class="card">
+<h2>Add key</h2>
+<div class="body">
+<form class="stack" method="post" action="/key">
 <input type="hidden" name="path" value="{{.Path}}">
-<p><input name="key" placeholder="KEY" pattern="[\-._a-zA-Z0-9]+" required></p>
-<p><textarea name="value" rows="3" placeholder="value"></textarea></p>
-<button type="submit">Save</button>
+<input name="key" placeholder="KEY" aria-label="Key" class="mono" pattern="[\-._a-zA-Z0-9]+" required>
+<textarea name="value" rows="3" placeholder="value" aria-label="Value"></textarea>
+<div><button type="submit" class="primary">Save</button></div>
 </form>
+</div>
+</div>
 {{with .History}}
-<h3>History</h3>
+<div class="card">
+<h2>History</h2>
 <table>
-<tr><th>Version</th><th>Written</th><th>Data</th><th></th></tr>
+<thead><tr><th>Version</th><th>Written</th><th>Data</th><th></th></tr></thead>
+<tbody>
 {{range $v := .}}
 <tr>
-<td>{{$v.Number}}</td>
-<td>{{$v.Time}}</td>
+<td><span class="badge">v{{$v.Number}}</span></td>
+<td class="muted">{{$v.Time}}</td>
 <td>
 <details><summary>{{len $v.Entries}} keys</summary>
 <table>
@@ -51,20 +62,27 @@
 </table>
 </details>
 </td>
-<td>
+<td class="actions">
 <form class="inline" method="post" action="/path/rollback">
 <input type="hidden" name="path" value="{{$path}}">
 <input type="hidden" name="version" value="{{$v.Number}}">
-<button type="submit">Restore</button>
+<button type="submit" class="small">Restore</button>
 </form>
 </td>
 </tr>
 {{end}}
+</tbody>
 </table>
+</div>
 {{end}}
-<h3 class="danger">Danger zone</h3>
-<form method="post" action="/path/delete">
+<div class="card danger-zone">
+<h2>Danger zone</h2>
+<div class="body">
+<form class="row" method="post" action="/path/delete">
 <input type="hidden" name="path" value="{{.Path}}">
-<button type="submit" class="danger">Delete path {{.Path}}</button>
+<span class="muted">Deletes this path and all its keys.</span>
+<button type="submit" class="danger">Delete path</button>
 </form>
+</div>
+</div>
 {{end}}

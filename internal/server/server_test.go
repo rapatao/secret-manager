@@ -276,7 +276,7 @@ func TestUIFlow(t *testing.T) {
 
 	postForm(t, c, ts, "/key", url.Values{"path": {"/app"}, "key": {"PASS"}, "value": {"new"}}, origin)
 	_, body = get(t, c, ts.URL+"/path?path=/app")
-	if !strings.Contains(body, "<h3>History</h3>") || !strings.Contains(body, `name="version" value="2"`) {
+	if !strings.Contains(body, "<h2>History</h2>") || !strings.Contains(body, `name="version" value="2"`) {
 		t.Fatalf("path page missing history:\n%s", body)
 	}
 	if code, _ := postForm(t, c, ts, "/path/rollback", url.Values{"path": {"/app"}, "version": {"2"}}, origin); code != http.StatusOK {

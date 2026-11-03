@@ -202,7 +202,7 @@ History starts when the feature is first used: paths written before have no vers
 
 ## Web UI
 
-Open the server URL and sign in with the admin token. The UI lists paths and lets you create and delete paths and keys, and view and restore a path's versions; values stay hidden until expanded. Deleted paths are not listed; restore them with the CLI or the API. Sessions last 12 hours and are lost when the server restarts. The session cookie is `Secure`, so use HTTPS (an Ingress with TLS) or `localhost`.
+Open the server URL and sign in with the admin token. The UI lists paths and lets you create and delete paths and keys, and view and restore a path's versions; values stay hidden until expanded. It follows the system light or dark theme and needs no JavaScript. Deleted paths are not listed; restore them with the CLI or the API. Sessions last 12 hours and are lost when the server restarts. The session cookie is `Secure`, so use HTTPS (an Ingress with TLS) or `localhost`.
 
 ## API
 
