@@ -26,4 +26,16 @@
 </tbody>
 </table>
 </div>
+{{with .Deleted}}
+<div class="card">
+<h2>Deleted paths <span class="badge">{{len .}}</span></h2>
+<table>
+<tbody>
+{{range .}}
+<tr><td><a class="path-link mono" href="/path?path={{. | urlquery}}">{{.}}</a></td></tr>
+{{end}}
+</tbody>
+</table>
+</div>
+{{end}}
 {{end}}

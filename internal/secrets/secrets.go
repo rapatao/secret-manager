@@ -191,6 +191,23 @@ func (s *Service) DeletePath(ctx context.Context, path string) error {
 	return nil
 }
 
+// DeletedPaths returns, sorted, every path that no longer exists but still
+// has stored versions.
+func (s *Service) DeletedPaths(ctx context.Context) ([]string, error) {
+	versioned, err := s.backend.VersionedPaths(ctx)
+	if err != nil {
+		return nil, err
+	}
+	current, err := s.backend.List(ctx, "/")
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(versioned, func(p string) bool {
+		_, found := slices.BinarySearch(current, p)
+		return found
+	}), nil
+}
+
 // History returns the versions of path, newest first. Versions of a deleted
 // path are kept.
 func (s *Service) History(ctx context.Context, path string) ([]Version, error) {

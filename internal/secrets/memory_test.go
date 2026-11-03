@@ -43,6 +43,12 @@ func (m *memBackend) Versions(_ context.Context, path string) ([]storage.Version
 	return slices.Clone(m.versions[path]), nil
 }
 
+func (m *memBackend) VersionedPaths(_ context.Context) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Sorted(maps.Keys(m.versions)), nil
+}
+
 func (m *memBackend) Get(_ context.Context, path string) (map[string]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

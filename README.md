@@ -237,7 +237,7 @@ The file holds every value in plain text. Encrypt it before storing it elsewhere
 
 ## Web UI
 
-Open the server URL and sign in with the admin token. The UI lists paths, filters them by a search term matched anywhere in the path, and lets you create and delete paths and keys, copy a key's value to the clipboard, and view and restore a path's versions; values stay hidden until expanded. It follows the system light or dark theme. Only the copy button needs JavaScript. Deleted paths are not listed; restore them with the CLI or the API. Sessions last 12 hours and survive server restarts; changing the admin token signs every session out. Logging out deletes the session cookie in the browser. The session cookie is `Secure`, so use HTTPS (an Ingress with TLS) or `localhost`.
+Open the server URL and sign in with the admin token. The UI lists paths, filters them by a search term matched anywhere in the path, and lets you create and delete paths and keys, copy a key's value to the clipboard, and view and restore a path's versions; values stay hidden until expanded. It follows the system light or dark theme. Only the copy button needs JavaScript. Deleted paths that still have versions are listed separately, and restoring one of their versions brings them back. Sessions last 12 hours and survive server restarts; changing the admin token signs every session out. Logging out deletes the session cookie in the browser. The session cookie is `Secure`, so use HTTPS (an Ingress with TLS) or `localhost`.
 
 ## API
 

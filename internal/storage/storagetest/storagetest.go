@@ -154,6 +154,23 @@ func Run(t *testing.T, newBackend func() storage.Backend) {
 			t.Fatalf("Versions(missing) = %v, %v", missing, err)
 		}
 	})
+
+	t.Run("versioned paths", func(t *testing.T) {
+		b := newBackend()
+		mustPut(t, b, "/plain", map[string]string{"A": "1"})
+		for _, p := range []string{"/b", "/a", "/a"} {
+			if err := b.AddVersion(ctx, p, time.Now(), map[string]string{"A": "1"}, 10); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := b.VersionedPaths(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"/a", "/b"}; !slices.Equal(got, want) {
+			t.Fatalf("VersionedPaths = %v, want %v", got, want)
+		}
+	})
 }
 
 func mustPut(t *testing.T, b storage.Backend, path string, data map[string]string) {
