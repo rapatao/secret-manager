@@ -49,6 +49,8 @@ const Usage = `Client commands:
   rollback --path P VERSION                    restore a version
   run     --path P [--recursive] -- CMD [ARGS...]
                                                run CMD with secrets as env vars
+  version                                      print the client version and, when a
+                                               server is set, its version and capabilities
 
 Every command accepts --server URL. Without it, $` + EnvURL + ` or the
 default server is used. $` + EnvToken + ` is only sent to $` + EnvURL + `;
@@ -56,6 +58,8 @@ any other server uses the token stored by servers login.
 `
 
 var errUsage = errors.New("usage")
+
+var errNoServer = fmt.Errorf("%w: give --server, set %s or run servers login", errUsage, EnvURL)
 
 // CLI runs client commands.
 type CLI struct {
@@ -67,6 +71,8 @@ type CLI struct {
 	// ConfigDir holds the default server and, without a usable OS keychain,
 	// stored tokens.
 	ConfigDir string
+	// Version is the client version printed by the version command.
+	Version string
 }
 
 // Default returns a CLI bound to the process stdio and environment.
@@ -93,6 +99,7 @@ func (c *CLI) Run(ctx context.Context, args []string) int {
 		"run":      c.run,
 		"history":  c.history,
 		"rollback": c.rollback,
+		"version":  c.version,
 	}
 	if len(args) == 0 {
 		fmt.Fprint(c.Stderr, Usage)
@@ -180,7 +187,7 @@ func (f *flags) parseFlags(args []string) error {
 		f.server = cfg.Server
 	}
 	if f.server == "" {
-		return fmt.Errorf("%w: give --server, set %s or run servers login", errUsage, EnvURL)
+		return errNoServer
 	}
 	return nil
 }
@@ -535,6 +542,29 @@ func (c *CLI) rollback(ctx context.Context, args []string) error {
 		return err
 	}
 	return api.Rollback(ctx, f.path, n)
+}
+
+func (c *CLI) version(ctx context.Context, args []string) error {
+	f := c.flags("version", false, false)
+	api, err := f.parse(args)
+	if errors.Is(err, errNoServer) && f.fs.NArg() == 0 {
+		fmt.Fprintf(c.Stdout, "client: %s\n", c.Version)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if f.fs.NArg() > 0 {
+		return fmt.Errorf("%w: version takes no arguments", errUsage)
+	}
+	fmt.Fprintf(c.Stdout, "client: %s\n", c.Version)
+	info, err := api.Info(ctx)
+	if err != nil {
+		return fmt.Errorf("server %s: %w", f.server, err)
+	}
+	fmt.Fprintf(c.Stdout, "server: %s (%s)\n", cmp.Or(info.Version, "unknown, older than the client"), f.server)
+	fmt.Fprintf(c.Stdout, "capabilities: %s\n", strings.Join(info.Capabilities, ", "))
+	return nil
 }
 
 func parseVersion(s string) (int, error) {

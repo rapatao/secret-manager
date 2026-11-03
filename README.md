@@ -157,6 +157,7 @@ secret-manager run --path /tools -- make updates
 secret-manager history --path /tools                   # list versions
 secret-manager history --path /tools 3                 # print version 3 as dotenv
 secret-manager rollback --path /tools 3
+secret-manager version                                 # client and server versions, server capabilities
 ```
 
 ### Servers and login
@@ -210,6 +211,7 @@ All endpoints except `/healthz` and `/readyz` require `Authorization: Bearer <to
 
 | Method | Path | Description |
 |--------|------|-------------|
+| `GET` | `/api/v1/info` | `{"version": "1.4.0", "capabilities": [...]}`, see [Compatibility](#compatibility) |
 | `GET` | `/api/v1/paths` | `{"paths": [...]}` |
 | `GET` | `/api/v1/secrets?path=P&recursive=true` | `{"data": {"KEY": "value"}}` |
 | `PUT` | `/api/v1/secrets?path=P` | Merge a JSON object of string values into P |
@@ -222,6 +224,20 @@ All endpoints except `/healthz` and `/readyz` require `Authorization: Bearer <to
 | `GET` | `/readyz` | Readiness: 503 when the storage backend cannot be read |
 
 Paths look like `/a/b`, with segments of `[a-z0-9-]`. Keys match `[-._a-zA-Z0-9]+`.
+
+### Compatibility
+
+Clients and servers of different versions work together. `/api/v1` endpoints keep their behavior, so an older CLI works against a newer server. A newer CLI works against an older server too, as long as the server has the features a command uses.
+
+`GET /api/v1/info` lists those features as capabilities: `paths`, `secrets` and `history` today. Commands that need a feature added later check its capability first and fail with `server 1.2.0 at URL does not support X; upgrade the server` instead of an unclear error. Servers older than `/api/v1/info` are treated as having `paths`, `secrets` and `history`. A capability never changes meaning and is never removed; changed behavior gets a new capability.
+
+`secret-manager version` prints the client version and, when a server is set (see [Resolution order](#resolution-order)), the server version and capabilities:
+
+```
+client: 1.5.0
+server: 1.4.0 (https://secrets.example.com)
+capabilities: history, paths, secrets
+```
 
 ## Observability
 
