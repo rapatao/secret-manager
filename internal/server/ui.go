@@ -15,7 +15,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/rapatao/secret-manager/internal/secrets"
@@ -39,18 +38,17 @@ func init() {
 }
 
 // sessions issues cookies signed with a key derived from the admin token, so
-// they survive restarts and are invalidated when the token changes.
+// they survive restarts and are invalidated when the token changes. Logging
+// out deletes the cookie; a copy of it stays valid until it expires.
 type sessions struct {
-	mu      sync.Mutex
-	ttl     time.Duration
-	key     []byte
-	revoked map[string]time.Time
+	ttl time.Duration
+	key []byte
 }
 
 func newSessions(token []byte, ttl time.Duration) *sessions {
 	m := hmac.New(sha256.New, token)
 	m.Write([]byte("secret-manager ui session"))
-	return &sessions{ttl: ttl, key: m.Sum(nil), revoked: map[string]time.Time{}}
+	return &sessions{ttl: ttl, key: m.Sum(nil)}
 }
 
 func (s *sessions) sign(payload string) string {
@@ -64,46 +62,14 @@ func (s *sessions) create() string {
 	return payload + "." + s.sign(payload)
 }
 
-func (s *sessions) expiry(id string) (time.Time, bool) {
+func (s *sessions) valid(id string) bool {
 	i := strings.LastIndexByte(id, '.')
 	if i < 0 || !hmac.Equal([]byte(id[i+1:]), []byte(s.sign(id[:i]))) {
-		return time.Time{}, false
+		return false
 	}
 	unix, _, _ := strings.Cut(id[:i], ".")
 	sec, err := strconv.ParseInt(unix, 10, 64)
-	if err != nil {
-		return time.Time{}, false
-	}
-	exp := time.Unix(sec, 0)
-	return exp, time.Now().Before(exp)
-}
-
-func (s *sessions) valid(id string) bool {
-	if _, ok := s.expiry(id); !ok {
-		return false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, revoked := s.revoked[id]
-	return !revoked
-}
-
-// ponytail: revocations live in memory, so a logged-out cookie captured before
-// logout is accepted again after a restart until it expires.
-func (s *sessions) delete(id string) {
-	exp, ok := s.expiry(id)
-	if !ok {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := time.Now()
-	for k, e := range s.revoked {
-		if now.After(e) {
-			delete(s.revoked, k)
-		}
-	}
-	s.revoked[id] = exp
+	return err == nil && time.Now().Before(time.Unix(sec, 0))
 }
 
 // ui sets security headers and rejects cross-origin form posts.
@@ -161,9 +127,6 @@ func (s *Server) uiLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) uiLogout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(sessionCookie); err == nil {
-		s.sessions.delete(c.Value)
-	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
