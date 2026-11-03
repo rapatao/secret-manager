@@ -4,7 +4,7 @@ A small, self-hosted key-value secret manager for Kubernetes.
 
 - Secrets are organized by path (`/kubernetes/app`, `/tools`) and managed with a CLI or a Web UI.
 - A `SecretSync` resource syncs one or more paths into Kubernetes Secrets, in any namespace, optionally shaped with Go templates.
-- Deployments that opt in are restarted when a Secret they use changes.
+- Deployments, StatefulSets and DaemonSets that opt in are restarted when a Secret they use changes.
 - `secret-manager run` injects secrets as environment variables into local commands, and keeps working from an encrypted cache while the server is unreachable.
 - Every write is kept as a version, so a path can be inspected or rolled back, even after it is deleted.
 - `secret-manager backup` and `restore` copy every path, optionally with its versions, to and from a JSON file.
@@ -20,7 +20,7 @@ One binary contains the controller, the REST API, the Web UI and the CLI. The co
 | Web UI and CLI | Yes | No | Yes | CLI to encrypt (`kubeseal`) |
 | Users, roles, environments | No, one admin token | From the external store | Yes | Git permissions |
 | Secret history | Yes, last N versions per path | From the external store | Yes | Git history |
-| Restarts Deployments on change | Yes | No, needs a tool like Reloader | Yes | No |
+| Restarts workloads on change | Yes | No, needs a tool like Reloader | Yes | No |
 
 Choose secret-manager for a small cluster where one person or a small team manages the secrets and running a database for them is not worth it. Choose External Secrets Operator if you already have a secret store, Infisical if you need users and environments, and Sealed Secrets if secrets must live in git.
 
@@ -29,7 +29,7 @@ Choose secret-manager for a small cluster where one person or a small team manag
 ```
 CLI / Web UI --HTTP--> secret-manager server --> storage backend (Kubernetes Secrets)
                               |
-                              +--> controller --> target Secrets --> Deployment restarts
+                              +--> controller --> target Secrets --> workload restarts
 ```
 
 Writes made through the API reach target Secrets immediately. Every `SecretSync` also resyncs on its `refreshInterval`, which repairs drift and picks up changes made directly on the store.
@@ -69,7 +69,7 @@ kubectl apply -f /tmp/sm/secret-manager/crds
 
 The server runs as a single replica: writes are serialized in process.
 
-Set `controller.enabled=false` to only store secrets: the `SecretSync` controller does not run, no Secret outside the release namespace is written, no Deployment is restarted, and the chart installs a Role limited to Secrets in the release namespace instead of a ClusterRole. Add `--skip-crds` to `helm install` to leave out the `SecretSync` CRD.
+Set `controller.enabled=false` to only store secrets: the `SecretSync` controller does not run, no Secret outside the release namespace is written, no workload is restarted, and the chart installs a Role limited to Secrets in the release namespace instead of a ClusterRole. Add `--skip-crds` to `helm install` to leave out the `SecretSync` CRD.
 
 ### Without Kubernetes
 
@@ -137,11 +137,11 @@ spec:
 
 The controller never overwrites a Secret it did not create; the `Ready` condition reports the conflict instead. `kubectl get secretsync` shows `Ready` and `Reason`.
 
-`kubectl describe secretsync` lists events: `Synced` when a target Secret is created or updated, `DeploymentsRestarted` when Deployments are restarted, and a `Warning` with the condition reason (`SourceError`, `SyncFailed`) when a sync starts failing or its error changes.
+`kubectl describe secretsync` lists events: `Synced` when a target Secret is created or updated, `WorkloadsRestarted` when workloads are restarted, and a `Warning` with the condition reason (`SourceError`, `SyncFailed`) when a sync starts failing or its error changes.
 
-### Restarting Deployments
+### Restarting workloads
 
-Annotate a Deployment to restart it whenever a synced Secret it references (`envFrom`, `env.valueFrom`, `volumes`, projected volumes) changes:
+Annotate a Deployment, StatefulSet or DaemonSet to restart it whenever a synced Secret it references (`envFrom`, `env.valueFrom`, `volumes`, projected volumes) changes:
 
 ```yaml
 metadata:
@@ -284,7 +284,7 @@ Prometheus metrics are served on `:8081/metrics` (`--metrics-addr`, `0` disables
 | Metric | Description |
 |--------|-------------|
 | `secretmanager_sync_failures_total{reason}` | Reconciles that left `Ready` False, by reason |
-| `secretmanager_deployment_restarts_total` | Deployments restarted because a synced Secret changed |
+| `secretmanager_workload_restarts_total{kind}` | Deployments, StatefulSets and DaemonSets restarted because a synced Secret changed, by kind |
 
 With the Prometheus Operator, set `metrics.serviceMonitor.enabled=true` (and `metrics.serviceMonitor.labels` to match your Prometheus selector) to create a `ServiceMonitor`.
 

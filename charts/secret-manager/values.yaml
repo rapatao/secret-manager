@@ -36,7 +36,7 @@ logLevel: info
 historyLimit: 10
 
 # Runs the SecretSync controller, which writes Secrets in any namespace and
-# restarts Deployments, with cluster-wide RBAC. When false, the server only
+# restarts workloads, with cluster-wide RBAC. When false, the server only
 # stores secrets and its RBAC is limited to Secrets in the release namespace.
 controller:
   enabled: true

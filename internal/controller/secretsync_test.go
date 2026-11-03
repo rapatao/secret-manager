@@ -344,17 +344,17 @@ func TestSyncEventsAndRestartMetric(t *testing.T) {
 		t.Fatalf("unchanged resync emitted %q", got)
 	}
 
-	restarts := testutil.ToFloat64(deploymentRestarts)
+	restarts := testutil.ToFloat64(workloadRestarts.WithLabelValues("Deployment"))
 	e.set("/kubernetes", map[string]string{"A": "2"})
 	e.reconcile(ss)
 	want := []string{
 		"Normal Synced Updated Secret app/creds",
-		"Normal DeploymentsRestarted Restarted Deployments web in app for Secret creds",
+		"Normal WorkloadsRestarted Restarted Deployment/web in app for Secret creds",
 	}
 	if got := e.events(); strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("update events %q, want %q", got, want)
 	}
-	if got := testutil.ToFloat64(deploymentRestarts) - restarts; got != 1 {
+	if got := testutil.ToFloat64(workloadRestarts.WithLabelValues("Deployment")) - restarts; got != 1 {
 		t.Fatalf("restarts metric grew by %v, want 1", got)
 	}
 }

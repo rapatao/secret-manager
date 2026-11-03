@@ -250,12 +250,15 @@ func (r *SecretSyncReconciler) syncTarget(ctx context.Context, ss *v1alpha1.Secr
 	if !changed {
 		return nil
 	}
-	restarted, err := reload.Deployments(ctx, r.Client, ns, t.Name, hash)
+	restarted, err := reload.Workloads(ctx, r.Client, ns, t.Name, hash)
 	if len(restarted) > 0 {
-		deploymentRestarts.Add(float64(len(restarted)))
-		log.FromContext(ctx).Info("restarted deployments", "namespace", ns, "secret", t.Name, "deployments", restarted)
-		r.Recorder.Eventf(ss, nil, corev1.EventTypeNormal, "DeploymentsRestarted", "RestartDeployments",
-			"Restarted Deployments %s in %s for Secret %s", strings.Join(restarted, ", "), ns, t.Name)
+		for _, w := range restarted {
+			kind, _, _ := strings.Cut(w, "/")
+			workloadRestarts.WithLabelValues(kind).Inc()
+		}
+		log.FromContext(ctx).Info("restarted workloads", "namespace", ns, "secret", t.Name, "workloads", restarted)
+		r.Recorder.Eventf(ss, nil, corev1.EventTypeNormal, "WorkloadsRestarted", "RestartWorkloads",
+			"Restarted %s in %s for Secret %s", strings.Join(restarted, ", "), ns, t.Name)
 	}
 	return err
 }
