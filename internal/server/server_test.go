@@ -269,7 +269,16 @@ func TestUIFlow(t *testing.T) {
 	if code, _ := postForm(t, c, ts, "/key", url.Values{"path": {"/app"}, "key": {"PASS"}, "value": {"<s3cret>"}}, origin); code != http.StatusOK {
 		t.Fatalf("set key: %d", code)
 	}
-	_, body := get(t, c, ts.URL+"/path?path=/app")
+	postForm(t, c, ts, "/path", url.Values{"path": {"/other"}}, origin)
+	_, body := get(t, c, ts.URL+"/?q=ap")
+	if !strings.Contains(body, ">/app<") || strings.Contains(body, ">/other<") {
+		t.Fatalf("search not filtering paths:\n%s", body)
+	}
+	if code, js := get(t, c, ts.URL+"/ui.js"); code != http.StatusOK || !strings.Contains(js, "clipboard") {
+		t.Fatalf("ui.js: %d", code)
+	}
+
+	_, body = get(t, c, ts.URL+"/path?path=/app")
 	if !strings.Contains(body, "PASS") || !strings.Contains(body, "&lt;s3cret&gt;") {
 		t.Fatalf("path page missing escaped key/value:\n%s", body)
 	}

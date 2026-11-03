@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,7 +23,7 @@ const sessionCookie = "sm_session"
 // to Origin for older browsers.
 var crossOrigin = http.NewCrossOriginProtection()
 
-//go:embed ui/*.html
+//go:embed ui/*.html ui/ui.js
 var uiFS embed.FS
 
 var pages = map[string]*template.Template{}
@@ -74,7 +75,7 @@ func (s *sessions) delete(id string) {
 func (s *Server) ui(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'none'; style-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Cache-Control", "no-store")
@@ -95,6 +96,10 @@ func (s *Server) session(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+func (s *Server) uiScript(w http.ResponseWriter, r *http.Request) {
+	http.ServeFileFS(w, r, uiFS, "ui/ui.js")
 }
 
 func (s *Server) uiLoginForm(w http.ResponseWriter, _ *http.Request) {
@@ -134,7 +139,9 @@ func (s *Server) uiIndex(w http.ResponseWriter, r *http.Request) {
 		s.uiError(w, r, err)
 		return
 	}
-	render(w, http.StatusOK, "index", map[string]any{"Paths": paths, "Error": r.URL.Query().Get("error")})
+	q := r.URL.Query().Get("q")
+	paths = slices.DeleteFunc(paths, func(p string) bool { return !strings.Contains(p, q) })
+	render(w, http.StatusOK, "index", map[string]any{"Paths": paths, "Query": q, "Error": r.URL.Query().Get("error")})
 }
 
 type entry struct{ Key, Value string }

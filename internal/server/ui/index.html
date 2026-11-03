@@ -10,12 +10,18 @@
 </div>
 </div>
 <div class="card">
+<div class="body">
+<form class="row" method="get" action="/">
+<input type="search" name="q" value="{{.Query}}" placeholder="Search paths" aria-label="Search paths">
+<button type="submit">Search</button>
+</form>
+</div>
 <table>
 <tbody>
 {{range .Paths}}
 <tr><td><a class="path-link mono" href="/path?path={{. | urlquery}}">{{.}}</a></td></tr>
 {{else}}
-<tr><td class="empty">No paths yet. Create one above.</td></tr>
+<tr><td class="empty">{{if .Query}}No paths match.{{else}}No paths yet. Create one above.{{end}}</td></tr>
 {{end}}
 </tbody>
 </table>

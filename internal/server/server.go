@@ -87,6 +87,7 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /api/v1/history/{version}", s.bearer(s.apiVersion))
 	s.mux.Handle("POST /api/v1/history/{version}/rollback", s.bearer(s.apiRollback))
 
+	s.mux.Handle("GET /ui.js", s.ui(s.uiScript))
 	s.mux.Handle("GET /login", s.ui(s.uiLoginForm))
 	s.mux.Handle("POST /login", s.ui(s.uiLogin))
 	s.mux.Handle("POST /logout", s.ui(s.session(s.uiLogout)))
