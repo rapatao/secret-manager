@@ -14,6 +14,15 @@ auth:
   existingSecret: ""
   key: token
 
+# Secret holding a base64 AES-256 key that encrypts stored values. Optional.
+# Without the key the server cannot read values written with it, so back it up
+# outside the cluster. Create it before installing, e.g.:
+#   kubectl create secret generic secret-manager-encryption \
+#     --from-literal=key="$(openssl rand -base64 32)"
+encryption:
+  existingSecret: ""
+  key: key
+
 service:
   type: ClusterIP
   port: 80

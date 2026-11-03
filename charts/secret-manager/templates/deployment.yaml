@@ -44,6 +44,13 @@ spec:
                 secretKeyRef:
                   name: {{ required "auth.existingSecret is required" .Values.auth.existingSecret }}
                   key: {{ .Values.auth.key }}
+            {{- with .Values.encryption.existingSecret }}
+            - name: SECRET_MANAGER_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . }}
+                  key: {{ $.Values.encryption.key }}
+            {{- end }}
           ports:
             - name: http
               containerPort: 8080

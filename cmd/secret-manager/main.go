@@ -29,11 +29,14 @@ import (
 	"github.com/rapatao/secret-manager/internal/secrets"
 	"github.com/rapatao/secret-manager/internal/server"
 	"github.com/rapatao/secret-manager/internal/storage"
+	"github.com/rapatao/secret-manager/internal/storage/encrypted"
 	filestorage "github.com/rapatao/secret-manager/internal/storage/file"
 	k8sstorage "github.com/rapatao/secret-manager/internal/storage/kubernetes"
 )
 
 var version = "dev"
+
+const envEncryptionKey = "SECRET_MANAGER_ENCRYPTION_KEY"
 
 const usage = `Usage: secret-manager <command> [flags]
 
@@ -44,7 +47,9 @@ Server:
          [--backup-dir DIR [--backup-interval 24h] [--backup-keep 7]
           [--backup-history]]
                                                run controller, API and Web UI
-                                               (admin token from ` + cli.EnvToken + `)
+                                               (admin token from ` + cli.EnvToken + `,
+                                               optional encryption key from
+                                               ` + envEncryptionKey + `)
 
 `
 
@@ -131,6 +136,25 @@ func runServer(args []string) error {
 	default:
 		return fmt.Errorf("unknown storage %q", *storageName)
 	}
+	var key []byte
+	if v := os.Getenv(envEncryptionKey); v != "" {
+		var err error
+		if key, err = encrypted.ParseKey(v); err != nil {
+			return fmt.Errorf("%s: %w", envEncryptionKey, err)
+		}
+	}
+	enc, err := encrypted.New(backend, key)
+	if err != nil {
+		return err
+	}
+	backend = enc
+	migrated, err := enc.EncryptPlaintext(context.Background())
+	if err != nil {
+		return fmt.Errorf("encrypt stored plaintext: %w", err)
+	}
+	if len(migrated) > 0 {
+		slog.Info("encrypted plaintext paths", "paths", migrated)
+	}
 
 	var changes controller.Changes
 	var onChange func(string)
@@ -160,7 +184,8 @@ func runServer(args []string) error {
 	handler.Version = version
 	httpServer := &http.Server{Addr: *addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 
-	slog.Info("starting secret-manager", "version", version, "storage", *storageName, "controller", *runController, "backup_dir", sched.Dir)
+	slog.Info("starting secret-manager", "version", version, "storage", *storageName, "controller", *runController,
+		"encryption", key != nil, "backup_dir", sched.Dir)
 	ctx := ctrl.SetupSignalHandler()
 	if sched.Dir != "" {
 		go handler.RunBackups(ctx, sched)
