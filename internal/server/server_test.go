@@ -419,3 +419,14 @@ func TestFailureLogHasRequestContext(t *testing.T) {
 		t.Fatalf("log entry %+v", e)
 	}
 }
+
+func TestAPIInfo(t *testing.T) {
+	ts := newTestServer(t)
+	if code, _ := do(t, ts, "GET", "/api/v1/info", "", ""); code != http.StatusUnauthorized {
+		t.Fatalf("info without token: %d", code)
+	}
+	code, body := do(t, ts, "GET", "/api/v1/info", token, "")
+	if code != http.StatusOK || strings.TrimSpace(body) != `{"capabilities":["history","paths","secrets"],"version":""}` {
+		t.Fatalf("info: %d %s", code, body)
+	}
+}

@@ -38,7 +38,6 @@ Server:
   server [--addr :8080] [--namespace NS] [--storage kubernetes] [--history-limit 10]
                                                run controller, API and Web UI
                                                (admin token from ` + cli.EnvToken + `)
-  version                                      print the version
 
 `
 
@@ -52,9 +51,6 @@ func main() {
 				os.Exit(1)
 			}
 			return
-		case "version":
-			fmt.Println(version)
-			return
 		case "help", "-h", "--help":
 			fmt.Print(usage, cli.Usage)
 			return
@@ -64,7 +60,9 @@ func main() {
 		fmt.Fprint(os.Stderr, usage, cli.Usage)
 		os.Exit(2)
 	}
-	os.Exit(cli.Default().Run(context.Background(), args))
+	c := cli.Default()
+	c.Version = version
+	os.Exit(c.Run(context.Background(), args))
 }
 
 func runServer(args []string) error {
@@ -142,6 +140,7 @@ func runServer(args []string) error {
 	if err != nil {
 		return err
 	}
+	handler.Version = version
 	httpServer := &http.Server{Addr: *addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	err = mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		errc := make(chan error, 1)

@@ -23,8 +23,17 @@ const MinTokenLength = 32
 
 const maxBodyBytes = 1 << 20
 
+// Capabilities lists the API features this server supports, reported by
+// GET /api/v1/info. Clients check them before using a feature added after
+// the first release. A shipped capability never changes meaning and is never
+// removed; changed behavior gets a new name.
+var Capabilities = []string{"history", "paths", "secrets"}
+
 // Server serves the API under /api/v1 and the Web UI under /.
 type Server struct {
+	// Version is reported by GET /api/v1/info.
+	Version string
+
 	secrets  *secrets.Service
 	token    []byte
 	sessions *sessions
@@ -58,6 +67,7 @@ func (s *Server) routes() {
 	})
 	s.mux.HandleFunc("GET /readyz", s.readyz)
 
+	s.mux.Handle("GET /api/v1/info", s.bearer(s.apiInfo))
 	s.mux.Handle("GET /api/v1/paths", s.bearer(s.apiListPaths))
 	s.mux.Handle("DELETE /api/v1/paths", s.bearer(s.apiDeletePath))
 	s.mux.Handle("GET /api/v1/secrets", s.bearer(s.apiGet))
@@ -106,6 +116,10 @@ func (s *Server) bearer(next http.HandlerFunc) http.Handler {
 		}
 		next(w, r)
 	})
+}
+
+func (s *Server) apiInfo(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"version": s.Version, "capabilities": Capabilities})
 }
 
 func (s *Server) apiListPaths(w http.ResponseWriter, r *http.Request) {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -46,6 +47,7 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	srv.Version = "1.4.0"
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	return &harness{t: t, url: ts.URL, envURL: ts.URL, envToken: token, dir: t.TempDir()}
@@ -62,6 +64,7 @@ func (h *harness) run(args ...string) int {
 		Getenv:    func(k string) string { return env[k] },
 		Environ:   func() []string { return []string{"PATH=/usr/bin:/bin", "KEEP=1", "OVERRIDE=old"} },
 		ConfigDir: h.dir,
+		Version:   "1.5.0",
 	}
 	return c.Run(context.Background(), args)
 }
@@ -382,5 +385,29 @@ func TestServersListAndUse(t *testing.T) {
 	}
 	if code := h.run("servers", "bogus"); code != 2 {
 		t.Fatalf("unknown subcommand: exit %d", code)
+	}
+}
+
+func TestVersion(t *testing.T) {
+	h := newHarness(t)
+	want := "client: 1.5.0\nserver: 1.4.0 (" + h.url + ")\ncapabilities: history, paths, secrets\n"
+	if got := h.mustRun("version"); got != want {
+		t.Fatalf("version: %q", got)
+	}
+
+	h.envURL, h.envToken = "", ""
+	if got := h.mustRun("version"); got != "client: 1.5.0\n" {
+		t.Fatalf("version without server: %q", got)
+	}
+}
+
+func TestVersionAgainstServerWithoutInfo(t *testing.T) {
+	h := newHarness(t)
+	ts := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(ts.Close)
+	h.envURL = ts.URL
+	want := "client: 1.5.0\nserver: unknown, older than the client (" + ts.URL + ")\ncapabilities: history, paths, secrets\n"
+	if got := h.mustRun("version"); got != want {
+		t.Fatalf("version: %q", got)
 	}
 }
