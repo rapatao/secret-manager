@@ -70,6 +70,7 @@ func main() {
 func runServer(args []string) error {
 	fs := flag.NewFlagSet("server", flag.ContinueOnError)
 	addr := fs.String("addr", ":8080", "listen address of the API and Web UI")
+	metricsAddr := fs.String("metrics-addr", ":8081", "listen address of the Prometheus metrics, 0 to disable")
 	namespace := fs.String("namespace", os.Getenv("POD_NAMESPACE"), "namespace holding the stored secrets (kubernetes storage)")
 	storageName := fs.String("storage", "kubernetes", "storage backend: kubernetes")
 	if err := fs.Parse(args); err != nil {
@@ -94,7 +95,7 @@ func runServer(args []string) error {
 	}
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:  scheme,
-		Metrics: metricsserver.Options{BindAddress: "0"},
+		Metrics: metricsserver.Options{BindAddress: *metricsAddr},
 		Client: client.Options{Cache: &client.CacheOptions{
 			// Read Secrets and Deployments directly: no cluster-wide cache of
 			// every Secret, and storage reads always see the latest write.
@@ -119,7 +120,13 @@ func runServer(args []string) error {
 	changes := controller.NewChanges()
 	svc := secrets.New(backend, changes.Notify)
 
-	if err := (&controller.SecretSyncReconciler{Client: mgr.GetClient(), Secrets: svc, Changes: changes}).SetupWithManager(mgr); err != nil {
+	reconciler := &controller.SecretSyncReconciler{
+		Client:   mgr.GetClient(),
+		Secrets:  svc,
+		Changes:  changes,
+		Recorder: mgr.GetEventRecorder("secret-manager"),
+	}
+	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup controller: %w", err)
 	}
 

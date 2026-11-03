@@ -19,6 +19,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -67,9 +68,10 @@ func (c Changes) Notify(path string) {
 
 // SecretSyncReconciler writes target Secrets from secret-manager paths.
 type SecretSyncReconciler struct {
-	Client  client.Client
-	Secrets *secrets.Service
-	Changes Changes
+	Client   client.Client
+	Secrets  *secrets.Service
+	Changes  Changes
+	Recorder events.EventRecorder
 }
 
 // SetupWithManager registers the reconciler and its watches.
@@ -132,7 +134,7 @@ func (r *SecretSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	values, err := r.resolve(ctx, &ss)
 	if err != nil {
-		return withStatus(result, r.setStatus(ctx, &ss, "", metav1.ConditionFalse, "SourceError", err.Error()))
+		return withStatus(result, r.fail(ctx, &ss, "", "SourceError", err.Error()))
 	}
 
 	keep := map[string]bool{}
@@ -150,7 +152,7 @@ func (r *SecretSyncReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	hash := hashData(toBytes(values))
 	if len(failures) > 0 {
-		return withStatus(result, r.setStatus(ctx, &ss, hash, metav1.ConditionFalse, "SyncFailed", strings.Join(failures, "; ")))
+		return withStatus(result, r.fail(ctx, &ss, hash, "SyncFailed", strings.Join(failures, "; ")))
 	}
 	return withStatus(result, r.setStatus(ctx, &ss, hash, metav1.ConditionTrue, "Synced", fmt.Sprintf("%d target(s) in sync", len(ss.Spec.Targets))))
 }
@@ -213,7 +215,11 @@ func (r *SecretSyncReconciler) syncTarget(ctx context.Context, ss *v1alpha1.Secr
 			Type:       cmp.Or(t.Type, corev1.SecretTypeOpaque),
 			Data:       data,
 		}
-		return r.Client.Create(ctx, s)
+		if err := r.Client.Create(ctx, s); err != nil {
+			return err
+		}
+		r.Recorder.Eventf(ss, nil, corev1.EventTypeNormal, "Synced", "CreateSecret", "Created Secret %s/%s", ns, t.Name)
+		return nil
 	}
 	if err != nil {
 		return err
@@ -240,12 +246,16 @@ func (r *SecretSyncReconciler) syncTarget(ctx context.Context, ss *v1alpha1.Secr
 	if err := r.Client.Update(ctx, &existing); err != nil {
 		return err
 	}
+	r.Recorder.Eventf(ss, nil, corev1.EventTypeNormal, "Synced", "UpdateSecret", "Updated Secret %s/%s", ns, t.Name)
 	if !changed {
 		return nil
 	}
 	restarted, err := reload.Deployments(ctx, r.Client, ns, t.Name, hash)
 	if len(restarted) > 0 {
+		deploymentRestarts.Add(float64(len(restarted)))
 		log.FromContext(ctx).Info("restarted deployments", "namespace", ns, "secret", t.Name, "deployments", restarted)
+		r.Recorder.Eventf(ss, nil, corev1.EventTypeNormal, "DeploymentsRestarted", "RestartDeployments",
+			"Restarted Deployments %s in %s for Secret %s", strings.Join(restarted, ", "), ns, t.Name)
 	}
 	return err
 }
@@ -279,7 +289,19 @@ func (r *SecretSyncReconciler) release(ctx context.Context, ss *v1alpha1.SecretS
 	return nil
 }
 
+// fail counts a failed sync and sets Ready to False.
+func (r *SecretSyncReconciler) fail(ctx context.Context, ss *v1alpha1.SecretSync, hash, reason, message string) error {
+	syncFailures.WithLabelValues(reason).Inc()
+	return r.setStatus(ctx, ss, hash, metav1.ConditionFalse, reason, message)
+}
+
+// setStatus writes the Ready condition. A new failure reason or message emits
+// a Warning event once instead of on every resync.
 func (r *SecretSyncReconciler) setStatus(ctx context.Context, ss *v1alpha1.SecretSync, hash string, status metav1.ConditionStatus, reason, message string) error {
+	if prev := meta.FindStatusCondition(ss.Status.Conditions, v1alpha1.ConditionReady); status == metav1.ConditionFalse &&
+		(prev == nil || prev.Reason != reason || prev.Message != message) {
+		r.Recorder.Eventf(ss, nil, corev1.EventTypeWarning, reason, "Sync", "%s", message)
+	}
 	next := ss.Status.DeepCopy()
 	next.ObservedGeneration = ss.Generation
 	if hash != "" {

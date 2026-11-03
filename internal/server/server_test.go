@@ -1,13 +1,16 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -18,16 +21,40 @@ import (
 
 const token = "0123456789abcdef0123456789abcdef"
 
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func newTestServer(t *testing.T) *httptest.Server {
+	ts, _ := newLoggedServer(t)
+	return ts
+}
+
+func newLoggedServer(t *testing.T) (*httptest.Server, *syncBuffer) {
 	t.Helper()
 	svc := secrets.New(k8sstorage.New(fake.NewClientBuilder().Build(), "sm"), nil)
 	s, err := New(svc, token)
 	if err != nil {
 		t.Fatal(err)
 	}
+	logs := &syncBuffer{}
+	s.log = slog.New(slog.NewJSONHandler(logs, nil))
 	ts := httptest.NewTLSServer(s)
 	t.Cleanup(ts.Close)
-	return ts
+	return ts, logs
 }
 
 func do(t *testing.T, ts *httptest.Server, method, path, auth, body string) (int, string) {
@@ -228,4 +255,49 @@ func TestUICrossOrigin(t *testing.T) {
 	if code, _ := postForm(t, c, ts, "/login", login, ""); code != http.StatusOK {
 		t.Fatalf("post without browser headers: %d", code)
 	}
+}
+
+func TestAuditLog(t *testing.T) {
+	ts, logs := newLoggedServer(t)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/app", token, `{"PASS":"hunter2","USER":"bob"}`)
+	do(t, ts, "DELETE", "/api/v1/secrets/USER?path=/app", token, "")
+	do(t, ts, "DELETE", "/api/v1/paths?path=/BAD", token, "")
+	do(t, ts, "GET", "/api/v1/paths", "wrong-token", "")
+	c := uiClient(t, ts)
+	postForm(t, c, ts, "/login", url.Values{"token": {"wrong"}}, ts.URL)
+
+	type entry struct {
+		Level, Msg, Source, Op, Path, Error string
+		Keys                                []string
+	}
+	var got []entry
+	for line := range strings.Lines(logs.String()) {
+		var e entry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		if e.Msg == "audit" {
+			e.Msg = ""
+			e.Error, _, _ = strings.Cut(e.Error, ":")
+			got = append(got, e)
+		}
+	}
+	want := []entry{
+		{Level: "INFO", Source: "api", Op: "set", Path: "/app", Keys: []string{"PASS", "USER"}},
+		{Level: "INFO", Source: "api", Op: "delete_key", Path: "/app", Keys: []string{"USER"}},
+		{Level: "WARN", Source: "api", Op: "delete_path", Path: "/BAD", Error: "invalid input"},
+		{Level: "WARN", Source: "api", Op: "auth", Error: "invalid token"},
+		{Level: "WARN", Source: "ui", Op: "login", Error: "invalid token"},
+	}
+	if g, w := fmtEntries(got), fmtEntries(want); g != w {
+		t.Fatalf("audit entries\n got %s\nwant %s", g, w)
+	}
+	if strings.Contains(logs.String(), "hunter2") {
+		t.Fatal("secret value logged")
+	}
+}
+
+func fmtEntries[T any](v []T) string {
+	b, _ := json.Marshal(v)
+	return string(b)
 }
