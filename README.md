@@ -112,7 +112,7 @@ spec:
 | Field | Description |
 |-------|-------------|
 | `sources[].path` | Path to read. Sources are merged in order; later sources win on duplicate keys. |
-| `sources[].recursive` | Also read nested paths. The deeper path wins on duplicate keys. |
+| `sources[].recursive` | Also read nested paths. Paths are merged in alphabetical order, so on duplicate keys a nested path wins over its parents, and between sibling branches the later name wins (`/a/z` over `/a/b/c`). |
 | `refreshInterval` | Resync period, default `60s`. |
 | `targets[].name` / `namespace` | Secret to write. `namespace` defaults to the SecretSync namespace. |
 | `targets[].creationPolicy` | `Owner` (default) deletes the Secret when the SecretSync or the target is removed. `Orphan` keeps it. |
@@ -136,7 +136,7 @@ metadata:
 
 ## CLI
 
-Install the CLI with Go, or build it with `make build`:
+Install the CLI with Go, or build it with `make build`. A `go install` build reports its version as `dev`; `make build` uses `git describe`:
 
 ```sh
 go install github.com/rapatao/secret-manager/cmd/secret-manager@latest
@@ -198,7 +198,7 @@ The token is never accepted as a flag, so it doesn't end up in shell history or 
 
 ### Offline cache
 
-`get`, `export` and `run` keep the last secrets they read from each server and path. When the server is unreachable (connection error, or a `502`, `503` or `504` from the Ingress), they use the cached secrets and print a warning with the time they were read. Any other answer, such as `401` or `404`, is reported as an error and the cache is not used. Writes do not update the cache; the next successful read does.
+`get`, `export` and `run` keep the last secrets they read from each server, path and `--recursive` setting. When the server is unreachable (connection error, or a `502`, `503` or `504` from the Ingress), they use the cached secrets and print a warning with the time they were read. Any other answer, such as `401` or `404`, is reported as an error and the cache is not used. Writes do not update the cache; the next successful read does.
 
 Cached secrets are used for up to 7 days after they were read. `SECRET_MANAGER_CACHE_MAX_AGE` changes that, as a Go duration (`24h`, `30m`); `0` disables the cache, so nothing is written or read. Expired entries are removed when found.
 
@@ -206,7 +206,7 @@ Entries are encrypted with AES-256-GCM and stored in the `cache` directory next 
 
 ## History
 
-Every write that changes a path (setting keys, deleting a key, a rollback) stores the path's new data as a version numbered one above the previous. Writes that change nothing, and changes made directly on the stored Secrets, are not recorded. The newest versions are kept, current one included, up to `--history-limit` (chart value `historyLimit`, default `10`). Lowering the limit removes the extra versions of a path on its next write. `0` stops recording; versions already stored stay until removed by hand (`kubectl delete secret -l secretmanager.rapatao.com/history=true`).
+Every write that changes a path (setting keys, deleting a key) stores the path's new data as a version numbered one above the previous, and so does every rollback, even to identical data. Other writes that change nothing, and changes made directly on the stored Secrets, are not recorded. The newest versions are kept, current one included, up to `--history-limit` (chart value `historyLimit`, default `10`). Lowering the limit removes the extra versions of a path on its next write. `0` stops recording; versions already stored stay until removed by hand (`kubectl delete secret -l secretmanager.rapatao.com/history=true`).
 
 Deleting a path keeps its versions, so `rollback` can bring it back. Rolling back writes the old data as a new version, so it can itself be undone. Rolling back a synced path updates its targets like any other write.
 
@@ -230,7 +230,7 @@ All endpoints except `/healthz` and `/readyz` require `Authorization: Bearer <to
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/v1/info` | `{"version": "1.4.0", "capabilities": [...]}`, see [Compatibility](#compatibility) |
+| `GET` | `/api/v1/info` | `{"version": "v1.4.0", "capabilities": [...]}`, see [Compatibility](#compatibility) |
 | `GET` | `/api/v1/paths` | `{"paths": [...]}` |
 | `GET` | `/api/v1/secrets?path=P&recursive=true` | `{"data": {"KEY": "value"}}` |
 | `PUT` | `/api/v1/secrets?path=P` | Merge a JSON object of string values into P |
@@ -250,13 +250,13 @@ Paths look like `/a/b`, with segments of `[a-z0-9-]`. Keys match `[-._a-zA-Z0-9]
 
 Clients and servers of different versions work together. `/api/v1` endpoints keep their behavior, so an older CLI works against a newer server. A newer CLI works against an older server too, as long as the server has the features a command uses.
 
-`GET /api/v1/info` lists those features as capabilities: `paths`, `secrets`, `history` and `backup` today. Commands that need a feature added later check its capability first and fail with `server 1.2.0 at URL does not support X; upgrade the server` instead of an unclear error. Servers older than `/api/v1/info` are treated as having `paths`, `secrets` and `history`. A capability never changes meaning and is never removed; changed behavior gets a new capability.
+`GET /api/v1/info` lists those features as capabilities: `paths`, `secrets`, `history` and `backup` today. Commands that need a feature added later check its capability first and fail with `server v1.2.0 at URL does not support X; upgrade the server` instead of an unclear error. Servers older than `/api/v1/info` are treated as having `paths`, `secrets` and `history`, and their version is shown as unknown. A capability never changes meaning and is never removed; changed behavior gets a new capability.
 
 `secret-manager version` prints the client version and, when a server is set (see [Resolution order](#resolution-order)), the server version and capabilities:
 
 ```
-client: 1.5.0
-server: 1.4.0 (https://secrets.example.com)
+client: v1.5.0
+server: v1.4.0 (https://secrets.example.com)
 capabilities: backup, history, paths, secrets
 ```
 
@@ -279,7 +279,7 @@ Logs are JSON on stderr. `--log-level` (chart value `logLevel`) sets the level: 
 
 ### Audit log
 
-Every change made through the API or the Web UI, and every failed authentication, is logged as a JSON line with `"msg":"audit"`:
+Every change made through the API or the Web UI, every backup, every Web UI login and every failed authentication is logged as a JSON line with `"msg":"audit"`:
 
 ```json
 {"level":"INFO","msg":"audit","source":"api","op":"set","remote":"10.42.0.7:51234","forwarded_for":"203.0.113.9","path":"/tools","keys":["GITHUB_TOKEN"]}

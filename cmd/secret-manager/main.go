@@ -35,7 +35,8 @@ var version = "dev"
 const usage = `Usage: secret-manager <command> [flags]
 
 Server:
-  server [--addr :8080] [--namespace NS] [--storage kubernetes] [--history-limit 10]
+  server [--addr :8080] [--metrics-addr :8081] [--namespace NS] [--storage kubernetes]
+         [--history-limit 10] [--log-level info]
                                                run controller, API and Web UI
                                                (admin token from ` + cli.EnvToken + `)
 

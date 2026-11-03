@@ -25,8 +25,9 @@ type Source struct {
 	// Path of the secrets, like /kubernetes/app.
 	// +kubebuilder:validation:Pattern=`^/([a-z0-9-]+(/[a-z0-9-]+)*)?/?$`
 	Path string `json:"path"`
-	// Recursive also reads every path nested below Path. On duplicate keys the
-	// deeper path wins.
+	// Recursive also reads every path nested below Path. Paths are merged in
+	// alphabetical order, so on duplicate keys a nested path wins over its
+	// parents.
 	// +optional
 	Recursive bool `json:"recursive,omitempty"`
 }
