@@ -1,0 +1,78 @@
+name: release
+
+# Runs on both forges: git.rapatao.com (Gitea Actions) pushes the image and
+# chart to its own registry, the GitHub mirror pushes them to ghcr.io.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select registry
+        id: registry
+        env:
+          GITEA_REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          if [ "$GITHUB_SERVER_URL" = "https://github.com" ]; then
+            host=ghcr.io
+          else
+            host="${GITHUB_SERVER_URL#*://}"
+            if [ -z "$GITEA_REGISTRY_TOKEN" ]; then
+              echo "::error::REGISTRY_TOKEN secret (token with write:package) is required on $host"
+              exit 1
+            fi
+          fi
+          owner="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          echo "host=$host" >> "$GITHUB_OUTPUT"
+          echo "image=$host/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          echo "charts=oci://$host/$owner/charts" >> "$GITHUB_OUTPUT"
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ steps.registry.outputs.host }}
+          username: ${{ github.actor }}
+          password: ${{ steps.registry.outputs.host == 'ghcr.io' && secrets.GITHUB_TOKEN || secrets.REGISTRY_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.registry.outputs.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: VERSION=${{ github.ref_name }}
+
+      - uses: azure/setup-helm@v5
+
+      - name: Push chart
+        env:
+          HOST: ${{ steps.registry.outputs.host }}
+          IMAGE: ${{ steps.registry.outputs.image }}
+          CHARTS: ${{ steps.registry.outputs.charts }}
+          VERSION: ${{ steps.registry.outputs.version }}
+          USERNAME: ${{ github.actor }}
+          PASSWORD: ${{ steps.registry.outputs.host == 'ghcr.io' && secrets.GITHUB_TOKEN || secrets.REGISTRY_TOKEN }}
+        run: |
+          echo "$PASSWORD" | helm registry login "$HOST" --username "$USERNAME" --password-stdin
+          sed -i "s|^  repository: .*|  repository: $IMAGE|" charts/secret-manager/values.yaml
+          helm package charts/secret-manager --version "$VERSION" --app-version "$VERSION" --destination dist
+          helm push "dist/secret-manager-$VERSION.tgz" "$CHARTS"

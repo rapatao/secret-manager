@@ -1,0 +1,16 @@
+{{define "nav"}}<form class="inline" method="post" action="/logout"><button type="submit">Sign out</button></form>{{end}}
+{{define "content"}}
+<h2>Paths</h2>
+<table>
+{{range .Paths}}
+<tr><td><a href="/path?path={{. | urlquery}}"><code>{{.}}</code></a></td></tr>
+{{else}}
+<tr><td>No paths yet.</td></tr>
+{{end}}
+</table>
+<h3>New path</h3>
+<form method="post" action="/path">
+<input name="path" placeholder="/kubernetes/app" pattern="/([a-z0-9\-]+(/[a-z0-9\-]+)*)?" required>
+<button type="submit">Create</button>
+</form>
+{{end}}

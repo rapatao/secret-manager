@@ -1,0 +1,30 @@
+{{define "layout"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>secret-manager</title>
+<style>
+body { font-family: system-ui, sans-serif; max-width: 56rem; margin: 2rem auto; padding: 0 1rem; color: #1f2328; }
+header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #d0d7de; margin-bottom: 1rem; }
+header a { color: inherit; text-decoration: none; font-weight: 600; }
+table { width: 100%; border-collapse: collapse; }
+td, th { text-align: left; padding: .4rem; border-bottom: 1px solid #eaeef2; vertical-align: top; }
+form.inline { display: inline; }
+input, textarea, button { font: inherit; }
+textarea { width: 100%; font-family: ui-monospace, monospace; }
+code, summary { font-family: ui-monospace, monospace; }
+summary { cursor: pointer; color: #57606a; }
+.error { background: #ffebe9; border: 1px solid #ff818266; padding: .5rem; }
+.danger { color: #cf222e; }
+</style>
+</head>
+<body>
+<header>
+<a href="/">secret-manager</a>
+{{block "nav" .}}{{end}}
+</header>
+{{with .}}{{with .Error}}<p class="error">{{.}}</p>{{end}}{{end}}
+{{template "content" .}}
+</body>
+</html>{{end}}
