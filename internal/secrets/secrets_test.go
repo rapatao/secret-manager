@@ -59,6 +59,28 @@ func TestSetKeysMergesAndNotifies(t *testing.T) {
 	}
 }
 
+func TestUpdateKeysSetsAndRemovesInOneVersion(t *testing.T) {
+	ctx := context.Background()
+	s := New(newMem(), nil)
+	s.KeepVersions = 5
+	if err := s.SetKeys(ctx, "/app", map[string]string{"A": "1", "B": "2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateKeys(ctx, "/app", map[string]string{"A": "9", "C": "3"}, []string{"B", "MISSING"}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.Get(ctx, "/app", false)
+	if want := map[string]string{"A": "9", "C": "3"}; !maps.Equal(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	if versions, _ := s.History(ctx, "/app"); len(versions) != 2 {
+		t.Fatalf("want 2 versions, got %+v", versions)
+	}
+	if err := s.UpdateKeys(ctx, "/app", map[string]string{"A": "1"}, []string{"A"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("set and delete same key: want ErrInvalid, got %v", err)
+	}
+}
+
 func TestSetKeysRejectsInvalidKey(t *testing.T) {
 	s := New(newMem(), nil)
 	err := s.SetKeys(context.Background(), "/app", map[string]string{"bad key": "x"})
@@ -195,6 +217,9 @@ func TestHistoryAndRollback(t *testing.T) {
 		t.Fatalf("rollback must add a pruned version: %+v", versions)
 	}
 
+	if err := s.Rollback(ctx, "/app", 4); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("rollback to current data: want ErrInvalid, got %v", err)
+	}
 	if err := s.Rollback(ctx, "/app", 1); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("rollback to pruned version: want ErrNotFound, got %v", err)
 	}

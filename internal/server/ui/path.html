@@ -11,69 +11,95 @@
 <thead><tr><th>Key</th><th>Value</th><th></th></tr></thead>
 <tbody>
 {{range .Entries}}
-<tr>
+<tr data-key="{{.Key}}">
 <td><code>{{.Key}}</code></td>
 <td>
 <details><summary>show / edit</summary>
-<form method="post" action="/key">
-<input type="hidden" name="path" value="{{$path}}">
-<input type="hidden" name="key" value="{{.Key}}">
-<textarea name="value" rows="3">{{.Value}}</textarea>
-<button type="submit" class="primary small">Save</button>
-</form>
+<input type="hidden" name="key" value="{{.Key}}" form="edit-keys">
+<textarea name="value" rows="3" form="edit-keys">{{.Value}}</textarea>
 </details>
 </td>
 <td class="actions">
 <button type="button" class="copy small">Copy</button>
-<form class="inline" method="post" action="/key/delete">
-<input type="hidden" name="path" value="{{$path}}">
-<input type="hidden" name="key" value="{{.Key}}">
-<button type="submit" class="danger small">Delete</button>
-</form>
+<input type="hidden" name="delete" value="{{.Key}}" form="edit-keys" disabled>
+<button type="button" class="danger small delete-key">Delete</button>
 </td>
 </tr>
 {{else}}
-<tr><td colspan="3" class="empty">No keys yet.</td></tr>
+<tr class="no-keys"><td colspan="3" class="empty">No keys yet.</td></tr>
 {{end}}
 </tbody>
 </table>
+<form id="edit-keys" class="body stack" method="post" action="/key">
+<input type="hidden" name="path" value="{{$path}}">
+<div class="new-keys stack"></div>
+<div class="dialog-actions">
+<button type="button" class="add-key">Add key</button>
+<button type="submit" class="primary" disabled>Save changes</button>
 </div>
-<div class="card">
-<h2>Add key</h2>
-<div class="body">
-<form class="stack" method="post" action="/key">
-<input type="hidden" name="path" value="{{.Path}}">
-<input name="key" placeholder="KEY" aria-label="Key" class="mono" pattern="[\-._a-zA-Z0-9]+" required>
-<textarea name="value" rows="3" placeholder="value" aria-label="Value"></textarea>
-<div><button type="submit" class="primary">Save</button></div>
 </form>
 </div>
+<template id="new-key">
+<div class="stack new-key">
+<div class="dialog-actions">
+<input name="new-key" placeholder="KEY" aria-label="Key" class="mono" pattern="[\-._a-zA-Z0-9]+" required>
+<button type="button" class="small remove-key">Remove</button>
 </div>
+<textarea name="new-value" rows="3" placeholder="value" aria-label="Value"></textarea>
+</div>
+</template>
+<dialog id="review-save">
+<form method="dialog">
+<h3>Save changes</h3>
+<p>Save these changes to <code>{{.Path}}</code>?</p>
+<div class="diff-scroll">
+<table class="diff">
+<thead><tr><th></th><th>Key</th><th>Current</th><th>New</th></tr></thead>
+<tbody></tbody>
+</table>
+</div>
+<div class="dialog-actions">
+<button value="cancel" formnovalidate>Cancel</button>
+<button value="save" class="primary">Save</button>
+</div>
+</form>
+</dialog>
 {{end}}
 {{with .History}}
 <div class="card">
 <h2>History</h2>
 <table>
-<thead><tr><th>Version</th><th>Written</th><th>Changes</th><th>Data</th><th></th></tr></thead>
+<thead><tr><th>Version</th><th>Written</th><th>Changes</th><th></th></tr></thead>
 <tbody>
 {{range $v := .}}
 <tr>
 <td><span class="badge">v{{$v.Number}}</span></td>
 <td class="muted">{{$v.Time}}</td>
-<td class="mono">{{range $v.Changes}}<span class="change">{{.Op}}{{.Key}}</span> {{else}}<span class="muted">-</span>{{end}}</td>
-<td>
-<details><summary>{{len $v.Entries}} keys</summary>
-<table>
-{{range $v.Entries}}<tr><td><code>{{.Key}}</code></td><td><code>{{.Value}}</code></td></tr>{{end}}
-</table>
-</details>
-</td>
+<td class="mono">{{range $v.Changes}}<span class="change {{template "op" .Op}}">{{.Op}}{{.Key}}</span> {{else}}<span class="muted">-</span>{{end}}</td>
 <td class="actions">
-<form class="inline" method="post" action="/path/rollback">
+{{if $v.Current}}<span class="badge">current</span>{{else if $v.Same}}<span class="muted">same as current</span>{{else}}
+<button type="button" class="small" commandfor="diff-{{$v.Number}}" command="show-modal">Diff</button>
+<dialog id="diff-{{$v.Number}}">
+<form method="dialog">
+<h3>v{{$v.Number}} compared with the current data</h3>
+{{template "diff" $v}}
+<div class="dialog-actions"><button>Close</button></div>
+</form>
+</dialog>
+<button type="button" class="small" commandfor="restore-{{$v.Number}}" command="show-modal">Restore</button>
+<dialog id="restore-{{$v.Number}}">
+<form method="post" action="/path/rollback">
 <input type="hidden" name="path" value="{{$path}}">
 <input type="hidden" name="version" value="{{$v.Number}}">
-<button type="submit" class="small">Restore</button>
+<h3>Restore version</h3>
+<p>Replace the data of <code>{{$path}}</code> with v{{$v.Number}}?</p>
+{{template "diff" $v}}
+<div class="dialog-actions">
+<button type="submit" formmethod="dialog" formnovalidate>Cancel</button>
+<button type="submit" name="confirm" value="{{$v.Number}}" class="primary">Restore</button>
+</div>
 </form>
+</dialog>{{end}}
 </td>
 </tr>
 {{end}}
@@ -82,15 +108,37 @@
 </div>
 {{end}}
 {{if not .Deleted}}
-<div class="card danger-zone">
-<h2>Danger zone</h2>
+<details class="card danger-zone">
+<summary>Danger zone</summary>
 <div class="body">
-<form class="row" method="post" action="/path/delete">
-<input type="hidden" name="path" value="{{.Path}}">
 <span class="muted">Deletes this path and all its keys.</span>
+<button type="button" class="danger" commandfor="delete-path" command="show-modal">Delete path</button>
+</div>
+<dialog id="delete-path">
+<form class="stack" method="post" action="/path/delete">
+<input type="hidden" name="path" value="{{.Path}}">
+<h3>Delete path</h3>
+<label>Type <code>{{.Path}}</code> to delete it and all its keys.
+<input name="confirm" class="mono" autocomplete="off" required pattern="{{.Path}}">
+</label>
+<div class="dialog-actions">
+<button type="submit" formmethod="dialog" formnovalidate>Cancel</button>
 <button type="submit" class="danger">Delete path</button>
+</div>
 </form>
-</div>
-</div>
+</dialog>
+</details>
 {{end}}
+{{end}}
+{{define "op"}}{{if eq . "+"}}add{{else if eq . "-"}}del{{else}}mod{{end}}{{end}}
+{{define "diff"}}
+<div class="diff-scroll">
+<table class="diff">
+<thead><tr><th></th><th>Key</th><th>Current</th><th>v{{.Number}}</th></tr></thead>
+<tbody>
+{{range .Restore}}<tr class="{{template "op" .Op}}"><td class="mono">{{.Op}}</td><td><code>{{.Key}}</code></td><td>{{if ne .Op "+"}}<code>{{.Before}}</code>{{end}}</td><td>{{if ne .Op "-"}}<code>{{.After}}</code>{{end}}</td></tr>
+{{end}}
+</tbody>
+</table>
+</div>
 {{end}}

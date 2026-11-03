@@ -1,39 +1,42 @@
 {{define "content"}}
 <h1>Paths</h1>
 <div class="card">
-<h2>New path</h2>
 <div class="body">
-<form class="row" method="post" action="/path">
-<input name="path" placeholder="/kubernetes/app" aria-label="Path" pattern="/([a-z0-9\-]+(/[a-z0-9\-]+)*)?" required>
+<form id="create-path" class="row" method="post" action="/path">
+<input type="search" id="path-search" name="path" placeholder="Search or create a path, e.g. /kubernetes/app" aria-label="Search or create a path" pattern="/([a-z0-9\-]+(/[a-z0-9\-]+)*)?" autocomplete="off" required>
 <button type="submit" class="primary">Create</button>
 </form>
 </div>
-</div>
-<div class="card">
-<div class="body">
-<form class="row" method="get" action="/">
-<input type="search" name="q" value="{{.Query}}" placeholder="Search paths" aria-label="Search paths">
-<button type="submit">Search</button>
-</form>
-</div>
 <table>
-<tbody>
+<tbody id="paths">
 {{range .Paths}}
-<tr><td><a class="path-link mono" href="/path?path={{. | urlquery}}">{{.}}</a></td></tr>
+<tr data-path="{{.}}"><td><a class="path-link mono" href="/path?path={{. | urlquery}}">{{.}}</a></td></tr>
 {{else}}
-<tr><td class="empty">{{if .Query}}No paths match.{{else}}No paths yet. Create one above.{{end}}</td></tr>
+<tr><td class="empty">No paths yet. Type one above to create it.</td></tr>
 {{end}}
+<tr class="no-match" hidden><td class="empty">No paths match.</td></tr>
 </tbody>
 </table>
 </div>
+<dialog id="confirm-create">
+<form method="dialog">
+<h3>Create path</h3>
+<p>Create <code class="new-path"></code>?</p>
+<div class="dialog-actions">
+<button value="cancel" formnovalidate>Cancel</button>
+<button value="create" class="primary">Create</button>
+</div>
+</form>
+</dialog>
 {{with .Deleted}}
 <div class="card">
 <h2>Deleted paths <span class="badge">{{len .}}</span></h2>
 <table>
 <tbody>
 {{range .}}
-<tr><td><a class="path-link mono" href="/path?path={{. | urlquery}}">{{.}}</a></td></tr>
+<tr data-path="{{.}}"><td><a class="path-link mono" href="/path?path={{. | urlquery}}">{{.}}</a></td></tr>
 {{end}}
+<tr class="no-match" hidden><td class="empty">No deleted paths match.</td></tr>
 </tbody>
 </table>
 </div>

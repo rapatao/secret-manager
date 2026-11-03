@@ -113,6 +113,13 @@ func (s *Service) ListPaths(ctx context.Context) ([]string, error) {
 
 // SetKeys merges values into path, creating the path when missing.
 func (s *Service) SetKeys(ctx context.Context, path string, values map[string]string) error {
+	return s.UpdateKeys(ctx, path, values, nil)
+}
+
+// UpdateKeys merges values into path and removes the keys in remove in one
+// write, recorded as one version. It creates the path when missing. Removing a
+// missing key is not an error.
+func (s *Service) UpdateKeys(ctx context.Context, path string, values map[string]string, remove []string) error {
 	path, err := NormalizePath(path)
 	if err != nil {
 		return err
@@ -120,6 +127,11 @@ func (s *Service) SetKeys(ctx context.Context, path string, values map[string]st
 	for k := range values {
 		if err := ValidateKey(k); err != nil {
 			return err
+		}
+	}
+	for _, k := range remove {
+		if _, ok := values[k]; ok {
+			return fmt.Errorf("%w: key %q is both set and deleted", ErrInvalid, k)
 		}
 	}
 
@@ -139,6 +151,12 @@ func (s *Service) SetKeys(ctx context.Context, path string, values map[string]st
 		}
 	}
 	maps.Copy(data, values)
+	for _, k := range remove {
+		if _, ok := data[k]; ok {
+			delete(data, k)
+			changed = true
+		}
+	}
 	if err := s.backend.Put(ctx, path, data); err != nil {
 		return err
 	}
@@ -245,6 +263,11 @@ func (s *Service) Rollback(ctx context.Context, path string, n int) error {
 
 	v, err := s.Version(ctx, path, n)
 	if err != nil {
+		return err
+	}
+	if current, err := s.backend.Get(ctx, path); err == nil && maps.Equal(current, v.Data) {
+		return fmt.Errorf("%w: version %d is the current data", ErrInvalid, n)
+	} else if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
 	}
 	if err := s.backend.Put(ctx, path, v.Data); err != nil {

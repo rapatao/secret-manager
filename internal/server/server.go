@@ -104,7 +104,6 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /path", s.ui(s.session(s.uiCreatePath)))
 	s.mux.Handle("POST /path/delete", s.ui(s.session(s.uiDeletePath)))
 	s.mux.Handle("POST /key", s.ui(s.session(s.uiSetKey)))
-	s.mux.Handle("POST /key/delete", s.ui(s.session(s.uiDeleteKey)))
 	s.mux.Handle("POST /path/rollback", s.ui(s.session(s.uiRollback)))
 }
 
