@@ -116,6 +116,24 @@ func TestSetGetListDelete(t *testing.T) {
 	}
 }
 
+func TestKeys(t *testing.T) {
+	h := newHarness(t)
+	h.mustRun("set", "--path", "/tools", "B=2", "A=1")
+	h.mustRun("set", "--path", "/tools/nested", "C=3")
+	h.mustRun("set", "--path", "/toolsx", "D=4")
+
+	if got := h.mustRun("keys", "--path", "/tools"); got != "A\nB\n" {
+		t.Fatalf("keys: %q", got)
+	}
+	want := "/tools         A\n/tools         B\n/tools/nested  C\n"
+	if got := h.mustRun("keys", "--path", "/tools/", "--recursive"); got != want {
+		t.Fatalf("keys recursive: %q", got)
+	}
+	if code := h.run("keys", "--path", "/missing", "--recursive"); code != 1 {
+		t.Fatalf("keys missing: exit %d", code)
+	}
+}
+
 func TestHistoryAndRollback(t *testing.T) {
 	h := newHarness(t)
 	h.mustRun("set", "--path", "/tools", "A=1")
