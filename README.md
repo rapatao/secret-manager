@@ -9,6 +9,19 @@ A small, self-hosted key-value secret manager for Kubernetes.
 
 One binary contains the controller, the REST API, the Web UI and the CLI.
 
+## Compared to other tools
+
+| | secret-manager | [External Secrets Operator](https://external-secrets.io) | [Infisical](https://infisical.com) | [Sealed Secrets](https://github.com/bitnami-labs/sealed-secrets) |
+|---|---|---|---|---|
+| Stores secrets | Yes, as Kubernetes Secrets | No, reads an external store (Vault, cloud providers, ...) | Yes, in PostgreSQL | Encrypted in git |
+| Extra components | None | The external store | PostgreSQL and Redis | None |
+| Web UI and CLI | Yes | No | Yes | CLI to encrypt (`kubeseal`) |
+| Users, roles, environments | No, one admin token | From the external store | Yes | Git permissions |
+| Secret history | No | From the external store | Yes | Git history |
+| Restarts Deployments on change | Yes | No, needs a tool like Reloader | Yes | No |
+
+Choose secret-manager for a small cluster where one person or a small team manages the secrets and running a database for them is not worth it. Choose External Secrets Operator if you already have a secret store, Infisical if you need users, environments and history, and Sealed Secrets if secrets must live in git.
+
 ## How it works
 
 ```
@@ -34,12 +47,19 @@ kubectl create namespace secret-manager
 kubectl -n secret-manager create secret generic secret-manager-token \
   --from-literal=token="$(openssl rand -base64 36)"
 
-helm install secret-manager charts/secret-manager -n secret-manager \
+helm install secret-manager oci://ghcr.io/rapatao/charts/secret-manager -n secret-manager \
   --set auth.existingSecret=secret-manager-token \
   --set ingress.enabled=true --set ingress.host=secrets.example.com
 ```
 
-The chart installs the `SecretSync` CRD from `charts/secret-manager/crds`. Helm does not upgrade CRDs, so apply that directory with `kubectl apply -f` after upgrading.
+Add `--version 1.2.0` to pin a release. From a checkout, use `charts/secret-manager` instead of the `oci://` reference.
+
+The chart installs the `SecretSync` CRD. Helm does not upgrade CRDs, so apply them after upgrading:
+
+```sh
+helm pull oci://ghcr.io/rapatao/charts/secret-manager --untar --untardir /tmp/sm
+kubectl apply -f /tmp/sm/secret-manager/crds
+```
 
 The server runs as a single replica: writes are serialized in process.
 
@@ -96,6 +116,12 @@ metadata:
 ```
 
 ## CLI
+
+Install the CLI with Go, or build it with `make build`:
+
+```sh
+go install github.com/rapatao/secret-manager/cmd/secret-manager@latest
+```
 
 ```sh
 export SECRET_MANAGER_URL=https://secrets.example.com
@@ -221,14 +247,17 @@ The canonical repository is `git.rapatao.com/rapatao/secret-manager`, mirrored t
   - on GitHub: image `ghcr.io/rapatao/secret-manager`, chart `oci://ghcr.io/rapatao/charts/secret-manager`, using `GITHUB_TOKEN`
   - on Gitea: image `git.rapatao.com/rapatao/secret-manager`, chart `oci://git.rapatao.com/rapatao/charts/secret-manager`, using the `REGISTRY_TOKEN` repository secret (a token with `write:package`)
 
-Install a released chart with:
-
-```sh
-helm install secret-manager oci://ghcr.io/rapatao/charts/secret-manager --version 1.2.0 \
-  -n secret-manager --set auth.existingSecret=secret-manager-token
-```
+  After the image and chart are pushed, it creates a release for the tag. The notes list the commit subjects since the previous tag.
 
 Setup:
 
 - Gitea: add the `REGISTRY_TOKEN` secret and register an act_runner with the `ubuntu-latest` label and Docker access.
 - Push mirror to GitHub: the GitHub token needs the `workflow` scope, otherwise GitHub rejects pushes that change `.github/workflows`. Tags must be mirrored for releases to run there.
+
+## Security
+
+Report vulnerabilities privately, see [SECURITY.md](SECURITY.md).
+
+## License
+
+[GNU Affero General Public License v3.0](LICENSE). If you distribute a modified secret-manager or offer it as a network service, you must make its source available to its users under the same license.
