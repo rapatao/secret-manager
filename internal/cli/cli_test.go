@@ -3,12 +3,16 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"maps"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/zalando/go-keyring"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/rapatao/secret-manager/internal/secrets"
@@ -18,12 +22,20 @@ import (
 
 const token = "0123456789abcdef0123456789abcdef"
 
+func TestMain(m *testing.M) {
+	keyring.MockInit()
+	os.Exit(m.Run())
+}
+
 type harness struct {
-	t      *testing.T
-	url    string
-	stdout bytes.Buffer
-	stderr bytes.Buffer
-	stdin  string
+	t        *testing.T
+	url      string
+	envURL   string
+	envToken string
+	dir      string
+	stdout   bytes.Buffer
+	stderr   bytes.Buffer
+	stdin    string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -35,19 +47,20 @@ func newHarness(t *testing.T) *harness {
 	}
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
-	return &harness{t: t, url: ts.URL}
+	return &harness{t: t, url: ts.URL, envURL: ts.URL, envToken: token, dir: t.TempDir()}
 }
 
 func (h *harness) run(args ...string) int {
 	h.stdout.Reset()
 	h.stderr.Reset()
-	env := map[string]string{EnvURL: h.url, EnvToken: token}
+	env := map[string]string{EnvURL: h.envURL, EnvToken: h.envToken}
 	c := &CLI{
-		Stdin:   strings.NewReader(h.stdin),
-		Stdout:  &h.stdout,
-		Stderr:  &h.stderr,
-		Getenv:  func(k string) string { return env[k] },
-		Environ: func() []string { return []string{"PATH=/usr/bin:/bin", "KEEP=1", "OVERRIDE=old"} },
+		Stdin:     strings.NewReader(h.stdin),
+		Stdout:    &h.stdout,
+		Stderr:    &h.stderr,
+		Getenv:    func(k string) string { return env[k] },
+		Environ:   func() []string { return []string{"PATH=/usr/bin:/bin", "KEEP=1", "OVERRIDE=old"} },
+		ConfigDir: h.dir,
 	}
 	return c.Run(context.Background(), args)
 }
@@ -125,6 +138,8 @@ func TestUsageErrors(t *testing.T) {
 		{"delete", "--path", "/x"},
 		{"run", "--path", "/x"},
 		{"export", "--path", "/x", "--format", "yaml"},
+		{"list", "--unknown"},
+		{"list", "extra"},
 	}
 	for _, args := range cases {
 		if code := h.run(args...); code != 2 {
@@ -168,5 +183,172 @@ func TestMergeEnv(t *testing.T) {
 	slices.Sort(got)
 	if want := []string{"A=1", "B=3", "C=4"}; !slices.Equal(got, want) {
 		t.Fatalf("got %v", got)
+	}
+}
+
+func TestServerFlag(t *testing.T) {
+	keyring.MockInit()
+	h := newHarness(t)
+	h.mustRun("set", "--path", "/app", "A=1")
+
+	h.envURL, h.envToken = "", ""
+	if code := h.run("list"); code != 2 || !strings.Contains(h.stderr.String(), "give --server, set "+EnvURL) {
+		t.Fatalf("missing server: exit %d, stderr %q", code, h.stderr.String())
+	}
+	if code := h.run("list", "--server", h.url); code != 2 || !strings.Contains(h.stderr.String(), "no token for "+h.url) {
+		t.Fatalf("no stored token: exit %d, stderr %q", code, h.stderr.String())
+	}
+
+	h.envURL, h.envToken = h.url, token
+	if got := h.mustRun("get", "--server", h.url+"/", "--path", "/app", "A"); got != "1\n" {
+		t.Fatalf("--server matching %s must use %s: %q", EnvURL, EnvToken, got)
+	}
+}
+
+func TestEnvTokenOnlyGoesToEnvURL(t *testing.T) {
+	keyring.MockInit()
+	h := newHarness(t)
+	h.mustRun("set", "--path", "/app", "A=1")
+
+	h.envURL, h.envToken = "", ""
+	h.stdin = token
+	h.mustRun("servers", "login", "--server", h.url, "--token-stdin")
+
+	h.envURL, h.envToken = "https://other.example", "token-for-other"
+	if got := h.mustRun("list", "--server", h.url); got != "/app\n" {
+		t.Fatalf("--server must use its stored token, not %s: %q", EnvToken, got)
+	}
+
+	h.envURL = ""
+	if code := h.run("list"); code != 2 || !strings.Contains(h.stderr.String(), EnvToken+" is set but "+EnvURL+" is not") {
+		t.Fatalf("token without URL: exit %d, stderr %q", code, h.stderr.String())
+	}
+}
+
+func TestLoginUsesKeychainAndDefaultServer(t *testing.T) {
+	keyring.MockInit()
+	h := newHarness(t)
+	h.mustRun("set", "--path", "/app", "A=1")
+	h.envURL, h.envToken = "", ""
+
+	h.stdin = "wrong-token\n"
+	if code := h.run("servers", "login", "--server", h.url, "--token-stdin"); code != 1 || !strings.Contains(h.stderr.String(), "invalid token") {
+		t.Fatalf("bad token: exit %d, stderr %q", code, h.stderr.String())
+	}
+	if code := h.run("list"); code != 2 {
+		t.Fatalf("failed login must store nothing: exit %d", code)
+	}
+
+	h.stdin = token + "\n"
+	if got := h.mustRun("servers", "login", "--server", h.url+"/", "--token-stdin"); got != "Logged in to "+h.url+"\n" {
+		t.Fatalf("login output %q", got)
+	}
+	if stored, err := keyring.Get(keyringService, h.url); err != nil || stored != token {
+		t.Fatalf("keychain token %q, %v", stored, err)
+	}
+	if _, err := os.Stat(filepath.Join(h.dir, "credentials.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("token file written although keychain works: %v", err)
+	}
+	if got := h.mustRun("list"); got != "/app\n" {
+		t.Fatalf("list with stored login: %q", got)
+	}
+
+	h.mustRun("servers", "logout")
+	if _, err := keyring.Get(keyringService, h.url); !errors.Is(err, keyring.ErrNotFound) {
+		t.Fatalf("token still in keychain: %v", err)
+	}
+	if code := h.run("list"); code != 2 {
+		t.Fatalf("list after logout: exit %d", code)
+	}
+}
+
+func TestLoginFallsBackToFile(t *testing.T) {
+	keyring.MockInitWithError(errors.New("no secret service"))
+	t.Cleanup(keyring.MockInit)
+	h := newHarness(t)
+	h.mustRun("set", "--path", "/app", "A=1")
+	h.envURL, h.envToken = "", ""
+
+	h.stdin = token
+	h.mustRun("servers", "login", "--server", h.url, "--token-stdin")
+	if !strings.Contains(h.stderr.String(), "keychain unavailable") {
+		t.Fatalf("missing fallback warning: %q", h.stderr.String())
+	}
+	info, err := os.Stat(filepath.Join(h.dir, "credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("credentials.json permissions %o", perm)
+	}
+	if got := h.mustRun("list"); got != "/app\n" {
+		t.Fatalf("list with file token: %q", got)
+	}
+
+	h.mustRun("servers", "logout", "--server", h.url)
+	if code := h.run("list", "--server", h.url); code != 2 {
+		t.Fatalf("list after logout: exit %d", code)
+	}
+}
+
+func TestLoginRequiresTerminalOrStdinFlag(t *testing.T) {
+	h := newHarness(t)
+	if code := h.run("servers", "login", "--server", h.url); code != 2 || !strings.Contains(h.stderr.String(), "--token-stdin") {
+		t.Fatalf("exit %d, stderr %q", code, h.stderr.String())
+	}
+}
+
+func TestEnvTokenWinsOverStoredToken(t *testing.T) {
+	keyring.MockInit()
+	h := newHarness(t)
+	if err := keyring.Set(keyringService, h.url, "stale-token"); err != nil {
+		t.Fatal(err)
+	}
+	h.mustRun("list")
+}
+
+func TestServersListAndUse(t *testing.T) {
+	keyring.MockInit()
+	other := newHarness(t)
+	h := newHarness(t)
+	h.mustRun("set", "--path", "/home", "A=1")
+	other.mustRun("set", "--path", "/other", "B=2")
+	h.envURL, h.envToken = "", ""
+
+	for _, url := range []string{h.url, other.url} {
+		h.stdin = token
+		h.mustRun("servers", "login", "--server", url, "--token-stdin")
+	}
+
+	want := []string{h.url, other.url + " (default)"}
+	if h.url > other.url {
+		want = []string{other.url + " (default)", h.url}
+	}
+	if got := h.mustRun("servers"); got != strings.Join(want, "\n")+"\n" {
+		t.Fatalf("servers: %q", got)
+	}
+	if got := h.mustRun("list"); got != "/other\n" {
+		t.Fatalf("list on default: %q", got)
+	}
+	if got := h.mustRun("list", "--server", h.url); got != "/home\n" {
+		t.Fatalf("list with --server: %q", got)
+	}
+
+	if got := h.mustRun("servers", "use", h.url+"/"); got != "Default server is "+h.url+"\n" {
+		t.Fatalf("use output %q", got)
+	}
+	if got := h.mustRun("list"); got != "/home\n" {
+		t.Fatalf("list after use: %q", got)
+	}
+	if code := h.run("servers", "use", "https://unknown.example"); code != 1 || !strings.Contains(h.stderr.String(), "not logged in") {
+		t.Fatalf("use unknown: exit %d, stderr %q", code, h.stderr.String())
+	}
+
+	h.mustRun("servers", "logout", "--server", other.url)
+	if got := h.mustRun("servers", "list"); got != h.url+" (default)\n" {
+		t.Fatalf("after logout of non-default: %q", got)
+	}
+	if code := h.run("servers", "bogus"); code != 2 {
+		t.Fatalf("unknown subcommand: exit %d", code)
 	}
 }

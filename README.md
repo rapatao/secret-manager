@@ -110,6 +110,37 @@ secret-manager delete --path /tools --all
 secret-manager run --path /tools -- make updates
 ```
 
+### Servers and login
+
+Instead of environment variables, log in once per server:
+
+```sh
+secret-manager servers login --server https://secrets.example.com    # prompts for the token
+echo "$TOKEN" | secret-manager servers login --server https://secrets.example.com --token-stdin
+secret-manager servers                                # list logged-in servers, marks the default
+secret-manager servers use https://secrets.example.com
+secret-manager servers logout --server https://secrets.example.com
+```
+
+`servers login` checks the token against the server before storing it, then makes that server the default. You can be logged in to several servers at once: `servers use` switches the default, and `--server` picks one for a single command.
+
+Tokens are stored in the OS keychain (macOS Keychain, Linux Secret Service, Windows Credential Manager) under the service `secretmanager.rapatao.com`, one entry per server. Without a usable keychain, as on headless Linux, they fall back to `~/.config/secretmanager.rapatao.com/credentials.json` with `0600` permissions and a warning is printed. The list of servers and the default are kept in `config.json` in the same directory (`$XDG_CONFIG_HOME` is honored).
+
+### Resolution order
+
+The server is `--server`, then `SECRET_MANAGER_URL`, then the default from `servers`.
+
+`SECRET_MANAGER_TOKEN` belongs to `SECRET_MANAGER_URL` and is only sent to that server. Any other server, chosen with `--server` or as the default, uses its token stored by `servers login`. Setting `SECRET_MANAGER_TOKEN` without `SECRET_MANAGER_URL` is an error, so a leftover token is never sent to the default server.
+
+| Set | Server | Token |
+|---|---|---|
+| `SECRET_MANAGER_URL` + `SECRET_MANAGER_TOKEN` | env URL | env token |
+| `--server X` (X is not the env URL) | X | stored token for X |
+| nothing | default | stored token for default |
+| `SECRET_MANAGER_TOKEN` only | - | error |
+
+The token is never accepted as a flag, so it doesn't end up in shell history or the process list.
+
 `run` adds the secrets to the current environment, overriding variables with the same name, and exits with the command's exit code.
 
 ## Web UI
