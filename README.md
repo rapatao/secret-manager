@@ -316,7 +316,7 @@ The last use is tracked in memory and saved every `--last-used-flush` (default `
 
 ## Web UI
 
-Open the server URL and sign in with the admin token. The header shows the server version next to the name, which links to the summary, and links to Secrets (`/secrets`, the path list), Integrations and Sign out. The UI follows the system light or dark theme and adapts to narrow screens: on phones, the integrations and recent changes tables show each row as a list of labeled fields. Every time is shown in UTC as `YYYY-MM-DD HH:MM UTC`.
+Open the server URL and sign in with the admin token. The header shows the server version next to the name, which links to the summary, and links to Secrets (`/secrets`, the path list), Integrations and Sign out. The UI follows the system light or dark theme and adapts to narrow screens: on phones, the integrations, recent changes, keys and history tables show each row as a list of labeled fields. Every time is shown in UTC as `YYYY-MM-DD HH:MM UTC`.
 
 Summary
 - The main page counts paths, keys, deleted paths and stored versions.
@@ -325,13 +325,15 @@ Summary
 - It shows the server settings: version, storage backend, encryption, SecretSync controller, history limit, offline cache default, scheduled backups and the result of the last scheduled backup since the server started.
 - It reads every path and its history on each view.
 
-Paths
+Secrets
+- The Secrets page lists every path; each one opens at `/secrets/path?path=<path>`.
 - One field filters paths as you type, matching anywhere in the path. It opens the typed path when it exists, or creates it after a confirmation dialog.
 - Deleted paths that still have versions are listed separately; restoring one of their versions brings them back.
 - Deleting a path is in the collapsed danger zone of its page, and requires typing the path in a confirmation dialog.
 
 Keys
-- Values stay hidden until expanded. The copy button copies a value to the clipboard.
+- Values show as a fixed-length mask until Show opens the editor; an edited badge marks a value with unsaved changes. The copy button copies a value to the clipboard.
+- Changed shows when each key was last added or changed, from the versions kept in history.
 - Adding keys, editing values and deleting keys are staged on the page: a deleted key is struck through until saved, and Undo brings it back.
 - A new key cannot reuse the name of an existing key or of another new key; existing keys change in their own row.
 - Save changes is enabled once something is staged. It opens a confirmation dialog listing the keys added (`+`), changed (`~`) and deleted (`-`) with their current and new values, and writes every staged change as one version.

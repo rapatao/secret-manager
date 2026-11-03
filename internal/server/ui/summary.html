@@ -26,7 +26,7 @@
 <tbody>
 {{range .Recent}}
 <tr>
-<td data-label="Path"><a class="path-link mono" href="/path?path={{.Path | urlquery}}">{{.Path}}</a></td>
+<td data-label="Path"><a class="path-link mono" href="/secrets/path?path={{.Path | urlquery}}">{{.Path}}</a></td>
 <td data-label="Version"><span class="badge">v{{.Number}}</span></td>
 <td class="muted" data-label="Written">{{time .Time}}</td>
 <td class="mono" data-label="Changes">{{range .Changes}}<span class="change {{template "op" .Op}}">{{.Op}}{{.Key}}</span> {{else}}<span class="muted">-</span>{{end}}</td>

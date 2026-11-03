@@ -32,6 +32,10 @@ function refreshSave() {
   const form = editForm();
   if (!form) return;
   checkNewKeys();
+  for (const row of document.querySelectorAll("tr[data-key]")) {
+    const value = row.querySelector("textarea");
+    row.classList.toggle("edited", value.value !== value.defaultValue);
+  }
   const empty = document.querySelector("tr.no-keys");
   if (empty) empty.hidden = form.querySelector(".new-key") !== null;
   form.querySelector('button[type="submit"]').disabled = pendingChanges().length === 0 || !form.checkValidity();
@@ -148,7 +152,7 @@ document.addEventListener("submit", (e) => {
   e.preventDefault();
   const path = form.elements.path.value;
   if ([...document.querySelectorAll("#paths tr[data-path]")].some((row) => row.dataset.path === path)) {
-    location.href = "/path?path=" + encodeURIComponent(path);
+    location.href = "/secrets/path?path=" + encodeURIComponent(path);
     return;
   }
   const dialog = document.getElementById("confirm-create");

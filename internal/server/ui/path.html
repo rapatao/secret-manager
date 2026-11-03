@@ -1,5 +1,5 @@
 {{define "content"}}
-<p class="muted"><a href="/secrets">Paths</a> /</p>
+<p class="muted"><a href="/secrets">Secrets</a> /</p>
 <h1 class="mono">{{.Path}}</h1>
 {{$path := .Path}}
 {{if .Deleted}}
@@ -7,18 +7,19 @@
 {{else}}
 <div class="card">
 <h2>Keys <span class="badge">{{len .Entries}}</span></h2>
-<table>
-<thead><tr><th>Key</th><th>Value</th><th></th></tr></thead>
+<table class="stack-narrow keys">
+<thead><tr><th>Key</th><th>Value</th><th>Changed</th><th></th></tr></thead>
 <tbody>
 {{range .Entries}}
 <tr data-key="{{.Key}}">
-<td><code>{{.Key}}</code></td>
-<td>
-<details><summary>show / edit</summary>
+<td data-label="Key"><code>{{.Key}}</code></td>
+<td data-label="Value" class="value">
+<details><summary><span class="masked mono" aria-hidden="true">&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;</span> <span class="when-closed">Show</span><span class="when-open">Hide</span> <span class="badge edited-badge">edited</span></summary>
 <input type="hidden" name="key" value="{{.Key}}" form="edit-keys">
 <textarea name="value" rows="3" form="edit-keys">{{.Value}}</textarea>
 </details>
 </td>
+<td class="muted" data-label="Changed">{{if .Changed.IsZero}}-{{else}}{{time .Changed}}{{end}}</td>
 <td class="actions">
 <button type="button" class="copy small">Copy</button>
 <input type="hidden" name="delete" value="{{.Key}}" form="edit-keys" disabled>
@@ -26,11 +27,11 @@
 </td>
 </tr>
 {{else}}
-<tr class="no-keys"><td colspan="3" class="empty">No keys yet.</td></tr>
+<tr class="no-keys"><td colspan="4" class="empty">No keys yet.</td></tr>
 {{end}}
 </tbody>
 </table>
-<form id="edit-keys" class="body stack" method="post" action="/key">
+<form id="edit-keys" class="body stack" method="post" action="/secrets/keys">
 <input type="hidden" name="path" value="{{$path}}">
 <div class="new-keys stack"></div>
 <div class="dialog-actions">
@@ -68,14 +69,14 @@
 {{with .History}}
 <div class="card">
 <h2>History</h2>
-<table>
+<table class="stack-narrow">
 <thead><tr><th>Version</th><th>Written</th><th>Changes</th><th></th></tr></thead>
 <tbody>
 {{range $v := .}}
 <tr>
-<td><span class="badge">v{{$v.Number}}</span></td>
-<td class="muted">{{time $v.Time}}</td>
-<td class="mono">{{range $v.Changes}}<span class="change {{template "op" .Op}}">{{.Op}}{{.Key}}</span> {{else}}<span class="muted">-</span>{{end}}</td>
+<td data-label="Version"><span class="badge">v{{$v.Number}}</span></td>
+<td class="muted" data-label="Written">{{time $v.Time}}</td>
+<td class="mono" data-label="Changes">{{range $v.Changes}}<span class="change {{template "op" .Op}}">{{.Op}}{{.Key}}</span> {{else}}<span class="muted">-</span>{{end}}</td>
 <td class="actions">
 {{if $v.Current}}<span class="badge">current</span>{{else if $v.Same}}<span class="muted">same as current</span>{{else}}
 <button type="button" class="small" commandfor="diff-{{$v.Number}}" command="show-modal">Diff</button>
@@ -88,7 +89,7 @@
 </dialog>
 <button type="button" class="small" commandfor="restore-{{$v.Number}}" command="show-modal">Restore</button>
 <dialog id="restore-{{$v.Number}}">
-<form method="post" action="/path/rollback">
+<form method="post" action="/secrets/rollback">
 <input type="hidden" name="path" value="{{$path}}">
 <input type="hidden" name="version" value="{{$v.Number}}">
 <h3>Restore version</h3>
@@ -115,7 +116,7 @@
 <button type="button" class="danger" commandfor="delete-path" command="show-modal">Delete path</button>
 </div>
 <dialog id="delete-path">
-<form class="stack" method="post" action="/path/delete">
+<form class="stack" method="post" action="/secrets/delete">
 <input type="hidden" name="path" value="{{.Path}}">
 <h3>Delete path</h3>
 <label>Type <code>{{.Path}}</code> to delete it and all its keys.

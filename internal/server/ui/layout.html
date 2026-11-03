@@ -56,7 +56,7 @@ td.empty { color: var(--muted); text-align: center; padding: 1.5rem; }
 td table td { padding: .25rem .5rem; }
 .path-link { display: block; }
 .badge { display: inline-block; padding: 0 .5rem; border-radius: 999px; background: var(--code-bg); color: var(--muted); font-size: .8rem; }
-.change, td code, td .badge { white-space: nowrap; }
+.change, td code, td .badge, time > span { white-space: nowrap; }
 code { background: var(--code-bg); padding: .1rem .35rem; border-radius: 4px; }
 form.inline { display: inline; }
 header .row { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; }
@@ -113,6 +113,12 @@ table.summary td, table.summary th { padding: .4rem .75rem; word-break: break-al
 table.summary td:first-child { color: var(--muted); }
 table.summary tr.changed td:last-child { color: var(--mod); font-weight: 600; }
 table.summary[data-create] .current { display: none; }
+td.value { width: 50%; }
+td.value summary { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.masked { letter-spacing: .1em; color: var(--muted); }
+details[open] .masked, details[open] .when-closed, details:not([open]) .when-open, .edited-badge { display: none; }
+tr.edited .edited-badge { display: inline-block; }
+.when-closed, .when-open { color: var(--accent); font-size: .85rem; }
 @media (max-width: 40rem) {
   header .bar { padding: .5rem .75rem; }
   main { margin: 1rem auto; padding: 0 .5rem; }
@@ -131,6 +137,8 @@ table.summary[data-create] .current { display: none; }
   table.stack-narrow td[data-label]::before { content: attr(data-label); color: var(--muted); font-size: .8rem; font-family: system-ui, sans-serif; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
   table.stack-narrow td.actions { justify-content: flex-end; gap: .5rem; padding-top: .4rem; }
   table.stack-narrow td.empty { display: block; text-align: center; }
+  table.stack-narrow td.value { display: block; width: auto; }
+  table.stack-narrow td.value::before { display: block; margin-bottom: .2rem; }
 }
 .custom-date { display: none; }
 fieldset:has(select[name="expires"] option[value="custom"]:checked) .custom-date { display: grid; }
