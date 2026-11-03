@@ -73,8 +73,9 @@ func ValidateKey(key string) error {
 }
 
 // Get returns the data at path. With recursive, data from every nested path is
-// merged in path order, so on duplicate keys the deeper path wins. A missing
-// path is ErrNotFound only when nothing was found at all.
+// merged in alphabetical path order, so on duplicate keys a nested path wins
+// over its parents. A missing path is ErrNotFound only when nothing was found
+// at all.
 func (s *Service) Get(ctx context.Context, path string, recursive bool) (map[string]string, error) {
 	path, err := NormalizePath(path)
 	if err != nil {

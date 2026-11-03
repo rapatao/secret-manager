@@ -169,7 +169,7 @@ func (c *CLI) flags(name string, withPath, recursive bool) *flags {
 		f.fs.StringVar(&f.path, "path", "", "secret path, like /kubernetes/app")
 	}
 	if recursive {
-		f.fs.BoolVar(&f.recursive, "recursive", false, "include nested paths; deeper paths win on duplicate keys")
+		f.fs.BoolVar(&f.recursive, "recursive", false, "include nested paths, merged in path order; a nested path wins over its parents")
 	}
 	return f
 }
