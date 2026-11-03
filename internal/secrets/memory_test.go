@@ -7,18 +7,41 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rapatao/secret-manager/internal/storage"
 	"github.com/rapatao/secret-manager/internal/storage/storagetest"
 )
 
 type memBackend struct {
-	mu      sync.Mutex
-	data    map[string]map[string]string
-	failPut bool
+	mu       sync.Mutex
+	data     map[string]map[string]string
+	versions map[string][]storage.Version
+	failPut  bool
 }
 
-func newMem() *memBackend { return &memBackend{data: map[string]map[string]string{}} }
+func newMem() *memBackend {
+	return &memBackend{data: map[string]map[string]string{}, versions: map[string][]storage.Version{}}
+}
+
+func (m *memBackend) AddVersion(_ context.Context, path string, at time.Time, data map[string]string, keep int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	vs := m.versions[path]
+	n := 1
+	if len(vs) > 0 {
+		n = vs[0].Number + 1
+	}
+	vs = append([]storage.Version{{Number: n, Time: at, Data: maps.Clone(data)}}, vs...)
+	m.versions[path] = vs[:min(keep, len(vs))]
+	return nil
+}
+
+func (m *memBackend) Versions(_ context.Context, path string) ([]storage.Version, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.versions[path]), nil
+}
 
 func (m *memBackend) Get(_ context.Context, path string) (map[string]string, error) {
 	m.mu.Lock()

@@ -150,7 +150,37 @@ func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 	for _, k := range slices.Sorted(maps.Keys(data)) {
 		entries = append(entries, entry{k, data[k]})
 	}
-	render(w, http.StatusOK, "path", map[string]any{"Path": path, "Entries": entries, "Error": r.URL.Query().Get("error")})
+	versions, err := s.secrets.History(r.Context(), path)
+	if err != nil {
+		s.uiError(w, r, err)
+		return
+	}
+	var history []uiVersion
+	for _, v := range versions {
+		h := uiVersion{Number: v.Number, Time: v.Time.Format(time.RFC3339)}
+		for _, k := range slices.Sorted(maps.Keys(v.Data)) {
+			h.Entries = append(h.Entries, entry{k, v.Data[k]})
+		}
+		history = append(history, h)
+	}
+	render(w, http.StatusOK, "path", map[string]any{"Path": path, "Entries": entries, "History": history, "Error": r.URL.Query().Get("error")})
+}
+
+type uiVersion struct {
+	Number  int
+	Time    string
+	Entries []entry
+}
+
+func (s *Server) uiRollback(w http.ResponseWriter, r *http.Request) {
+	path := r.PostFormValue("path")
+	err := s.rollback(r, path, r.PostFormValue("version"))
+	s.audit(r, "ui", "rollback", path, nil, err)
+	if err != nil {
+		s.redirectWithError(w, r, pathURL(path)+"&", err)
+		return
+	}
+	http.Redirect(w, r, pathURL(path), http.StatusSeeOther)
 }
 
 func (s *Server) uiCreatePath(w http.ResponseWriter, r *http.Request) {

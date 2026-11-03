@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -70,6 +71,34 @@ func (c *Client) DeleteKey(ctx context.Context, path, key string) error {
 // DeletePath removes path.
 func (c *Client) DeletePath(ctx context.Context, path string) error {
 	return c.do(ctx, http.MethodDelete, "/api/v1/paths", url.Values{"path": {path}}, nil, nil)
+}
+
+// Version is a stored version of a path. History fills Keys, Version fills
+// Data.
+type Version struct {
+	Version int               `json:"version"`
+	Time    time.Time         `json:"time"`
+	Keys    []string          `json:"keys"`
+	Data    map[string]string `json:"data"`
+}
+
+// History lists the versions of path, newest first.
+func (c *Client) History(ctx context.Context, path string) ([]Version, error) {
+	var out struct{ Versions []Version }
+	err := c.do(ctx, http.MethodGet, "/api/v1/history", url.Values{"path": {path}}, nil, &out)
+	return out.Versions, err
+}
+
+// Version returns version n of path with its data.
+func (c *Client) Version(ctx context.Context, path string, n int) (Version, error) {
+	var out Version
+	err := c.do(ctx, http.MethodGet, "/api/v1/history/"+strconv.Itoa(n), url.Values{"path": {path}}, nil, &out)
+	return out, err
+}
+
+// Rollback replaces the data at path with version n.
+func (c *Client) Rollback(ctx context.Context, path string, n int) error {
+	return c.do(ctx, http.MethodPost, "/api/v1/history/"+strconv.Itoa(n)+"/rollback", url.Values{"path": {path}}, nil, nil)
 }
 
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, in, out any) error {

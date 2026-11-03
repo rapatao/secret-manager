@@ -50,6 +50,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 func newLoggedServer(t *testing.T) (*httptest.Server, *syncBuffer) {
 	t.Helper()
 	svc := secrets.New(k8sstorage.New(fake.NewClientBuilder().Build(), "sm"), nil)
+	svc.KeepVersions = 10
 	s, err := New(svc, token)
 	if err != nil {
 		t.Fatal(err)
@@ -134,6 +135,53 @@ func TestAPIRoundTrip(t *testing.T) {
 	}
 	if code, _ := do(t, ts, "GET", "/api/v1/secrets?path=/app", token, ""); code != http.StatusNotFound {
 		t.Fatalf("get deleted path: %d", code)
+	}
+}
+
+func TestAPIHistory(t *testing.T) {
+	ts := newTestServer(t)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/app", token, `{"A":"1"}`)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/app", token, `{"A":"2","B":"x"}`)
+	do(t, ts, "DELETE", "/api/v1/paths?path=/app", token, "")
+
+	var list struct {
+		Versions []struct {
+			Version int
+			Keys    []string
+			Data    map[string]string
+		}
+	}
+	code, body := do(t, ts, "GET", "/api/v1/history?path=/app", token, "")
+	if err := json.Unmarshal([]byte(body), &list); code != http.StatusOK || err != nil {
+		t.Fatalf("history: %d %s", code, body)
+	}
+	if len(list.Versions) != 2 || list.Versions[0].Version != 2 || strings.Join(list.Versions[0].Keys, ",") != "A,B" || list.Versions[0].Data != nil {
+		t.Fatalf("history must list keys without values: %s", body)
+	}
+
+	code, body = do(t, ts, "GET", "/api/v1/history/1?path=/app", token, "")
+	if code != http.StatusOK || !strings.Contains(body, `"data":{"A":"1"}`) {
+		t.Fatalf("version: %d %s", code, body)
+	}
+
+	if code, body := do(t, ts, "POST", "/api/v1/history/1/rollback?path=/app", token, ""); code != http.StatusNoContent {
+		t.Fatalf("rollback: %d %s", code, body)
+	}
+	_, body = do(t, ts, "GET", "/api/v1/secrets?path=/app", token, "")
+	if strings.TrimSpace(body) != `{"data":{"A":"1"}}` {
+		t.Fatalf("after rollback: %s", body)
+	}
+
+	for path, want := range map[string]int{
+		"/api/v1/history/9?path=/app":   http.StatusNotFound,
+		"/api/v1/history/x?path=/app":   http.StatusBadRequest,
+		"/api/v1/history/0?path=/app":   http.StatusBadRequest,
+		"/api/v1/history?path=bad":      http.StatusBadRequest,
+		"/api/v1/history/1?path=/other": http.StatusNotFound,
+	} {
+		if code, body := do(t, ts, "GET", path, token, ""); code != want {
+			t.Errorf("GET %s: %d %s, want %d", path, code, body, want)
+		}
 	}
 }
 
@@ -224,6 +272,19 @@ func TestUIFlow(t *testing.T) {
 	_, body := get(t, c, ts.URL+"/path?path=/app")
 	if !strings.Contains(body, "PASS") || !strings.Contains(body, "&lt;s3cret&gt;") {
 		t.Fatalf("path page missing escaped key/value:\n%s", body)
+	}
+
+	postForm(t, c, ts, "/key", url.Values{"path": {"/app"}, "key": {"PASS"}, "value": {"new"}}, origin)
+	_, body = get(t, c, ts.URL+"/path?path=/app")
+	if !strings.Contains(body, "<h3>History</h3>") || !strings.Contains(body, `name="version" value="2"`) {
+		t.Fatalf("path page missing history:\n%s", body)
+	}
+	if code, _ := postForm(t, c, ts, "/path/rollback", url.Values{"path": {"/app"}, "version": {"2"}}, origin); code != http.StatusOK {
+		t.Fatalf("rollback: %d", code)
+	}
+	_, body = get(t, c, ts.URL+"/path?path=/app")
+	if !strings.Contains(body, `name="value" rows="3">&lt;s3cret&gt;</textarea>`) {
+		t.Fatalf("rollback not applied:\n%s", body)
 	}
 
 	_, body = postForm(t, c, ts, "/key", url.Values{"path": {"/app"}, "key": {"bad key"}, "value": {"x"}}, origin)

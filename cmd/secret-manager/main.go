@@ -35,7 +35,7 @@ var version = "dev"
 const usage = `Usage: secret-manager <command> [flags]
 
 Server:
-  server [--addr :8080] [--namespace NS] [--storage kubernetes]
+  server [--addr :8080] [--namespace NS] [--storage kubernetes] [--history-limit 10]
                                                run controller, API and Web UI
                                                (admin token from ` + cli.EnvToken + `)
   version                                      print the version
@@ -73,10 +73,15 @@ func runServer(args []string) error {
 	metricsAddr := fs.String("metrics-addr", ":8081", "listen address of the Prometheus metrics, 0 to disable")
 	namespace := fs.String("namespace", os.Getenv("POD_NAMESPACE"), "namespace holding the stored secrets (kubernetes storage)")
 	storageName := fs.String("storage", "kubernetes", "storage backend: kubernetes")
+	historyLimit := fs.Int("history-limit", 10, "versions kept per path, current included, 0 to disable history")
 	var logLevel slog.Level
 	fs.TextVar(&logLevel, "log-level", slog.LevelInfo, "log level: debug, info, warn or error")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	if *historyLimit < 0 {
+		return errors.New("--history-limit must not be negative")
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
@@ -121,6 +126,7 @@ func runServer(args []string) error {
 
 	changes := controller.NewChanges()
 	svc := secrets.New(backend, changes.Notify)
+	svc.KeepVersions = *historyLimit
 
 	reconciler := &controller.SecretSyncReconciler{
 		Client:   mgr.GetClient(),

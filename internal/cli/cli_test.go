@@ -41,6 +41,7 @@ type harness struct {
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	svc := secrets.New(k8sstorage.New(fake.NewClientBuilder().Build(), "sm"), nil)
+	svc.KeepVersions = 10
 	srv, err := server.New(svc, token)
 	if err != nil {
 		t.Fatal(err)
@@ -98,6 +99,37 @@ func TestSetGetListDelete(t *testing.T) {
 	h.mustRun("delete", "--path", "/tools", "--all")
 	if got := h.mustRun("list"); got != "/tools/nested\n" {
 		t.Fatalf("after delete --all: %q", got)
+	}
+}
+
+func TestHistoryAndRollback(t *testing.T) {
+	h := newHarness(t)
+	h.mustRun("set", "--path", "/tools", "A=1")
+	h.mustRun("set", "--path", "/tools", "A=2", "B=3")
+
+	out := h.mustRun("history", "--path", "/tools")
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 3 || !strings.HasPrefix(lines[1], "2 ") || !strings.HasSuffix(lines[1], " A,B") {
+		t.Fatalf("history: %q", out)
+	}
+	if got := h.mustRun("history", "--path", "/tools", "1"); got != "A=\"1\"\n" {
+		t.Fatalf("history version: %q", got)
+	}
+	h.mustRun("rollback", "--path", "/tools", "1")
+	if got := h.mustRun("get", "--path", "/tools"); got != "A=\"1\"\n" {
+		t.Fatalf("after rollback: %q", got)
+	}
+	for _, args := range [][]string{
+		{"rollback", "--path", "/tools"},
+		{"rollback", "--path", "/tools", "x"},
+		{"history", "--path", "/tools", "1", "2"},
+	} {
+		if code := h.run(args...); code != 2 {
+			t.Errorf("%v: exit %d, want 2", args, code)
+		}
+	}
+	if code := h.run("rollback", "--path", "/tools", "9"); code != 1 {
+		t.Errorf("rollback missing version: exit %d, want 1", code)
 	}
 }
 

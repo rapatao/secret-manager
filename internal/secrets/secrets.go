@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/rapatao/secret-manager/internal/storage"
 )
@@ -24,8 +25,15 @@ var (
 	keyRe  = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
 )
 
+// Version is a snapshot of the data stored at a path.
+type Version = storage.Version
+
 // Service is safe for concurrent use.
 type Service struct {
+	// History is the number of versions kept per path, current included.
+	// Zero disables history. Set it before the Service is used.
+	KeepVersions int
+
 	backend  storage.Backend
 	onChange func(path string)
 
@@ -117,17 +125,26 @@ func (s *Service) SetKeys(ctx context.Context, path string, values map[string]st
 	defer s.mu.Unlock()
 
 	data, err := s.backend.Get(ctx, path)
-	if errors.Is(err, ErrNotFound) {
+	changed := errors.Is(err, ErrNotFound)
+	if changed {
 		data = map[string]string{}
 	} else if err != nil {
 		return err
+	}
+	for k, v := range values {
+		if old, ok := data[k]; !ok || old != v {
+			changed = true
+		}
 	}
 	maps.Copy(data, values)
 	if err := s.backend.Put(ctx, path, data); err != nil {
 		return err
 	}
 	s.onChange(path)
-	return nil
+	if !changed {
+		return nil
+	}
+	return s.record(ctx, path, data)
 }
 
 // DeleteKey removes key from path. A missing key is not an error.
@@ -152,7 +169,7 @@ func (s *Service) DeleteKey(ctx context.Context, path, key string) error {
 		return err
 	}
 	s.onChange(path)
-	return nil
+	return s.record(ctx, path, data)
 }
 
 // DeletePath removes path and its data. Nested paths are kept.
@@ -169,5 +186,63 @@ func (s *Service) DeletePath(ctx context.Context, path string) error {
 		return err
 	}
 	s.onChange(path)
+	return nil
+}
+
+// History returns the versions of path, newest first. Versions of a deleted
+// path are kept.
+func (s *Service) History(ctx context.Context, path string) ([]Version, error) {
+	path, err := NormalizePath(path)
+	if err != nil {
+		return nil, err
+	}
+	return s.backend.Versions(ctx, path)
+}
+
+// Version returns version n of path.
+func (s *Service) Version(ctx context.Context, path string, n int) (Version, error) {
+	versions, err := s.History(ctx, path)
+	if err != nil {
+		return Version{}, err
+	}
+	for _, v := range versions {
+		if v.Number == n {
+			return v, nil
+		}
+	}
+	return Version{}, fmt.Errorf("%w: version %d of %s", ErrNotFound, n, path)
+}
+
+// Rollback replaces the data at path with version n, recreating a deleted
+// path. The restored data is recorded as a new version.
+func (s *Service) Rollback(ctx context.Context, path string, n int) error {
+	path, err := NormalizePath(path)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	v, err := s.Version(ctx, path, n)
+	if err != nil {
+		return err
+	}
+	if err := s.backend.Put(ctx, path, v.Data); err != nil {
+		return err
+	}
+	s.onChange(path)
+	return s.record(ctx, path, v.Data)
+}
+
+// record stores data as the newest version of path when history is enabled.
+// It runs after the write, so a failure leaves the write in place.
+func (s *Service) record(ctx context.Context, path string, data map[string]string) error {
+	if s.KeepVersions <= 0 {
+		return nil
+	}
+	if err := s.backend.AddVersion(ctx, path, time.Now(), data, s.KeepVersions); err != nil {
+		return fmt.Errorf("write succeeded but recording its version failed: %w", err)
+	}
 	return nil
 }
