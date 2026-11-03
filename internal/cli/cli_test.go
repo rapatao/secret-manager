@@ -16,6 +16,7 @@ import (
 	"github.com/zalando/go-keyring"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/rapatao/secret-manager/internal/client"
 	"github.com/rapatao/secret-manager/internal/secrets"
 	"github.com/rapatao/secret-manager/internal/server"
 	k8sstorage "github.com/rapatao/secret-manager/internal/storage/kubernetes"
@@ -30,6 +31,8 @@ func TestMain(m *testing.M) {
 
 type harness struct {
 	t        *testing.T
+	ts       *httptest.Server
+	env      map[string]string
 	url      string
 	envURL   string
 	envToken string
@@ -50,13 +53,14 @@ func newHarness(t *testing.T) *harness {
 	srv.Version = "1.4.0"
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
-	return &harness{t: t, url: ts.URL, envURL: ts.URL, envToken: token, dir: t.TempDir()}
+	return &harness{t: t, ts: ts, env: map[string]string{}, url: ts.URL, envURL: ts.URL, envToken: token, dir: t.TempDir()}
 }
 
 func (h *harness) run(args ...string) int {
 	h.stdout.Reset()
 	h.stderr.Reset()
 	env := map[string]string{EnvURL: h.envURL, EnvToken: h.envToken}
+	maps.Copy(env, h.env)
 	c := &CLI{
 		Stdin:     strings.NewReader(h.stdin),
 		Stdout:    &h.stdout,
@@ -449,5 +453,106 @@ func TestBackupNeedsCapability(t *testing.T) {
 	h.envURL = ts.URL
 	if code := h.run("backup"); code != 1 || !strings.Contains(h.stderr.String(), "does not support backup; upgrade the server") {
 		t.Fatalf("backup on old server: %d %s", code, h.stderr.String())
+	}
+}
+
+func TestOfflineCache(t *testing.T) {
+	keyring.MockInit()
+	h := newHarness(t)
+	h.mustRun("set", "--path", "/tools", "A=1")
+	h.mustRun("get", "--path", "/tools", "A")
+	h.mustRun("get", "--path", "/tools", "--recursive")
+
+	entries, _ := filepath.Glob(filepath.Join(h.dir, "cache", "*", "*"))
+	if len(entries) != 2 {
+		t.Fatalf("cache entries %v", entries)
+	}
+	for _, e := range entries {
+		b, _ := os.ReadFile(e)
+		fi, _ := os.Stat(e)
+		if bytes.Contains(b, []byte(`"A"`)) || fi.Mode().Perm() != 0o600 {
+			t.Fatalf("entry %s not encrypted or not 0600: %o %q", e, fi.Mode().Perm(), b)
+		}
+	}
+
+	h.envToken = "wrong-token-wrong-token-wrong-token"
+	if code := h.run("get", "--path", "/tools", "A"); code != 1 || strings.Contains(h.stdout.String(), "1") {
+		t.Fatalf("401 must not use the cache: %d %q", code, h.stdout.String())
+	}
+	h.envToken = token
+
+	h.ts.Close()
+	if got := h.mustRun("get", "--path", "/tools", "A"); got != "1\n" || !strings.Contains(h.stderr.String(), "unreachable") {
+		t.Fatalf("offline get: %q, stderr %q", got, h.stderr.String())
+	}
+	if got := h.mustRun("run", "--path", "/tools", "--recursive", "--", "sh", "-c", "echo $A"); got != "1\n" {
+		t.Fatalf("offline run: %q", got)
+	}
+	if code := h.run("get", "--path", "/other"); code != 1 {
+		t.Fatalf("uncached path offline: exit %d", code)
+	}
+
+	h.env[EnvCacheMaxAge] = "1ns"
+	if code := h.run("get", "--path", "/tools", "A"); code != 1 {
+		t.Fatalf("expired entry used: exit %d", code)
+	}
+	h.env[EnvCacheMaxAge] = "soon"
+	if code := h.run("get", "--path", "/tools", "A"); code != 2 {
+		t.Fatalf("invalid max age: exit %d", code)
+	}
+}
+
+func TestOfflineCacheDisabled(t *testing.T) {
+	keyring.MockInit()
+	h := newHarness(t)
+	h.mustRun("set", "--path", "/tools", "A=1")
+	h.env[EnvCacheMaxAge] = "0"
+	h.mustRun("get", "--path", "/tools", "A")
+	if _, err := os.Stat(filepath.Join(h.dir, "cache")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cache written while disabled: %v", err)
+	}
+
+	keyring.MockInitWithError(errors.New("no secret service"))
+	t.Cleanup(keyring.MockInit)
+	delete(h.env, EnvCacheMaxAge)
+	h.mustRun("get", "--path", "/tools", "A")
+	if _, err := os.Stat(filepath.Join(h.dir, "cache")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cache written without keychain: %v", err)
+	}
+}
+
+func TestLogoutClearsCache(t *testing.T) {
+	keyring.MockInit()
+	h := newHarness(t)
+	h.mustRun("set", "--path", "/tools", "A=1")
+	h.envURL, h.envToken = "", ""
+	h.stdin = token + "\n"
+	h.mustRun("servers", "login", "--server", h.url, "--token-stdin")
+	h.mustRun("get", "--path", "/tools", "A")
+	if entries, _ := filepath.Glob(filepath.Join(h.dir, "cache", "*", "*")); len(entries) != 1 {
+		t.Fatalf("cache entries %v", entries)
+	}
+	h.mustRun("servers", "logout")
+	if entries, _ := filepath.Glob(filepath.Join(h.dir, "cache", "*", "*")); len(entries) != 0 {
+		t.Fatalf("logout left %v", entries)
+	}
+}
+
+func TestUnreachable(t *testing.T) {
+	ctx := context.Background()
+	for err, want := range map[error]bool{
+		errors.New("dial tcp: connection refused"):     true,
+		&client.Error{Status: http.StatusBadGateway}:   true,
+		&client.Error{Status: http.StatusUnauthorized}: false,
+		&client.Error{Status: http.StatusNotFound}:     false,
+	} {
+		if got := unreachable(ctx, err); got != want {
+			t.Errorf("unreachable(%v) = %v", err, got)
+		}
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if unreachable(canceled, errors.New("context canceled")) {
+		t.Error("canceled context must not fall back")
 	}
 }

@@ -149,24 +149,30 @@ func (s store) write(name string, v any) error {
 	if s.dir == "" {
 		return errors.New("cannot determine the config directory; set XDG_CONFIG_HOME")
 	}
-	if err := os.MkdirAll(s.dir, 0o700); err != nil {
-		return err
-	}
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(s.dir, name+".*")
+	return writeAtomic(s.dir, name, append(b, '\n'))
+}
+
+// writeAtomic replaces dir/name with b, 0600 permissions, creating dir with
+// 0700 when missing.
+func writeAtomic(dir, name string, b []byte) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, name+".*")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(tmp.Name())
-	_, err = tmp.Write(append(b, '\n'))
+	_, err = tmp.Write(b)
 	if closeErr := tmp.Close(); err == nil {
 		err = closeErr
 	}
 	if err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), filepath.Join(s.dir, name))
+	return os.Rename(tmp.Name(), filepath.Join(dir, name))
 }
