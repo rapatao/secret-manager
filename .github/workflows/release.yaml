@@ -77,3 +77,27 @@ jobs:
           sed -i "s|^  repository: .*|  repository: $IMAGE|" charts/secret-manager/values.yaml
           helm package charts/secret-manager --version "$VERSION" --app-version "$VERSION" --destination dist
           helm push "dist/secret-manager-$VERSION.tgz" "$CHARTS"
+
+  release:
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # GITHUB_API_URL is api.github.com on GitHub and <instance>/api/v1 on
+      # Gitea; both accept the same release payload.
+      - name: Create release
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          prev="$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null || true)"
+          git log --no-merges --pretty='- %s' "${prev:+$prev..}$GITHUB_REF_NAME" > notes.md
+          jq -n --arg tag "$GITHUB_REF_NAME" --rawfile body notes.md \
+            '{tag_name: $tag, name: $tag, body: $body}' |
+            curl -fsS -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+              --data-binary @- "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases" > /dev/null
