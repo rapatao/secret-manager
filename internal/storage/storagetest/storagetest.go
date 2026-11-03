@@ -154,6 +154,52 @@ func Run(t *testing.T, newBackend func() storage.Backend) {
 			t.Fatalf("Versions(missing) = %v, %v", missing, err)
 		}
 	})
+
+	t.Run("versioned paths", func(t *testing.T) {
+		b := newBackend()
+		mustPut(t, b, "/plain", map[string]string{"A": "1"})
+		for _, p := range []string{"/b", "/a", "/a"} {
+			if err := b.AddVersion(ctx, p, time.Now(), map[string]string{"A": "1"}, 10); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := b.VersionedPaths(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"/a", "/b"}; !slices.Equal(got, want) {
+			t.Fatalf("VersionedPaths = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("tokens", func(t *testing.T) {
+		b := newBackend()
+		if got, err := b.Tokens(ctx); err != nil || len(got) != 0 {
+			t.Fatalf("Tokens on empty backend = %v, %v", got, err)
+		}
+		want := []storage.Token{
+			{Name: "ci", Hash: "aa", Path: "/app", ReadOnly: true, Created: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
+			{Name: "dev", Hash: "bb", Path: "/"},
+		}
+		for range 2 {
+			if err := b.PutTokens(ctx, want); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := b.Tokens(ctx)
+		if err != nil || len(got) != 2 || got[0].Name != "ci" || !got[0].ReadOnly || !got[0].Created.Equal(want[0].Created) || got[1].Hash != "bb" {
+			t.Fatalf("Tokens = %+v, %v", got, err)
+		}
+		if paths, _ := b.List(ctx, "/"); len(paths) != 0 {
+			t.Fatalf("tokens listed as paths: %v", paths)
+		}
+		if err := b.PutTokens(ctx, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := b.Tokens(ctx); len(got) != 0 {
+			t.Fatalf("Tokens after clearing = %v", got)
+		}
+	})
 }
 
 func mustPut(t *testing.T, b storage.Backend, path string, data map[string]string) {

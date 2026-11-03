@@ -1,4 +1,5 @@
-// Package reload restarts Deployments that use a changed Secret.
+// Package reload restarts Deployments, StatefulSets and DaemonSets that use a
+// changed Secret.
 package reload
 
 import (
@@ -11,37 +12,63 @@ import (
 )
 
 const (
-	// Annotation opts a Deployment into automatic restarts.
+	// Annotation opts a workload into automatic restarts.
 	Annotation = "secretmanager.rapatao.com/auto-reload"
 	// HashAnnotation is set on the pod template to trigger a rollout.
 	HashAnnotation = "secretmanager.rapatao.com/secret-hash"
 )
 
-// Deployments sets HashAnnotation to hash on the pod template of every
-// Deployment in namespace that opted in and references secretName, which
-// rolls out new pods. It returns the names of the restarted Deployments.
-func Deployments(ctx context.Context, c client.Client, namespace, secretName, hash string) ([]string, error) {
-	var list appsv1.DeploymentList
-	if err := c.List(ctx, &list, client.InNamespace(namespace)); err != nil {
-		return nil, fmt.Errorf("list deployments: %w", err)
+// Workloads sets HashAnnotation to hash on the pod template of every
+// Deployment, StatefulSet and DaemonSet in namespace that opted in and
+// references secretName, which rolls out new pods. It returns the restarted
+// workloads as Kind/name.
+func Workloads(ctx context.Context, c client.Client, namespace, secretName, hash string) ([]string, error) {
+	var (
+		deployments  appsv1.DeploymentList
+		statefulSets appsv1.StatefulSetList
+		daemonSets   appsv1.DaemonSetList
+	)
+	for _, list := range []client.ObjectList{&deployments, &statefulSets, &daemonSets} {
+		if err := c.List(ctx, list, client.InNamespace(namespace)); err != nil {
+			return nil, fmt.Errorf("list workloads: %w", err)
+		}
 	}
+	type workload struct {
+		kind     string
+		obj      client.Object
+		template *corev1.PodTemplateSpec
+	}
+	var workloads []workload
+	for i := range deployments.Items {
+		w := &deployments.Items[i]
+		workloads = append(workloads, workload{"Deployment", w, &w.Spec.Template})
+	}
+	for i := range statefulSets.Items {
+		w := &statefulSets.Items[i]
+		workloads = append(workloads, workload{"StatefulSet", w, &w.Spec.Template})
+	}
+	for i := range daemonSets.Items {
+		w := &daemonSets.Items[i]
+		workloads = append(workloads, workload{"DaemonSet", w, &w.Spec.Template})
+	}
+
 	var restarted []string
-	for i := range list.Items {
-		d := &list.Items[i]
-		if d.Annotations[Annotation] != "true" ||
-			d.Spec.Template.Annotations[HashAnnotation] == hash ||
-			!References(&d.Spec.Template.Spec, secretName) {
+	for _, w := range workloads {
+		if w.obj.GetAnnotations()[Annotation] != "true" ||
+			w.template.Annotations[HashAnnotation] == hash ||
+			!References(&w.template.Spec, secretName) {
 			continue
 		}
-		patch := client.MergeFrom(d.DeepCopy())
-		if d.Spec.Template.Annotations == nil {
-			d.Spec.Template.Annotations = map[string]string{}
+		patch := client.MergeFrom(w.obj.DeepCopyObject().(client.Object))
+		if w.template.Annotations == nil {
+			w.template.Annotations = map[string]string{}
 		}
-		d.Spec.Template.Annotations[HashAnnotation] = hash
-		if err := c.Patch(ctx, d, patch); err != nil {
-			return restarted, fmt.Errorf("patch deployment %s: %w", d.Name, err)
+		w.template.Annotations[HashAnnotation] = hash
+		name := w.kind + "/" + w.obj.GetName()
+		if err := c.Patch(ctx, w.obj, patch); err != nil {
+			return restarted, fmt.Errorf("patch %s: %w", name, err)
 		}
-		restarted = append(restarted, d.Name)
+		restarted = append(restarted, name)
 	}
 	return restarted, nil
 }

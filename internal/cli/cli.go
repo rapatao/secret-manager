@@ -25,6 +25,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/rapatao/secret-manager/internal/client"
+	"github.com/rapatao/secret-manager/internal/secrets"
 )
 
 const (
@@ -46,9 +47,17 @@ const Usage = `Client commands:
   delete  --path P (KEY... | --all)            delete keys, or the whole path
   export  --path P [--recursive] [--format dotenv|json]
   history --path P [VERSION]                   list versions, or print one as dotenv
+  history --path P --diff VERSION [VERSION2]   list keys added (+), removed (-) or
+                                               changed (~) since VERSION, up to
+                                               VERSION2 or the current data
   rollback --path P VERSION                    restore a version
   backup  [--history] [--output F]             print or write (0600) every path as JSON
   restore FILE|-                               replace the paths held in a backup
+  tokens  [list]                               list scoped tokens
+  tokens  create --name N --path P [--read-only]
+                                               create a token limited to the paths
+                                               under P and print it once
+  tokens  revoke NAME                          delete a token
   run     --path P [--recursive] -- CMD [ARGS...]
                                                run CMD with secrets as env vars
   version                                      print the client version and, when a
@@ -108,6 +117,7 @@ func (c *CLI) Run(ctx context.Context, args []string) int {
 		"version":  c.version,
 		"backup":   c.backup,
 		"restore":  c.restore,
+		"tokens":   c.tokens,
 	}
 	if len(args) == 0 {
 		fmt.Fprint(c.Stderr, Usage)
@@ -512,9 +522,13 @@ func (c *CLI) export(ctx context.Context, args []string) error {
 
 func (c *CLI) history(ctx context.Context, args []string) error {
 	f := c.flags("history", true, false)
+	diff := f.fs.Bool("diff", false, "list the keys changed from VERSION to VERSION2 or the current data")
 	api, err := f.parse(args)
 	if err != nil {
 		return err
+	}
+	if *diff {
+		return c.historyDiff(ctx, f, api)
 	}
 	switch f.fs.NArg() {
 	case 0:
@@ -541,6 +555,36 @@ func (c *CLI) history(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("%w: history takes at most one VERSION", errUsage)
 	}
+}
+
+func (c *CLI) historyDiff(ctx context.Context, f *flags, api *client.Client) error {
+	if n := f.fs.NArg(); n != 1 && n != 2 {
+		return fmt.Errorf("%w: history --diff takes VERSION and an optional VERSION2", errUsage)
+	}
+	var snapshots []map[string]string
+	for _, arg := range f.fs.Args() {
+		n, err := parseVersion(arg)
+		if err != nil {
+			return err
+		}
+		v, err := api.Version(ctx, f.path, n)
+		if err != nil {
+			return err
+		}
+		snapshots = append(snapshots, v.Data)
+	}
+	if len(snapshots) == 1 {
+		current, err := api.Get(ctx, f.path, false)
+		var apiErr *client.Error
+		if err != nil && (!errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound) {
+			return err
+		}
+		snapshots = append(snapshots, current)
+	}
+	for _, ch := range secrets.Diff(snapshots[0], snapshots[1]) {
+		fmt.Fprintf(c.Stdout, "%s %s\n", ch.Op, ch.Key)
+	}
+	return nil
 }
 
 func (c *CLI) rollback(ctx context.Context, args []string) error {
@@ -650,6 +694,67 @@ func (c *CLI) restore(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(c.Stdout, "Restored %d paths\n", n)
 	return nil
+}
+
+func (c *CLI) tokens(ctx context.Context, args []string) error {
+	sub, rest := "list", args
+	if len(args) > 0 {
+		sub, rest = args[0], args[1:]
+	}
+	f := c.flags("tokens "+sub, false, false)
+	var name, path *string
+	var readOnly *bool
+	if sub == "create" {
+		name = f.fs.String("name", "", "token name, [a-z0-9-]")
+		path = f.fs.String("path", "", "path the token is limited to, nested paths included")
+		readOnly = f.fs.Bool("read-only", false, "only allow reads")
+	}
+	api, err := f.parse(rest)
+	if err != nil {
+		return err
+	}
+	switch {
+	case sub == "list" && f.fs.NArg() == 0:
+	case sub == "create" && f.fs.NArg() == 0:
+		if *name == "" || *path == "" {
+			return fmt.Errorf("%w: tokens create needs --name and --path", errUsage)
+		}
+	case sub == "revoke" && f.fs.NArg() == 1:
+	case sub == "list", sub == "create", sub == "revoke":
+		return fmt.Errorf("%w: tokens %s: wrong arguments", errUsage, sub)
+	default:
+		return fmt.Errorf("%w: unknown tokens command %q", errUsage, sub)
+	}
+	if err := api.Require(ctx, "tokens"); err != nil {
+		return err
+	}
+
+	switch sub {
+	case "create":
+		t, err := api.CreateToken(ctx, *name, *path, *readOnly)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(c.Stdout, t.Token)
+		fmt.Fprintf(c.Stderr, "Token %s for %s created. It is shown only once.\n", t.Name, t.Path)
+		return nil
+	case "revoke":
+		return api.RevokeToken(ctx, f.fs.Arg(0))
+	}
+	list, err := api.Tokens(ctx)
+	if err != nil {
+		return err
+	}
+	w := tabwriter.NewWriter(c.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tPATH\tACCESS\tCREATED")
+	for _, t := range list {
+		access := "read-write"
+		if t.ReadOnly {
+			access = "read-only"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", t.Name, t.Path, access, t.Created.Format(time.RFC3339))
+	}
+	return w.Flush()
 }
 
 func parseVersion(s string) (int, error) {

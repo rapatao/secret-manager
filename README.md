@@ -4,7 +4,7 @@ A small, self-hosted key-value secret manager for Kubernetes.
 
 - Secrets are organized by path (`/kubernetes/app`, `/tools`) and managed with a CLI or a Web UI.
 - A `SecretSync` resource syncs one or more paths into Kubernetes Secrets, in any namespace, optionally shaped with Go templates.
-- Deployments that opt in are restarted when a Secret they use changes.
+- Deployments, StatefulSets and DaemonSets that opt in are restarted when a Secret they use changes.
 - `secret-manager run` injects secrets as environment variables into local commands, and keeps working from an encrypted cache while the server is unreachable.
 - Every write is kept as a version, so a path can be inspected or rolled back, even after it is deleted.
 - `secret-manager backup` and `restore` copy every path, optionally with its versions, to and from a JSON file.
@@ -18,9 +18,9 @@ One binary contains the controller, the REST API, the Web UI and the CLI. The co
 | Stores secrets | Yes, as Kubernetes Secrets | No, reads an external store (Vault, cloud providers, ...) | Yes, in PostgreSQL | Encrypted in git |
 | Extra components | None | The external store | PostgreSQL and Redis | None |
 | Web UI and CLI | Yes | No | Yes | CLI to encrypt (`kubeseal`) |
-| Users, roles, environments | No, one admin token | From the external store | Yes | Git permissions |
+| Users, roles, environments | No, one admin token plus tokens scoped to a path | From the external store | Yes | Git permissions |
 | Secret history | Yes, last N versions per path | From the external store | Yes | Git history |
-| Restarts Deployments on change | Yes | No, needs a tool like Reloader | Yes | No |
+| Restarts workloads on change | Yes | No, needs a tool like Reloader | Yes | No |
 
 Choose secret-manager for a small cluster where one person or a small team manages the secrets and running a database for them is not worth it. Choose External Secrets Operator if you already have a secret store, Infisical if you need users and environments, and Sealed Secrets if secrets must live in git.
 
@@ -29,7 +29,7 @@ Choose secret-manager for a small cluster where one person or a small team manag
 ```
 CLI / Web UI --HTTP--> secret-manager server --> storage backend (Kubernetes Secrets)
                               |
-                              +--> controller --> target Secrets --> Deployment restarts
+                              +--> controller --> target Secrets --> workload restarts
 ```
 
 Writes made through the API reach target Secrets immediately. Every `SecretSync` also resyncs on its `refreshInterval`, which repairs drift and picks up changes made directly on the store.
@@ -41,6 +41,17 @@ Storage is pluggable behind a small interface (`internal/storage.Backend`), sele
 `kubernetes` (default): each path is a Secret in the server's namespace (`/kubernetes/app` is stored as `sm.kubernetes.app`, labeled `secretmanager.rapatao.com/store=true`). There is no database or volume to run. Each write that changes a path is also stored as a version, unless history is disabled: a Secret named `smh.<path>.<version>` (`/kubernetes/app` version 3 is `smh.kubernetes.app.3`), labeled `secretmanager.rapatao.com/history=true`. See [History](#history).
 
 `file`: every path and version is kept in one JSON file (`--file`, mode `0600`), loaded into memory at start and rewritten atomically on every write.
+
+### Encryption
+
+Set `SECRET_MANAGER_ENCRYPTION_KEY` to a base64 AES-256 key (`openssl rand -base64 32`) to encrypt every stored value, in paths and versions, with AES-256-GCM before it reaches the storage backend. Paths, key names and version times stay readable. In the chart, put the key in a Secret and set `encryption.existingSecret` (and `encryption.key`, default `key`):
+
+```sh
+kubectl -n secret-manager create secret generic secret-manager-encryption \
+  --from-literal=key="$(openssl rand -base64 32)"
+```
+
+The API, the Web UI, `SecretSync` targets and backups still see plain values. On start, the server encrypts every path still holding a plaintext value. Versions written before the key was set stay plaintext until they are pruned by newer ones. Values written with a key cannot be read without it: a server started without the key, or with another one, answers `500` for them and logs the path and key. Keep a copy of the key outside the cluster; losing it loses the data. Changing the key is not supported: to move to a new key, `backup`, start the server with the new key on an empty store, then `restore`.
 
 To add a backend (SQLite, Postgres, ...), implement `storage.Backend`, run `storagetest.Run` against it in its tests, and add a case to the `--storage` switch in `cmd/secret-manager/main.go`.
 
@@ -69,7 +80,7 @@ kubectl apply -f /tmp/sm/secret-manager/crds
 
 The server runs as a single replica: writes are serialized in process.
 
-Set `controller.enabled=false` to only store secrets: the `SecretSync` controller does not run, no Secret outside the release namespace is written, no Deployment is restarted, and the chart installs a Role limited to Secrets in the release namespace instead of a ClusterRole. Add `--skip-crds` to `helm install` to leave out the `SecretSync` CRD.
+Set `controller.enabled=false` to only store secrets: the `SecretSync` controller does not run, no Secret outside the release namespace is written, no workload is restarted, and the chart installs a Role limited to Secrets in the release namespace instead of a ClusterRole. Add `--skip-crds` to `helm install` to leave out the `SecretSync` CRD.
 
 ### Without Kubernetes
 
@@ -93,9 +104,13 @@ The chart sets these; set them yourself when running `secret-manager server` out
 | `--file` | `secret-manager.json` | File holding the stored secrets and their versions (`file` storage) |
 | `--controller` | `true` | Run the `SecretSync` controller. Requires access to a cluster |
 | `--history-limit` | `10` | Versions kept per path, current included, `0` disables history |
+| `--backup-dir` | | Directory receiving [scheduled backups](#scheduled-backups), empty disables them |
+| `--backup-interval` | `24h` | Time between scheduled backups |
+| `--backup-keep` | `7` | Scheduled backup files kept |
+| `--backup-history` | `false` | Include versions in scheduled backups |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error` |
 
-The admin token is read from `SECRET_MANAGER_TOKEN`.
+The admin token is read from `SECRET_MANAGER_TOKEN`, the optional [encryption](#encryption) key from `SECRET_MANAGER_ENCRYPTION_KEY`.
 
 ## SecretSync
 
@@ -137,11 +152,11 @@ spec:
 
 The controller never overwrites a Secret it did not create; the `Ready` condition reports the conflict instead. `kubectl get secretsync` shows `Ready` and `Reason`.
 
-`kubectl describe secretsync` lists events: `Synced` when a target Secret is created or updated, `DeploymentsRestarted` when Deployments are restarted, and a `Warning` with the condition reason (`SourceError`, `SyncFailed`) when a sync starts failing or its error changes.
+`kubectl describe secretsync` lists events: `Synced` when a target Secret is created or updated, `WorkloadsRestarted` when workloads are restarted, and a `Warning` with the condition reason (`SourceError`, `SyncFailed`) when a sync starts failing or its error changes.
 
-### Restarting Deployments
+### Restarting workloads
 
-Annotate a Deployment to restart it whenever a synced Secret it references (`envFrom`, `env.valueFrom`, `volumes`, projected volumes) changes:
+Annotate a Deployment, StatefulSet or DaemonSet to restart it whenever a synced Secret it references (`envFrom`, `env.valueFrom`, `volumes`, projected volumes) changes:
 
 ```yaml
 metadata:
@@ -223,6 +238,8 @@ Entries are encrypted with AES-256-GCM and stored in the `cache` directory next 
 
 Every write that changes a path (setting keys, deleting a key) stores the path's new data as a version numbered one above the previous, and so does every rollback, even to identical data. Other writes that change nothing, and changes made directly on the stored Secrets, are not recorded. The newest versions are kept, current one included, up to `--history-limit` (chart value `historyLimit`, default `10`). Lowering the limit removes the extra versions of a path on its next write. `0` stops recording; versions already stored stay until removed by hand (`kubectl delete secret -l secretmanager.rapatao.com/history=true`).
 
+`secret-manager history --path P --diff N` lists the keys added (`+`), removed (`-`) or changed (`~`) from version `N` to the current data; `--diff N M` compares two versions. Values are not printed; `history --path P N` prints a version. The Web UI shows the same changes for each version, compared with the version before it.
+
 Deleting a path keeps its versions, so `rollback` can bring it back. Rolling back writes the old data as a new version, so it can itself be undone. Rolling back a synced path updates its targets like any other write.
 
 History starts when the feature is first used: paths written before have no versions until their next change.
@@ -233,15 +250,35 @@ History starts when the feature is first used: paths written before have no vers
 
 `secret-manager restore F` (`-` for stdin) replaces the data of every path in the file. Paths not in the file are kept. Each changed path is recorded as a new version and its targets are synced, like any other write. Versions in the file are restored only for paths that have none yet, renumbered from 1 and limited to `--history-limit`; a path that already has versions only gets a new one for the restored data. Restoring the same file twice changes nothing. Every path and key is checked before anything is written.
 
-The file holds every value in plain text. Encrypt it before storing it elsewhere, for example `secret-manager backup | age -r KEY > backup.json.age`. To move to a new server, or to keep a copy before an upgrade, back up from the old server and restore on the new one; any client version with `backup` can talk to both, see [Compatibility](#compatibility). There is no schedule: run `backup` from cron or a CI job.
+The file holds every value in plain text. Encrypt it before storing it elsewhere, for example `secret-manager backup | age -r KEY > backup.json.age`. To move to a new server, or to keep a copy before an upgrade, back up from the old server and restore on the new one; any client version with `backup` can talk to both, see [Compatibility](#compatibility).
+
+### Scheduled backups
+
+With `--backup-dir DIR`, the server writes a backup to `DIR/backup-<UTC time>.json` (`0600`) every `--backup-interval` (default `24h`) and keeps the newest `--backup-keep` files (default `7`). `--backup-history` adds versions. The first backup is written one interval after the server starts. Each run is logged as an audit entry with `source` `schedule` and `op` `backup`; a failed run is logged at `WARN` and tried again on the next interval.
+
+In the chart, set `backup.enabled=true` (`backup.interval`, `backup.keep`, `backup.history`). Backups go to a `ReadWriteOnce` PersistentVolumeClaim named `<release>-backups` (`backup.persistence.size`, default `1Gi`, and `backup.persistence.storageClass`), or to `backup.persistence.existingClaim`. Helm keeps the claim when the release is uninstalled. The image has no shell, so to copy a file out, mount the claim in another pod. The same plain-text warning applies to these files.
+
+## Scoped tokens
+
+The admin token can do everything. For CI jobs, other machines or `secret-manager run`, create a token limited to one path and the paths nested below it, optionally read-only:
+
+```sh
+secret-manager tokens create --name ci --path /kubernetes/app --read-only
+secret-manager tokens                 # list
+secret-manager tokens revoke ci
+```
+
+`create` prints the token (`smt_...`) once; the server keeps only its SHA-256 hash, in the storage backend (a Secret named `sm-tokens` with the `kubernetes` backend). Use it like the admin token, with `SECRET_MANAGER_URL` and `SECRET_MANAGER_TOKEN` or `servers login`.
+
+A scoped token can read the data and history of paths under its path, and, unless read-only, set and delete keys, delete those paths and roll them back. `list` shows only its paths. Everything else needs the admin token: backup, restore, managing tokens and the Web UI. A request outside the token's scope gets `403`. Tokens are loaded once and kept in memory, so changes made directly on the stored tokens need a server restart.
 
 ## Web UI
 
-Open the server URL and sign in with the admin token. The UI lists paths, filters them by a search term matched anywhere in the path, and lets you create and delete paths and keys, copy a key's value to the clipboard, and view and restore a path's versions; values stay hidden until expanded. It follows the system light or dark theme. Only the copy button needs JavaScript. Deleted paths are not listed; restore them with the CLI or the API. Sessions last 12 hours and survive server restarts; changing the admin token signs every session out. Logging out of a session is remembered only until the server restarts. The session cookie is `Secure`, so use HTTPS (an Ingress with TLS) or `localhost`.
+Open the server URL and sign in with the admin token. The UI lists paths, filters them by a search term matched anywhere in the path, and lets you create and delete paths and keys, copy a key's value to the clipboard, and view and restore a path's versions; values stay hidden until expanded. It follows the system light or dark theme. Only the copy button needs JavaScript. Deleted paths that still have versions are listed separately, and restoring one of their versions brings them back. Sessions last 12 hours and survive server restarts; changing the admin token signs every session out. Logging out deletes the session cookie in the browser. The session cookie is `Secure`, so use HTTPS (an Ingress with TLS) or `localhost`.
 
 ## API
 
-All endpoints except `/healthz` and `/readyz` require `Authorization: Bearer <token>`.
+All endpoints except `/healthz` and `/readyz` require `Authorization: Bearer <token>`, the admin token or a [scoped token](#scoped-tokens) allowed to use the endpoint and path.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -256,6 +293,9 @@ All endpoints except `/healthz` and `/readyz` require `Authorization: Bearer <to
 | `GET` | `/api/v1/history?path=P` | `{"versions": [{"version": 3, "time": "...", "keys": [...]}]}`, newest first, without values |
 | `GET` | `/api/v1/history/{version}?path=P` | `{"version": 3, "time": "...", "data": {"KEY": "value"}}` |
 | `POST` | `/api/v1/history/{version}/rollback?path=P` | Replace the data at P with that version |
+| `GET` | `/api/v1/tokens` | `{"tokens": [{"name": "ci", "path": "/app", "readOnly": true, "created": "..."}]}`, admin token only |
+| `POST` | `/api/v1/tokens` | Create a token from `{"name": "ci", "path": "/app", "readOnly": true}`, returns it with `"token"`, admin token only |
+| `DELETE` | `/api/v1/tokens/{name}` | Revoke a token, admin token only |
 | `GET` | `/healthz` | Liveness |
 | `GET` | `/readyz` | Readiness: 503 when the storage backend cannot be read |
 
@@ -265,14 +305,14 @@ Paths look like `/a/b`, with segments of `[a-z0-9-]`. Keys match `[-._a-zA-Z0-9]
 
 Clients and servers of different versions work together. `/api/v1` endpoints keep their behavior, so an older CLI works against a newer server. A newer CLI works against an older server too, as long as the server has the features a command uses.
 
-`GET /api/v1/info` lists those features as capabilities: `paths`, `secrets`, `history` and `backup` today. Commands that need a feature added later check its capability first and fail with `server v1.2.0 at URL does not support X; upgrade the server` instead of an unclear error. Servers older than `/api/v1/info` are treated as having `paths`, `secrets` and `history`, and their version is shown as unknown. A capability never changes meaning and is never removed; changed behavior gets a new capability.
+`GET /api/v1/info` lists those features as capabilities: `paths`, `secrets`, `history`, `backup` and `tokens` today. Commands that need a feature added later check its capability first and fail with `server v1.2.0 at URL does not support X; upgrade the server` instead of an unclear error. Servers older than `/api/v1/info` are treated as having `paths`, `secrets` and `history`, and their version is shown as unknown. A capability never changes meaning and is never removed; changed behavior gets a new capability.
 
 `secret-manager version` prints the client version and, when a server is set (see [Resolution order](#resolution-order)), the server version and capabilities:
 
 ```
 client: v1.5.0
 server: v1.4.0 (https://secrets.example.com)
-capabilities: backup, history, paths, secrets
+capabilities: backup, history, paths, secrets, tokens
 ```
 
 ## Observability
@@ -284,7 +324,7 @@ Prometheus metrics are served on `:8081/metrics` (`--metrics-addr`, `0` disables
 | Metric | Description |
 |--------|-------------|
 | `secretmanager_sync_failures_total{reason}` | Reconciles that left `Ready` False, by reason |
-| `secretmanager_deployment_restarts_total` | Deployments restarted because a synced Secret changed |
+| `secretmanager_workload_restarts_total{kind}` | Deployments, StatefulSets and DaemonSets restarted because a synced Secret changed, by kind |
 
 With the Prometheus Operator, set `metrics.serviceMonitor.enabled=true` (and `metrics.serviceMonitor.labels` to match your Prometheus selector) to create a `ServiceMonitor`.
 
@@ -301,18 +341,18 @@ Every change made through the API or the Web UI, every backup, every Web UI logi
 {"level":"WARN","msg":"audit","source":"ui","op":"login","remote":"10.42.0.7:51240","error":"invalid token"}
 ```
 
-`op` is one of `set`, `delete_key`, `delete_path`, `create_path`, `rollback`, `backup`, `restore`, `login` and `auth` (API bearer token). Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Other reads are not logged.
+`op` is one of `set`, `delete_key`, `delete_path`, `create_path`, `rollback`, `backup`, `restore`, `create_token`, `revoke_token` (with the token `name`), `login` and `auth` (API bearer token, including requests a scoped token is not allowed to make). Requests made with a scoped token carry its name in `token`. Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Other reads are not logged.
 
 ## Security notes
 
-- With the `kubernetes` backend, values are only as protected as Secrets in your cluster. Enable encryption at rest (k3s: `--secrets-encryption`) and restrict who can read Secrets in the server namespace.
+- Without [encryption](#encryption), values are only as protected as the storage backend: Secrets in your cluster, or the `file` backend's file. Set an encryption key, or enable encryption at rest in the cluster (k3s: `--secrets-encryption`), and restrict who can read Secrets in the server namespace. The encryption key is as sensitive as the admin token.
 - Old values stay readable in history Secrets after they are changed or deleted. To purge a leaked value, delete its versions: `kubectl -n secret-manager get secrets -l secretmanager.rapatao.com/history=true` lists them.
 - The CLI caches the secrets it reads, encrypted with a key in the OS keychain, for up to 7 days. Anyone who can use your keychain can read them. Set `SECRET_MANAGER_CACHE_MAX_AGE=0` on shared machines.
 - Backup files hold every value in plain text. Encrypt them and keep them out of git.
-- With the `file` backend, values are stored in plain text in the file. Restrict access to it and to its directory, and encrypt the disk it lives on.
+- With the `file` backend, restrict access to the file and its directory. Without an encryption key, values are stored in plain text in it.
 - With the controller enabled, the server needs cluster-wide permission to manage Secrets, because targets can live in any namespace. With `controller.enabled=false` it only needs Secrets in its own namespace.
 - The metrics port has no authentication. It exposes no secret values, but restrict it with a NetworkPolicy if other workloads should not read it.
-- The admin token grants full access. Keep it long and random, and rotate it by updating its Secret and restarting the server.
+- The admin token grants full access. Keep it long and random, and rotate it by updating its Secret and restarting the server. Give other clients a [scoped token](#scoped-tokens) instead, and revoke it when it is no longer used.
 
 ## Development
 

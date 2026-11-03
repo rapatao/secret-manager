@@ -294,3 +294,14 @@ func TestRestoreValidatesBeforeWriting(t *testing.T) {
 		t.Fatalf("wrote %v before failing", paths)
 	}
 }
+
+func TestDiff(t *testing.T) {
+	got := Diff(map[string]string{"A": "1", "B": "2", "D": "4"}, map[string]string{"A": "1", "B": "3", "C": "x"})
+	want := []Change{{"~", "B"}, {"+", "C"}, {"-", "D"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Diff = %v, want %v", got, want)
+	}
+	if got := Diff(nil, nil); got != nil {
+		t.Fatalf("Diff(nil, nil) = %v", got)
+	}
+}

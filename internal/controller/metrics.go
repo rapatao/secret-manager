@@ -10,12 +10,12 @@ var (
 		Name: "secretmanager_sync_failures_total",
 		Help: "SecretSync reconciles that ended with Ready False, by reason.",
 	}, []string{"reason"})
-	deploymentRestarts = prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "secretmanager_deployment_restarts_total",
-		Help: "Deployments restarted because a synced Secret changed.",
-	})
+	workloadRestarts = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "secretmanager_workload_restarts_total",
+		Help: "Deployments, StatefulSets and DaemonSets restarted because a synced Secret changed, by kind.",
+	}, []string{"kind"})
 )
 
 func init() {
-	metrics.Registry.MustRegister(syncFailures, deploymentRestarts)
+	metrics.Registry.MustRegister(syncFailures, workloadRestarts)
 }

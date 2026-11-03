@@ -15,7 +15,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/rapatao/secret-manager/internal/secrets"
@@ -39,18 +38,17 @@ func init() {
 }
 
 // sessions issues cookies signed with a key derived from the admin token, so
-// they survive restarts and are invalidated when the token changes.
+// they survive restarts and are invalidated when the token changes. Logging
+// out deletes the cookie; a copy of it stays valid until it expires.
 type sessions struct {
-	mu      sync.Mutex
-	ttl     time.Duration
-	key     []byte
-	revoked map[string]time.Time
+	ttl time.Duration
+	key []byte
 }
 
 func newSessions(token []byte, ttl time.Duration) *sessions {
 	m := hmac.New(sha256.New, token)
 	m.Write([]byte("secret-manager ui session"))
-	return &sessions{ttl: ttl, key: m.Sum(nil), revoked: map[string]time.Time{}}
+	return &sessions{ttl: ttl, key: m.Sum(nil)}
 }
 
 func (s *sessions) sign(payload string) string {
@@ -64,46 +62,14 @@ func (s *sessions) create() string {
 	return payload + "." + s.sign(payload)
 }
 
-func (s *sessions) expiry(id string) (time.Time, bool) {
+func (s *sessions) valid(id string) bool {
 	i := strings.LastIndexByte(id, '.')
 	if i < 0 || !hmac.Equal([]byte(id[i+1:]), []byte(s.sign(id[:i]))) {
-		return time.Time{}, false
+		return false
 	}
 	unix, _, _ := strings.Cut(id[:i], ".")
 	sec, err := strconv.ParseInt(unix, 10, 64)
-	if err != nil {
-		return time.Time{}, false
-	}
-	exp := time.Unix(sec, 0)
-	return exp, time.Now().Before(exp)
-}
-
-func (s *sessions) valid(id string) bool {
-	if _, ok := s.expiry(id); !ok {
-		return false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, revoked := s.revoked[id]
-	return !revoked
-}
-
-// ponytail: revocations live in memory, so a logged-out cookie captured before
-// logout is accepted again after a restart until it expires.
-func (s *sessions) delete(id string) {
-	exp, ok := s.expiry(id)
-	if !ok {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := time.Now()
-	for k, e := range s.revoked {
-		if now.After(e) {
-			delete(s.revoked, k)
-		}
-	}
-	s.revoked[id] = exp
+	return err == nil && time.Now().Before(time.Unix(sec, 0))
 }
 
 // ui sets security headers and rejects cross-origin form posts.
@@ -161,9 +127,6 @@ func (s *Server) uiLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) uiLogout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(sessionCookie); err == nil {
-		s.sessions.delete(c.Value)
-	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
@@ -174,17 +137,33 @@ func (s *Server) uiIndex(w http.ResponseWriter, r *http.Request) {
 		s.uiError(w, r, err)
 		return
 	}
+	deleted, err := s.secrets.DeletedPaths(r.Context())
+	if err != nil {
+		s.uiError(w, r, err)
+		return
+	}
 	q := r.URL.Query().Get("q")
-	paths = slices.DeleteFunc(paths, func(p string) bool { return !strings.Contains(p, q) })
-	render(w, http.StatusOK, "index", map[string]any{"Paths": paths, "Query": q, "Error": r.URL.Query().Get("error")})
+	unmatched := func(p string) bool { return !strings.Contains(p, q) }
+	render(w, http.StatusOK, "index", map[string]any{
+		"Paths":   slices.DeleteFunc(paths, unmatched),
+		"Deleted": slices.DeleteFunc(deleted, unmatched),
+		"Query":   q,
+		"Error":   r.URL.Query().Get("error"),
+	})
 }
 
 type entry struct{ Key, Value string }
 
 func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
-	data, err := s.secrets.Get(r.Context(), path, false)
+	versions, err := s.secrets.History(r.Context(), path)
 	if err != nil {
+		s.uiError(w, r, err)
+		return
+	}
+	data, err := s.secrets.Get(r.Context(), path, false)
+	deleted := errors.Is(err, secrets.ErrNotFound) && len(versions) > 0
+	if err != nil && !deleted {
 		s.uiError(w, r, err)
 		return
 	}
@@ -192,26 +171,28 @@ func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 	for _, k := range slices.Sorted(maps.Keys(data)) {
 		entries = append(entries, entry{k, data[k]})
 	}
-	versions, err := s.secrets.History(r.Context(), path)
-	if err != nil {
-		s.uiError(w, r, err)
-		return
-	}
 	var history []uiVersion
-	for _, v := range versions {
+	for i, v := range versions {
 		h := uiVersion{Number: v.Number, Time: v.Time.Format(time.RFC3339)}
 		for _, k := range slices.Sorted(maps.Keys(v.Data)) {
 			h.Entries = append(h.Entries, entry{k, v.Data[k]})
 		}
+		switch {
+		case i+1 < len(versions):
+			h.Changes = secrets.Diff(versions[i+1].Data, v.Data)
+		case v.Number == 1:
+			h.Changes = secrets.Diff(nil, v.Data)
+		}
 		history = append(history, h)
 	}
-	render(w, http.StatusOK, "path", map[string]any{"Path": path, "Entries": entries, "History": history, "Error": r.URL.Query().Get("error")})
+	render(w, http.StatusOK, "path", map[string]any{"Path": path, "Deleted": deleted, "Entries": entries, "History": history, "Error": r.URL.Query().Get("error")})
 }
 
 type uiVersion struct {
 	Number  int
 	Time    string
 	Entries []entry
+	Changes []secrets.Change
 }
 
 func (s *Server) uiRollback(w http.ResponseWriter, r *http.Request) {

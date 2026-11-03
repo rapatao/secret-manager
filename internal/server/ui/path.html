@@ -2,6 +2,9 @@
 <p class="muted"><a href="/">Paths</a> /</p>
 <h1 class="mono">{{.Path}}</h1>
 {{$path := .Path}}
+{{if .Deleted}}
+<p class="muted">This path was deleted. Restore a version to bring it back.</p>
+{{else}}
 <div class="card">
 <h2>Keys <span class="badge">{{len .Entries}}</span></h2>
 <table>
@@ -46,16 +49,18 @@
 </form>
 </div>
 </div>
+{{end}}
 {{with .History}}
 <div class="card">
 <h2>History</h2>
 <table>
-<thead><tr><th>Version</th><th>Written</th><th>Data</th><th></th></tr></thead>
+<thead><tr><th>Version</th><th>Written</th><th>Changes</th><th>Data</th><th></th></tr></thead>
 <tbody>
 {{range $v := .}}
 <tr>
 <td><span class="badge">v{{$v.Number}}</span></td>
 <td class="muted">{{$v.Time}}</td>
+<td class="mono">{{range $v.Changes}}<span class="change">{{.Op}}{{.Key}}</span> {{else}}<span class="muted">-</span>{{end}}</td>
 <td>
 <details><summary>{{len $v.Entries}} keys</summary>
 <table>
@@ -76,6 +81,7 @@
 </table>
 </div>
 {{end}}
+{{if not .Deleted}}
 <div class="card danger-zone">
 <h2>Danger zone</h2>
 <div class="body">
@@ -86,4 +92,5 @@
 </form>
 </div>
 </div>
+{{end}}
 {{end}}

@@ -4,6 +4,7 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -31,8 +32,15 @@ const (
 	// TimeAnnotation holds the RFC 3339 time a version was written.
 	TimeAnnotation = "secretmanager.rapatao.com/time"
 
+	// TokensLabel marks the Secret holding the access tokens.
+	TokensLabel = "secretmanager.rapatao.com/tokens"
+
 	namePrefix    = "sm"
 	historyPrefix = "smh"
+	// tokensName cannot collide with a path Secret: those are "sm" or start
+	// with "sm.".
+	tokensName = "sm-tokens"
+	tokensKey  = "tokens"
 )
 
 // Backend implements storage.Backend on top of Secrets in a single namespace.
@@ -191,6 +199,22 @@ func (b *Backend) AddVersion(ctx context.Context, path string, at time.Time, dat
 	return nil
 }
 
+// VersionedPaths implements storage.Backend.
+func (b *Backend) VersionedPaths(ctx context.Context) ([]string, error) {
+	var list corev1.SecretList
+	if err := b.c.List(ctx, &list, client.InNamespace(b.ns), client.MatchingLabels{HistoryLabel: "true"}); err != nil {
+		return nil, fmt.Errorf("list versions: %w", err)
+	}
+	var paths []string
+	for _, s := range list.Items {
+		if p := s.Annotations[PathAnnotation]; p != "" && !slices.Contains(paths, p) {
+			paths = append(paths, p)
+		}
+	}
+	slices.Sort(paths)
+	return paths, nil
+}
+
 // Versions implements storage.Backend.
 func (b *Backend) Versions(ctx context.Context, path string) ([]storage.Version, error) {
 	// ponytail: lists every history Secret in the namespace; add a label
@@ -217,4 +241,50 @@ func (b *Backend) Versions(ctx context.Context, path string) ([]storage.Version,
 	}
 	slices.SortFunc(versions, func(a, b storage.Version) int { return b.Number - a.Number })
 	return versions, nil
+}
+
+// Tokens implements storage.Backend.
+func (b *Backend) Tokens(ctx context.Context) ([]storage.Token, error) {
+	var s corev1.Secret
+	err := b.c.Get(ctx, client.ObjectKey{Namespace: b.ns, Name: tokensName}, &s)
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get tokens: %w", err)
+	}
+	var tokens []storage.Token
+	if err := json.Unmarshal(s.Data[tokensKey], &tokens); err != nil {
+		return nil, fmt.Errorf("secret %s: parse tokens: %w", tokensName, err)
+	}
+	return tokens, nil
+}
+
+// PutTokens implements storage.Backend.
+func (b *Backend) PutTokens(ctx context.Context, tokens []storage.Token) error {
+	raw, err := json.Marshal(tokens)
+	if err != nil {
+		return err
+	}
+	var s corev1.Secret
+	err = b.c.Get(ctx, client.ObjectKey{Namespace: b.ns, Name: tokensName}, &s)
+	if apierrors.IsNotFound(err) {
+		s = corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: tokensName, Namespace: b.ns, Labels: map[string]string{TokensLabel: "true"}},
+			Type:       corev1.SecretTypeOpaque,
+			Data:       map[string][]byte{tokensKey: raw},
+		}
+		if err := b.c.Create(ctx, &s); err != nil {
+			return fmt.Errorf("create tokens: %w", err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get tokens: %w", err)
+	}
+	s.Data = map[string][]byte{tokensKey: raw}
+	if err := b.c.Update(ctx, &s); err != nil {
+		return fmt.Errorf("update tokens: %w", err)
+	}
+	return nil
 }
