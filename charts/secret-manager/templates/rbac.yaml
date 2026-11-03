@@ -15,7 +15,7 @@ rules:
     resources: [secrets]
     verbs: [get, list, create, update, patch, delete]
   - apiGroups: [apps]
-    resources: [deployments]
+    resources: [deployments, statefulsets, daemonsets]
     verbs: [list, patch]
   - apiGroups: [secretmanager.rapatao.com]
     resources: [secretsyncs]

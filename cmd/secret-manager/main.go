@@ -184,9 +184,9 @@ func newManager(metricsAddr string) (manager.Manager, error) {
 		Scheme:  scheme,
 		Metrics: metricsserver.Options{BindAddress: metricsAddr},
 		Client: client.Options{Cache: &client.CacheOptions{
-			// Read Secrets and Deployments directly: no cluster-wide cache of
+			// Read Secrets and workloads directly: no cluster-wide cache of
 			// every Secret, and storage reads always see the latest write.
-			DisableFor: []client.Object{&corev1.Secret{}, &appsv1.Deployment{}},
+			DisableFor: []client.Object{&corev1.Secret{}, &appsv1.Deployment{}, &appsv1.StatefulSet{}, &appsv1.DaemonSet{}},
 		}},
 	})
 	if err != nil {
