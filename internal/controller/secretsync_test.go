@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -12,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -27,6 +29,7 @@ type env struct {
 	ctx context.Context
 	c   client.Client
 	svc *secrets.Service
+	rec *events.FakeRecorder
 	r   *SecretSyncReconciler
 }
 
@@ -45,7 +48,8 @@ func newEnv(t *testing.T, objs ...client.Object) *env {
 		WithStatusSubresource(&v1alpha1.SecretSync{}).
 		Build()
 	svc := secrets.New(k8sstorage.New(c, "secret-manager"), nil)
-	return &env{t: t, ctx: context.Background(), c: c, svc: svc, r: &SecretSyncReconciler{Client: c, Secrets: svc}}
+	rec := events.NewFakeRecorder(100)
+	return &env{t: t, ctx: context.Background(), c: c, svc: svc, rec: rec, r: &SecretSyncReconciler{Client: c, Secrets: svc, Recorder: rec}}
 }
 
 func (e *env) set(path string, kv map[string]string) {
@@ -69,6 +73,19 @@ func (e *env) reconcile(ss *v1alpha1.SecretSync) ctrl.Result {
 		}
 	}
 	return res
+}
+
+// events drains and returns the recorded events.
+func (e *env) events() []string {
+	var out []string
+	for {
+		select {
+		case ev := <-e.rec.Events:
+			out = append(out, ev)
+		default:
+			return out
+		}
+	}
 }
 
 func (e *env) secret(ns, name string) (*corev1.Secret, error) {
@@ -303,5 +320,60 @@ func TestChangesNotifyNeverBlocks(t *testing.T) {
 	c.Notify("/b")
 	if got := (<-c).Object; got != "/a" {
 		t.Fatalf("got %s", got)
+	}
+}
+
+func TestSyncEventsAndRestartMetric(t *testing.T) {
+	ss := secretSync(v1alpha1.Target{Name: "creds"})
+	d := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "app", Name: "web", Annotations: map[string]string{reload.Annotation: "true"},
+	}}
+	d.Spec.Template.Spec.Containers = []corev1.Container{{Name: "web", EnvFrom: []corev1.EnvFromSource{{
+		SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "creds"}},
+	}}}}
+	e := newEnv(t, ss, d)
+	e.set("/kubernetes", map[string]string{"A": "1"})
+
+	e.reconcile(ss)
+	if got := e.events(); len(got) != 1 || got[0] != "Normal Synced Created Secret app/creds" {
+		t.Fatalf("create events %q", got)
+	}
+
+	e.reconcile(ss)
+	if got := e.events(); len(got) != 0 {
+		t.Fatalf("unchanged resync emitted %q", got)
+	}
+
+	restarts := testutil.ToFloat64(deploymentRestarts)
+	e.set("/kubernetes", map[string]string{"A": "2"})
+	e.reconcile(ss)
+	want := []string{
+		"Normal Synced Updated Secret app/creds",
+		"Normal DeploymentsRestarted Restarted Deployments web in app for Secret creds",
+	}
+	if got := e.events(); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("update events %q, want %q", got, want)
+	}
+	if got := testutil.ToFloat64(deploymentRestarts) - restarts; got != 1 {
+		t.Fatalf("restarts metric grew by %v, want 1", got)
+	}
+}
+
+func TestSyncFailureWarnsOnceAndCounts(t *testing.T) {
+	ss := secretSync(v1alpha1.Target{Name: "taken"})
+	foreign := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "app", Name: "taken"}}
+	e := newEnv(t, ss, foreign)
+	e.set("/kubernetes", map[string]string{"A": "1"})
+	failures := testutil.ToFloat64(syncFailures.WithLabelValues("SyncFailed"))
+
+	e.reconcile(ss)
+	e.reconcile(ss)
+
+	got := e.events()
+	if len(got) != 1 || !strings.HasPrefix(got[0], "Warning SyncFailed app/taken: secret exists and is not managed") {
+		t.Fatalf("events %q", got)
+	}
+	if n := testutil.ToFloat64(syncFailures.WithLabelValues("SyncFailed")) - failures; n != 2 {
+		t.Fatalf("failures metric grew by %v, want 2", n)
 	}
 }

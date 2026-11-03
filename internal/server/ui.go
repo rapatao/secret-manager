@@ -103,6 +103,7 @@ func (s *Server) uiLoginForm(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) uiLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.validToken(r.PostFormValue("token")) {
+		s.audit(r, "ui", "login", "", nil, errInvalidToken)
 		render(w, http.StatusUnauthorized, "login", map[string]string{"Error": "invalid token"})
 		return
 	}
@@ -115,6 +116,7 @@ func (s *Server) uiLogin(w http.ResponseWriter, r *http.Request) {
 		Secure:   true,
 		SameSite: http.SameSiteStrictMode,
 	})
+	s.audit(r, "ui", "login", "", nil, nil)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -153,7 +155,9 @@ func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) uiCreatePath(w http.ResponseWriter, r *http.Request) {
 	path := r.PostFormValue("path")
-	if err := s.secrets.SetKeys(r.Context(), path, nil); err != nil {
+	err := s.secrets.SetKeys(r.Context(), path, nil)
+	s.audit(r, "ui", "create_path", path, nil, err)
+	if err != nil {
 		redirectWithError(w, r, "/?", err)
 		return
 	}
@@ -162,7 +166,10 @@ func (s *Server) uiCreatePath(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) uiDeletePath(w http.ResponseWriter, r *http.Request) {
-	if err := s.secrets.DeletePath(r.Context(), r.PostFormValue("path")); err != nil {
+	path := r.PostFormValue("path")
+	err := s.secrets.DeletePath(r.Context(), path)
+	s.audit(r, "ui", "delete_path", path, nil, err)
+	if err != nil {
 		redirectWithError(w, r, "/?", err)
 		return
 	}
@@ -171,7 +178,9 @@ func (s *Server) uiDeletePath(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) uiSetKey(w http.ResponseWriter, r *http.Request) {
 	path := r.PostFormValue("path")
-	err := s.secrets.SetKeys(r.Context(), path, map[string]string{r.PostFormValue("key"): r.PostFormValue("value")})
+	key := r.PostFormValue("key")
+	err := s.secrets.SetKeys(r.Context(), path, map[string]string{key: r.PostFormValue("value")})
+	s.audit(r, "ui", "set", path, []string{key}, err)
 	if err != nil {
 		redirectWithError(w, r, pathURL(path)+"&", err)
 		return
@@ -181,7 +190,10 @@ func (s *Server) uiSetKey(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) uiDeleteKey(w http.ResponseWriter, r *http.Request) {
 	path := r.PostFormValue("path")
-	if err := s.secrets.DeleteKey(r.Context(), path, r.PostFormValue("key")); err != nil {
+	key := r.PostFormValue("key")
+	err := s.secrets.DeleteKey(r.Context(), path, key)
+	s.audit(r, "ui", "delete_key", path, []string{key}, err)
+	if err != nil {
 		redirectWithError(w, r, pathURL(path)+"&", err)
 		return
 	}

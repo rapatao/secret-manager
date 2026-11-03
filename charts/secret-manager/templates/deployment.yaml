@@ -31,7 +31,7 @@ spec:
         - name: secret-manager
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: [server, --addr=:8080]
+          args: [server, --addr=:8080, --metrics-addr=:8081]
           env:
             - name: POD_NAMESPACE
               valueFrom:
@@ -45,6 +45,8 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+            - name: metrics
+              containerPort: 8081
           readinessProbe:
             httpGet:
               path: /healthz

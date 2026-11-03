@@ -83,6 +83,8 @@ spec:
 
 The controller never overwrites a Secret it did not create; the `Ready` condition reports the conflict instead. `kubectl get secretsync` shows `Ready` and `Reason`.
 
+`kubectl describe secretsync` lists events: `Synced` when a target Secret is created or updated, `DeploymentsRestarted` when Deployments are restarted, and a `Warning` with the condition reason (`SourceError`, `SyncFailed`) when a sync starts failing or its error changes.
+
 ### Restarting Deployments
 
 Annotate a Deployment to restart it whenever a synced Secret it references (`envFrom`, `env.valueFrom`, `volumes`, projected volumes) changes:
@@ -162,10 +164,35 @@ All endpoints except `/healthz` require `Authorization: Bearer <token>`.
 
 Paths look like `/a/b`, with segments of `[a-z0-9-]`. Keys match `[-._a-zA-Z0-9]+`.
 
+## Observability
+
+### Metrics
+
+Prometheus metrics are served on `:8081/metrics` (`--metrics-addr`, `0` disables them) and exposed on the Service port `metrics`. Besides the controller-runtime and Go runtime metrics (`controller_runtime_reconcile_total`, `workqueue_depth`, ...), the server exports:
+
+| Metric | Description |
+|--------|-------------|
+| `secretmanager_sync_failures_total{reason}` | Reconciles that left `Ready` False, by reason |
+| `secretmanager_deployment_restarts_total` | Deployments restarted because a synced Secret changed |
+
+With the Prometheus Operator, set `metrics.serviceMonitor.enabled=true` (and `metrics.serviceMonitor.labels` to match your Prometheus selector) to create a `ServiceMonitor`.
+
+### Audit log
+
+Every change made through the API or the Web UI, and every failed authentication, is logged as a JSON line with `"msg":"audit"`:
+
+```json
+{"level":"INFO","msg":"audit","source":"api","op":"set","remote":"10.42.0.7:51234","forwarded_for":"203.0.113.9","path":"/tools","keys":["GITHUB_TOKEN"]}
+{"level":"WARN","msg":"audit","source":"ui","op":"login","remote":"10.42.0.7:51240","error":"invalid token"}
+```
+
+`op` is one of `set`, `delete_key`, `delete_path`, `create_path`, `login` and `auth` (API bearer token). Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Reads are not logged.
+
 ## Security notes
 
 - With the `kubernetes` backend, values are only as protected as Secrets in your cluster. Enable encryption at rest (k3s: `--secrets-encryption`) and restrict who can read Secrets in the server namespace.
 - The server needs cluster-wide permission to manage Secrets, because targets can live in any namespace.
+- The metrics port has no authentication. It exposes no secret values, but restrict it with a NetworkPolicy if other workloads should not read it.
 - The admin token grants full access. Keep it long and random, and rotate it by updating its Secret and restarting the server.
 
 ## Development

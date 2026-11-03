@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,6 +26,7 @@ type Server struct {
 	token    []byte
 	sessions *sessions
 	mux      *http.ServeMux
+	log      *slog.Logger
 }
 
 // New returns a Server authenticating with token.
@@ -36,6 +39,7 @@ func New(svc *secrets.Service, token string) (*Server, error) {
 		token:    []byte(token),
 		sessions: newSessions(12 * time.Hour),
 		mux:      http.NewServeMux(),
+		log:      slog.Default(),
 	}
 	s.routes()
 	return s, nil
@@ -75,6 +79,7 @@ func (s *Server) bearer(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if !ok || !s.validToken(token) {
+			s.audit(r, "api", "auth", "", nil, errInvalidToken)
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -109,7 +114,10 @@ func (s *Server) apiSet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "body must be a JSON object of string values")
 		return
 	}
-	if err := s.secrets.SetKeys(r.Context(), r.URL.Query().Get("path"), values); err != nil {
+	path := r.URL.Query().Get("path")
+	err := s.secrets.SetKeys(r.Context(), path, values)
+	s.audit(r, "api", "set", path, slices.Sorted(maps.Keys(values)), err)
+	if err != nil {
 		serviceError(w, err)
 		return
 	}
@@ -117,7 +125,10 @@ func (s *Server) apiSet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiDeleteKey(w http.ResponseWriter, r *http.Request) {
-	if err := s.secrets.DeleteKey(r.Context(), r.URL.Query().Get("path"), r.PathValue("key")); err != nil {
+	path, key := r.URL.Query().Get("path"), r.PathValue("key")
+	err := s.secrets.DeleteKey(r.Context(), path, key)
+	s.audit(r, "api", "delete_key", path, []string{key}, err)
+	if err != nil {
 		serviceError(w, err)
 		return
 	}
@@ -125,11 +136,36 @@ func (s *Server) apiDeleteKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiDeletePath(w http.ResponseWriter, r *http.Request) {
-	if err := s.secrets.DeletePath(r.Context(), r.URL.Query().Get("path")); err != nil {
+	path := r.URL.Query().Get("path")
+	err := s.secrets.DeletePath(r.Context(), path)
+	s.audit(r, "api", "delete_path", path, nil, err)
+	if err != nil {
 		serviceError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+var errInvalidToken = errors.New("invalid token")
+
+// audit logs a change or an authentication attempt. Key names are logged,
+// values never are. X-Forwarded-For is client supplied and only informative.
+func (s *Server) audit(r *http.Request, source, op, path string, keys []string, err error) {
+	attrs := []any{"source", source, "op", op, "remote", r.RemoteAddr}
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		attrs = append(attrs, "forwarded_for", fwd)
+	}
+	if path != "" {
+		attrs = append(attrs, "path", path)
+	}
+	if len(keys) > 0 {
+		attrs = append(attrs, "keys", keys)
+	}
+	if err != nil {
+		s.log.Warn("audit", append(attrs, "error", err.Error())...)
+		return
+	}
+	s.log.Info("audit", attrs...)
 }
 
 func serviceError(w http.ResponseWriter, err error) {

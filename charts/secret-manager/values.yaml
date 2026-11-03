@@ -28,6 +28,14 @@ ingress:
   #    hosts:
   #      - secrets.example.com
 
+# Prometheus metrics are served on port 8081 (Service port "metrics").
+metrics:
+  serviceMonitor:
+    # Requires the Prometheus Operator CRDs.
+    enabled: false
+    interval: ""
+    labels: {}
+
 resources:
   requests:
     cpu: 10m
