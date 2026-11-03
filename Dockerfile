@@ -11,6 +11,6 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 
 FROM gcr.io/distroless/static:nonroot
 COPY --from=build /out/secret-manager /secret-manager
-USER nonroot:nonroot
+USER 65532:65532
 ENTRYPOINT ["/secret-manager"]
 CMD ["server"]
