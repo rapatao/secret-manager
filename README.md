@@ -93,6 +93,10 @@ The chart sets these; set them yourself when running `secret-manager server` out
 | `--file` | `secret-manager.json` | File holding the stored secrets and their versions (`file` storage) |
 | `--controller` | `true` | Run the `SecretSync` controller. Requires access to a cluster |
 | `--history-limit` | `10` | Versions kept per path, current included, `0` disables history |
+| `--backup-dir` | | Directory receiving [scheduled backups](#scheduled-backups), empty disables them |
+| `--backup-interval` | `24h` | Time between scheduled backups |
+| `--backup-keep` | `7` | Scheduled backup files kept |
+| `--backup-history` | `false` | Include versions in scheduled backups |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error` |
 
 The admin token is read from `SECRET_MANAGER_TOKEN`.
@@ -235,7 +239,13 @@ History starts when the feature is first used: paths written before have no vers
 
 `secret-manager restore F` (`-` for stdin) replaces the data of every path in the file. Paths not in the file are kept. Each changed path is recorded as a new version and its targets are synced, like any other write. Versions in the file are restored only for paths that have none yet, renumbered from 1 and limited to `--history-limit`; a path that already has versions only gets a new one for the restored data. Restoring the same file twice changes nothing. Every path and key is checked before anything is written.
 
-The file holds every value in plain text. Encrypt it before storing it elsewhere, for example `secret-manager backup | age -r KEY > backup.json.age`. To move to a new server, or to keep a copy before an upgrade, back up from the old server and restore on the new one; any client version with `backup` can talk to both, see [Compatibility](#compatibility). There is no schedule: run `backup` from cron or a CI job.
+The file holds every value in plain text. Encrypt it before storing it elsewhere, for example `secret-manager backup | age -r KEY > backup.json.age`. To move to a new server, or to keep a copy before an upgrade, back up from the old server and restore on the new one; any client version with `backup` can talk to both, see [Compatibility](#compatibility).
+
+### Scheduled backups
+
+With `--backup-dir DIR`, the server writes a backup to `DIR/backup-<UTC time>.json` (`0600`) every `--backup-interval` (default `24h`) and keeps the newest `--backup-keep` files (default `7`). `--backup-history` adds versions. The first backup is written one interval after the server starts. Each run is logged as an audit entry with `source` `schedule` and `op` `backup`; a failed run is logged at `WARN` and tried again on the next interval.
+
+In the chart, set `backup.enabled=true` (`backup.interval`, `backup.keep`, `backup.history`). Backups go to a `ReadWriteOnce` PersistentVolumeClaim named `<release>-backups` (`backup.persistence.size`, default `1Gi`, and `backup.persistence.storageClass`), or to `backup.persistence.existingClaim`. Helm keeps the claim when the release is uninstalled. The image has no shell, so to copy a file out, mount the claim in another pod. The same plain-text warning applies to these files.
 
 ## Web UI
 

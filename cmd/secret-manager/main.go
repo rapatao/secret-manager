@@ -41,6 +41,8 @@ Server:
   server [--addr :8080] [--metrics-addr :8081] [--storage kubernetes|file]
          [--namespace NS] [--file secret-manager.json] [--controller=true]
          [--history-limit 10] [--log-level info]
+         [--backup-dir DIR [--backup-interval 24h] [--backup-keep 7]
+          [--backup-history]]
                                                run controller, API and Web UI
                                                (admin token from ` + cli.EnvToken + `)
 
@@ -79,6 +81,11 @@ func runServer(args []string) error {
 	filePath := fs.String("file", "secret-manager.json", "file holding the stored secrets (file storage)")
 	runController := fs.Bool("controller", true, "run the SecretSync controller")
 	historyLimit := fs.Int("history-limit", 10, "versions kept per path, current included, 0 to disable history")
+	var sched server.BackupSchedule
+	fs.StringVar(&sched.Dir, "backup-dir", "", "directory receiving scheduled backups, empty to disable them")
+	fs.DurationVar(&sched.Interval, "backup-interval", 24*time.Hour, "time between scheduled backups")
+	fs.IntVar(&sched.Keep, "backup-keep", 7, "scheduled backup files kept in --backup-dir")
+	fs.BoolVar(&sched.History, "backup-history", false, "include the versions of every path in scheduled backups")
 	var logLevel slog.Level
 	fs.TextVar(&logLevel, "log-level", slog.LevelInfo, "log level: debug, info, warn or error")
 	if err := fs.Parse(args); err != nil {
@@ -87,6 +94,14 @@ func runServer(args []string) error {
 
 	if *historyLimit < 0 {
 		return errors.New("--history-limit must not be negative")
+	}
+	if sched.Dir != "" {
+		if sched.Interval <= 0 || sched.Keep < 1 {
+			return errors.New("--backup-interval must be positive and --backup-keep at least 1")
+		}
+		if info, err := os.Stat(sched.Dir); err != nil || !info.IsDir() {
+			return fmt.Errorf("--backup-dir %s is not a directory", sched.Dir)
+		}
 	}
 	if *storageName == "kubernetes" && *namespace == "" {
 		return errors.New("--namespace or POD_NAMESPACE is required for kubernetes storage")
@@ -145,8 +160,11 @@ func runServer(args []string) error {
 	handler.Version = version
 	httpServer := &http.Server{Addr: *addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 
-	slog.Info("starting secret-manager", "version", version, "storage", *storageName, "controller", *runController)
+	slog.Info("starting secret-manager", "version", version, "storage", *storageName, "controller", *runController, "backup_dir", sched.Dir)
 	ctx := ctrl.SetupSignalHandler()
+	if sched.Dir != "" {
+		go handler.RunBackups(ctx, sched)
+	}
 	if mgr != nil {
 		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error { return serve(ctx, httpServer) })); err != nil {
 			return err

@@ -35,6 +35,20 @@ logLevel: info
 # release namespace. 0 disables history.
 historyLimit: 10
 
+# Writes a backup of every path to a PersistentVolume every interval and keeps
+# the newest files. Backups hold secret values in plain JSON.
+backup:
+  enabled: false
+  interval: 24h
+  keep: 7
+  # Include the versions of every path.
+  history: false
+  persistence:
+    # Use an existing PersistentVolumeClaim instead of creating one.
+    existingClaim: ""
+    size: 1Gi
+    storageClass: ""
+
 # Runs the SecretSync controller, which writes Secrets in any namespace and
 # restarts workloads, with cluster-wide RBAC. When false, the server only
 # stores secrets and its RBAC is limited to Secrets in the release namespace.

@@ -213,11 +213,19 @@ type backupPathJSON struct {
 }
 
 func (s *Server) apiBackup(w http.ResponseWriter, r *http.Request) {
-	backup, err := s.secrets.Backup(r.Context(), r.URL.Query().Get("history") == "true")
+	out, err := s.backup(r.Context(), r.URL.Query().Get("history") == "true")
 	s.audit(r, "api", "backup", "", nil, err)
 	if err != nil {
 		s.serviceError(w, r, err)
 		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) backup(ctx context.Context, withHistory bool) (backupJSON, error) {
+	backup, err := s.secrets.Backup(ctx, withHistory)
+	if err != nil {
+		return backupJSON{}, err
 	}
 	out := backupJSON{Format: BackupFormat, Version: s.Version, Time: time.Now().UTC(), Paths: []backupPathJSON{}}
 	for _, b := range backup {
@@ -227,7 +235,7 @@ func (s *Server) apiBackup(w http.ResponseWriter, r *http.Request) {
 		}
 		out.Paths = append(out.Paths, p)
 	}
-	writeJSON(w, http.StatusOK, out)
+	return out, nil
 }
 
 func (s *Server) apiRestore(w http.ResponseWriter, r *http.Request) {
