@@ -38,6 +38,10 @@ h2 { font-size: 1rem; margin: 0; padding: .75rem 1rem; border-bottom: 1px solid 
 h3 { font-size: 1rem; margin: 0 0 .5rem; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 1.25rem; overflow: hidden; }
 .card > .body { padding: 1rem; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+.stats .stat { display: grid; gap: .25rem; padding: 1rem; margin: 0; color: inherit; text-decoration: none; }
+.stats .stat .value { font-size: 1.75rem; font-weight: 600; }
+table.summary-table td:last-child { text-align: right; }
 .card.danger-zone { border-color: var(--danger); }
 .card.danger-zone > summary { font-family: inherit; font-size: 1rem; font-weight: 600; color: var(--danger); padding: .75rem 1rem; margin: 0; }
 .card.danger-zone[open] > summary { border-bottom: 1px solid var(--border); }
@@ -118,7 +122,8 @@ select { font: inherit; color: inherit; background: var(--bg); border: 1px solid
 {{block "header" .}}
 <header><div class="bar">
 <div class="row"><a class="brand" href="/"><span class="logo" aria-hidden="true">&#128273;</span>Secret-Manager</a>{{with .Version}}<span class="muted mono">({{.}})</span>{{end}}</div>
-<nav class="row"><a class="button small" href="/integrations">Integrations</a>
+<nav class="row"><a class="button small" href="/secrets">Secrets</a>
+<a class="button small" href="/integrations">Integrations</a>
 <form class="inline" method="post" action="/logout"><button type="submit" class="small">Sign out</button></form></nav>
 </div></header>
 {{end}}
@@ -128,6 +133,7 @@ select { font: inherit; color: inherit; background: var(--bg); border: 1px solid
 </main>
 </body>
 </html>{{end}}
+{{define "op"}}{{if eq . "+"}}add{{else if eq . "-"}}del{{else}}mod{{end}}{{end}}
 {{define "grant-fields"}}
 <fieldset>
 {{if .Grant.Edit}}<input type="hidden" name="name" value="{{.Grant.Name}}">{{else}}
@@ -139,5 +145,7 @@ select { font: inherit; color: inherit; background: var(--bg); border: 1px solid
 <label>Expires <select name="expires">{{$exp := .Grant.Expires}}{{range .Presets}}<option value="{{.Value}}"{{if eq .Value $exp}} selected{{end}}>{{.Label}}</option>{{end}}</select></label>
 <label class="custom-date">Expiry date <input type="date" name="expires-date">
 <span class="muted">The integration works through the end of that day, UTC.</span></label>
+<label>Offline cache <select name="cache-max-age">{{$cache := .Grant.Cache}}{{range .CacheOptions}}<option value="{{.Value}}"{{if eq .Value $cache}} selected{{end}}>{{.Label}}</option>{{end}}</select>
+<span class="muted">How long the CLI may use the secrets it read while the server is unreachable.</span></label>
 </fieldset>
 {{end}}

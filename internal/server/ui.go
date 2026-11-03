@@ -35,7 +35,7 @@ var uiFS embed.FS
 var pages = map[string]*template.Template{}
 
 func init() {
-	for _, name := range []string{"login", "index", "path", "integrations", "authorize"} {
+	for _, name := range []string{"login", "summary", "secrets", "path", "integrations", "authorize"} {
 		pages[name] = template.Must(template.ParseFS(uiFS, "ui/layout.html", "ui/"+name+".html"))
 	}
 }
@@ -146,7 +146,7 @@ func (s *Server) uiLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
-func (s *Server) uiIndex(w http.ResponseWriter, r *http.Request) {
+func (s *Server) uiSecrets(w http.ResponseWriter, r *http.Request) {
 	paths, err := s.secrets.ListPaths(r.Context())
 	if err != nil {
 		s.uiError(w, r, err)
@@ -157,7 +157,7 @@ func (s *Server) uiIndex(w http.ResponseWriter, r *http.Request) {
 		s.uiError(w, r, err)
 		return
 	}
-	s.render(w, http.StatusOK, "index", map[string]any{
+	s.render(w, http.StatusOK, "secrets", map[string]any{
 		"Paths":   paths,
 		"Deleted": deleted,
 		"Error":   r.URL.Query().Get("error"),
@@ -233,13 +233,13 @@ func (s *Server) uiRollback(w http.ResponseWriter, r *http.Request) {
 func (s *Server) uiCreatePath(w http.ResponseWriter, r *http.Request) {
 	path := r.PostFormValue("path")
 	if r.PostFormValue("confirm") != "yes" {
-		s.redirectWithError(w, r, "/?", errUnconfirmed)
+		s.redirectWithError(w, r, "/secrets?", errUnconfirmed)
 		return
 	}
 	err := s.secrets.SetKeys(r.Context(), path, nil)
 	s.audit(r, "ui", "create_path", path, nil, err)
 	if err != nil {
-		s.redirectWithError(w, r, "/?", err)
+		s.redirectWithError(w, r, "/secrets?", err)
 		return
 	}
 	normalized, _ := secrets.NormalizePath(path)
@@ -255,10 +255,10 @@ func (s *Server) uiDeletePath(w http.ResponseWriter, r *http.Request) {
 	err := s.secrets.DeletePath(r.Context(), path)
 	s.audit(r, "ui", "delete_path", path, nil, err)
 	if err != nil {
-		s.redirectWithError(w, r, "/?", err)
+		s.redirectWithError(w, r, "/secrets?", err)
 		return
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, "/secrets", http.StatusSeeOther)
 }
 
 func (s *Server) uiSetKey(w http.ResponseWriter, r *http.Request) {

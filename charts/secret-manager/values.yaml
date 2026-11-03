@@ -48,6 +48,10 @@ historyLimit: 10
 # UI. Uses are tracked in memory and also saved on shutdown.
 lastUsedFlush: 30m
 
+# How long the CLI may use the secrets it read while the server is
+# unreachable, unless an integration sets its own. 0 disables the CLI cache.
+cacheMaxAge: 168h
+
 # Writes a backup of every path to a PersistentVolume every interval and keeps
 # the newest files. Backups hold secret values in plain JSON.
 backup:

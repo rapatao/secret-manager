@@ -32,6 +32,50 @@ var presetDurations = map[string]time.Duration{
 	"7d": 7 * 24 * time.Hour, "30d": 30 * 24 * time.Hour, "90d": 90 * 24 * time.Hour, "1y": 365 * 24 * time.Hour,
 }
 
+// cachePresets are the offline cache max ages offered for an integration,
+// after the server default.
+var cachePresets = []struct {
+	Value time.Duration
+	Label string
+}{
+	{0, "Disabled"}, {time.Hour, "1 hour"}, {24 * time.Hour, "1 day"}, {7 * 24 * time.Hour, "7 days"}, {30 * 24 * time.Hour, "30 days"},
+}
+
+func cacheLabel(d time.Duration) string {
+	for _, p := range cachePresets {
+		if p.Value == d {
+			return p.Label
+		}
+	}
+	return shortDuration(d)
+}
+
+// cacheOptions lists the cache choices of the integration form: the server
+// default first, as "default".
+func (s *Server) cacheOptions() []struct{ Value, Label string } {
+	out := []struct{ Value, Label string }{{"default", s.cacheLabelOf(nil)}}
+	for _, p := range cachePresets {
+		out = append(out, struct{ Value, Label string }{p.Value.String(), p.Label})
+	}
+	return out
+}
+
+// cacheLabelOf describes the cache max age of an integration as the form's
+// summary shows it.
+func (s *Server) cacheLabelOf(d *time.Duration) string {
+	if d == nil {
+		return "Server default (" + cacheLabel(s.CacheMaxAge) + ")"
+	}
+	return cacheLabel(*d)
+}
+
+func cacheValue(d *time.Duration) string {
+	if d == nil {
+		return "default"
+	}
+	return d.String()
+}
+
 var (
 	errLoginPending = errors.New("authorization_pending")
 	errLoginDenied  = errors.New("access_denied")
@@ -45,6 +89,8 @@ type grant struct {
 	expires    time.Time
 	// keep leaves the expiry of an existing integration unchanged.
 	keep bool
+	// cacheMaxAge is nil for the server default.
+	cacheMaxAge *time.Duration
 }
 
 // login is a CLI login waiting for approval in the Web UI, then for the CLI
@@ -129,12 +175,19 @@ func loopbackRedirect(redirect string) (*url.URL, error) {
 	return u, nil
 }
 
-// parseGrant reads the integration fields of a form: name, path, read-only
-// and expiry. Only an edit may keep the current expiry.
+// parseGrant reads the integration fields of a form: name, path, read-only,
+// expiry and offline cache. Only an edit may keep the current expiry.
 func parseGrant(r *http.Request, now time.Time, edit bool) (grant, error) {
 	g := grant{name: r.PostFormValue("name"), path: r.PostFormValue("path"), readOnly: r.PostFormValue("read-only") == "on"}
 	if g.path == "" {
 		g.path = "/"
+	}
+	if v := r.PostFormValue("cache-max-age"); v != "" && v != "default" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			return grant{}, fmt.Errorf("%w: unknown offline cache %q", secrets.ErrInvalid, v)
+		}
+		g.cacheMaxAge = &d
 	}
 	switch preset := r.PostFormValue("expires"); preset {
 	case "never":
@@ -160,7 +213,7 @@ func parseGrant(r *http.Request, now time.Time, edit bool) (grant, error) {
 }
 
 func (s *Server) createToken(r *http.Request, source string, g grant) (tokens.Token, string, error) {
-	t, secret, err := s.tokens.Create(r.Context(), g.name, g.path, g.readOnly, g.expires)
+	t, secret, err := s.tokens.Create(r.Context(), g.name, g.path, g.readOnly, g.expires, g.cacheMaxAge)
 	s.audit(r, source, "create_token", g.path, nil, err, "name", g.name)
 	return t, secret, err
 }
@@ -188,6 +241,7 @@ func (s *Server) renderIntegrations(w http.ResponseWriter, r *http.Request, stat
 		return
 	}
 	now := time.Now()
+	cacheOptions := s.cacheOptions()
 	var rows []map[string]any
 	for _, t := range list {
 		current := "never"
@@ -196,17 +250,21 @@ func (s *Server) renderIntegrations(w http.ResponseWriter, r *http.Request, stat
 		}
 		presets := append([]struct{ Value, Label string }{{"keep", "Keep current (" + current + ")"}}, expiryPresets...)
 		rows = append(rows, map[string]any{
-			"Token":   t,
-			"Expired": !t.Expires.IsZero() && !now.Before(t.Expires),
-			"Presets": presets,
-			"Grant":   map[string]any{"Name": t.Name, "Path": t.Path, "ReadOnly": t.ReadOnly, "Expires": "keep", "Edit": true},
+			"Token":        t,
+			"Expired":      !t.Expires.IsZero() && !now.Before(t.Expires),
+			"Presets":      presets,
+			"CacheOptions": cacheOptions,
+			"CacheLabel":   s.cacheLabelOf(t.CacheMaxAge),
+			"Grant": map[string]any{"Name": t.Name, "Path": t.Path, "ReadOnly": t.ReadOnly, "Expires": "keep",
+				"Cache": cacheValue(t.CacheMaxAge), "Edit": true},
 		})
 	}
 	s.render(w, status, "integrations", map[string]any{
 		"Integrations": rows,
 		"Created":      created,
 		"Presets":      expiryPresets,
-		"Grant":        map[string]any{"Path": "/", "Expires": "90d"},
+		"CacheOptions": cacheOptions,
+		"Grant":        map[string]any{"Path": "/", "Expires": "90d", "Cache": "default"},
 		"Error":        r.URL.Query().Get("error"),
 	})
 }
@@ -239,7 +297,7 @@ func (s *Server) uiUpdateIntegration(w http.ResponseWriter, r *http.Request) {
 		g.expires, err = s.currentExpiry(r, g.name)
 	}
 	if err == nil {
-		_, err = s.tokens.Update(r.Context(), g.name, g.path, g.readOnly, g.expires)
+		_, err = s.tokens.Update(r.Context(), g.name, g.path, g.readOnly, g.expires, g.cacheMaxAge)
 	}
 	s.audit(r, "ui", "update_token", g.path, nil, err, "name", g.name)
 	if err != nil {
@@ -281,9 +339,10 @@ func (s *Server) uiRevokeIntegration(w http.ResponseWriter, r *http.Request) {
 func (s *Server) uiAuthorizeForm(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	data := map[string]any{
-		"Presets": expiryPresets,
-		"Grant":   map[string]any{"Name": q.Get("name"), "Path": "/", "Expires": "90d"},
-		"Error":   q.Get("error"),
+		"Presets":      expiryPresets,
+		"CacheOptions": s.cacheOptions(),
+		"Grant":        map[string]any{"Name": q.Get("name"), "Path": "/", "Expires": "90d", "Cache": "default"},
+		"Error":        q.Get("error"),
 	}
 	if code := strings.ToUpper(q.Get("user_code")); code != "" {
 		l, ok := s.grants.find(func(l *login) bool { return equal(l.userCode, code) && !l.approved && !l.denied }, false)

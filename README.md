@@ -104,6 +104,7 @@ The chart sets these; set them yourself when running `secret-manager server` out
 | `--file` | `secret-manager.json` | File holding the stored secrets and their versions (`file` storage) |
 | `--controller` | `true` | Run the `SecretSync` controller. Requires access to a cluster |
 | `--history-limit` | `10` | Versions kept per path, current included, `0` disables history |
+| `--cache-max-age` | `168h` | How long clients may use the secrets they read while the server is unreachable, `0` disables their [offline cache](#offline-cache). Integrations may override it |
 | `--last-used-flush` | `30m` | Time between saves of the last use of every [integration](#integrations), also saved on shutdown |
 | `--backup-dir` | | Directory receiving [scheduled backups](#scheduled-backups), empty disables them |
 | `--backup-interval` | `24h` | Time between scheduled backups |
@@ -211,7 +212,7 @@ secret-manager servers logout --server https://secrets.example.com
 `servers login` creates an [integration](#integrations) approved in the Web UI:
 
 1. The CLI opens the server's approval page in the default browser. Sign in with the admin token if needed.
-2. Pick the integration's name (default `cli-<hostname>`), path, access and expiry (default 90 days), then Allow, or Deny.
+2. Pick the integration's name (default `cli-<hostname>`), path, access, expiry (default 90 days) and offline cache (default: server default), then Allow, or Deny.
 3. The browser hands an authorization code to the CLI on `http://127.0.0.1:<random port>/callback`. The CLI exchanges it for the token with its PKCE verifier (RFC 7636). A code works once, and only with that verifier.
 
 With `--device`, over SSH (`SSH_CONNECTION` is set) or when no browser can be opened, the CLI prints the approval page URL and a code like `ABCD-2345` instead. Open the URL in any browser, check that the page shows the same code, and approve; the CLI polls the server and picks up the token. A login not approved within 5 minutes fails.
@@ -243,7 +244,9 @@ No command accepts the token as a flag.
 
 `get`, `export` and `run` keep the last secrets they read from each server, path and `--recursive` setting. When the server is unreachable (connection error, or a `502`, `503` or `504` from the Ingress), they use the cached secrets and print a warning with the time they were read. Any other answer, such as `401` or `404`, is reported as an error and the cache is not used. Writes do not update the cache; the next successful read does.
 
-Cached secrets are used for up to 7 days after they were read. `SECRET_MANAGER_CACHE_MAX_AGE` changes that, as a Go duration (`24h`, `30m`); `0` disables the cache, so nothing is written or read. Expired entries are removed when found.
+The server decides how long cached secrets may be used: the integration's offline cache setting, or the server's `--cache-max-age` (default 7 days). Each read returns that max age and the CLI stores it with the entry. A max age of `0` disables the cache for that integration: nothing is written, and the entry of the path read is removed. Servers that send no max age are treated as allowing 7 days.
+
+`SECRET_MANAGER_CACHE_MAX_AGE` can only lower the server's max age, as a Go duration (`24h`, `30m`); `0` disables the cache, so nothing is written or read. Expired entries are removed when found.
 
 Entries are encrypted with AES-256-GCM and stored in the `cache` directory next to `config.json`, `0600` files in a `0700` directory. The key is kept only in the OS keychain (account `offline-cache-key` under `secretmanager.rapatao.com`), so without a usable keychain nothing is cached. `servers logout` removes the cached secrets of that server; delete the `cache` directory to remove all of them.
 
@@ -281,6 +284,7 @@ An integration is a token (`smt_...`) for API clients: the CLI, CI jobs, other m
 | Path | A path; the integration covers it and every path nested below it |
 | Read-only | Reads only, or reads and writes |
 | Expires | 7, 30 or 90 days, 1 year, the end of a chosen day (UTC), or never |
+| Offline cache | Server default (`--cache-max-age`), disabled, 1 hour, 1, 7 or 30 days: how long the CLI may use the secrets it read while the server is unreachable |
 
 What an integration can do:
 
@@ -297,22 +301,29 @@ A request outside the integration's scope gets `403`; an unknown, revoked or exp
 ### Creating integrations
 
 - `servers login` creates one after approval in the browser, see [Servers and login](#servers-and-login).
-- The Integrations page of the Web UI creates one after a confirmation dialog that shows its name, path, access and expiry. The token is shown once. Use it with `SECRET_MANAGER_URL` and `SECRET_MANAGER_TOKEN`, or `servers login --token-stdin`.
+- The Integrations page of the Web UI creates one after a confirmation dialog that shows its name, path, access, expiry and offline cache. The token is shown once. Use it with `SECRET_MANAGER_URL` and `SECRET_MANAGER_TOKEN`, or `servers login --token-stdin`.
 
 The server keeps only the SHA-256 hash of each token, in the storage backend (a Secret named `sm-tokens` with the `kubernetes` backend). Integrations are loaded once and kept in memory, so changes made directly on the stored tokens need a server restart.
 
 ### Managing integrations
 
-The Integrations page lists every integration with its path, access, creation time, expiry and last use. Expired integrations stay listed, marked expired, until revoked.
+The Integrations page lists every integration with its path, access, creation time, expiry, offline cache and last use. Expired integrations stay listed, marked expired, until revoked.
 
-- Edit changes the path, read-only access and expiry, keeping the token. The expiry can stay as it is or take any of the values above. Save opens a confirmation dialog listing the current and new values; clients get the new access on their next request. Save without changes closes the dialog. Cancel with unsaved changes asks whether to discard them or keep editing, and Cancel in the confirmation dialog discards the edit.
+- Edit changes the path, read-only access, expiry and offline cache, keeping the token. The expiry can stay as it is or take any of the values above. Save opens a confirmation dialog listing the current and new values; clients get the new access on their next request. Save without changes closes the dialog. Cancel with unsaved changes asks whether to discard them or keep editing, and Cancel in the confirmation dialog discards the edit.
 - Revoke deletes the integration after a confirmation dialog.
 
 The last use is tracked in memory and saved every `--last-used-flush` (default `30m`) and on shutdown. It can lag behind, and a crash loses the uses since the last save.
 
 ## Web UI
 
-Open the server URL and sign in with the admin token. The header shows the server version next to the name, and links to Integrations and Sign out. The UI follows the system light or dark theme.
+Open the server URL and sign in with the admin token. The header shows the server version next to the name, which links to the summary, and links to Secrets (`/secrets`, the path list), Integrations and Sign out. The UI follows the system light or dark theme.
+
+Summary
+- The main page counts paths, keys, deleted paths and stored versions.
+- It counts integrations: total, expired, expiring within 7 days, never used, and read-write on `/`.
+- It lists the 10 latest versions across every path, deleted paths included, with the keys each one added (`+`), changed (`~`) or deleted (`-`).
+- It shows the server settings: version, storage backend, encryption, SecretSync controller, history limit, offline cache default, scheduled backups and the result of the last scheduled backup since the server started.
+- It reads every path and its history on each view.
 
 Paths
 - One field filters paths as you type, matching anywhere in the path. It opens the typed path when it exists, or creates it after a confirmation dialog.
@@ -343,7 +354,7 @@ All endpoints except `/healthz`, `/readyz` and the two login endpoints require `
 |--------|------|-------------|
 | `GET` | `/api/v1/info` | `{"version": "v1.4.0", "capabilities": [...]}`, see [Compatibility](#compatibility) |
 | `GET` | `/api/v1/paths` | `{"paths": [...]}` |
-| `GET` | `/api/v1/secrets?path=P&recursive=true` | `{"data": {"KEY": "value"}}` |
+| `GET` | `/api/v1/secrets?path=P&recursive=true` | `{"data": {"KEY": "value"}, "cacheMaxAge": 604800}`, `cacheMaxAge` in seconds, see [Offline cache](#offline-cache) |
 | `PUT` | `/api/v1/secrets?path=P` | Merge a JSON object of string values into P |
 | `DELETE` | `/api/v1/secrets/{key}?path=P` | Delete one key |
 | `DELETE` | `/api/v1/paths?path=P` | Delete a path (nested paths are kept) |
@@ -416,7 +427,7 @@ Every change made through the API or the Web UI, every backup, every Web UI logi
 
 - Without [encryption](#encryption), values are only as protected as the storage backend: Secrets in your cluster, or the `file` backend's file. Set an encryption key, or enable encryption at rest in the cluster (k3s: `--secrets-encryption`), and restrict who can read Secrets in the server namespace. The encryption key is as sensitive as the admin token.
 - Old values stay readable in history Secrets after they are changed or deleted. To purge a leaked value, delete its versions: `kubectl -n secret-manager get secrets -l secretmanager.rapatao.com/history=true` lists them.
-- The CLI caches the secrets it reads, encrypted with a key in the OS keychain, for up to 7 days. Anyone who can use your keychain can read them. Set `SECRET_MANAGER_CACHE_MAX_AGE=0` on shared machines.
+- The CLI caches the secrets it reads, encrypted with a key in the OS keychain, for up to the server's `--cache-max-age` (default 7 days) or the integration's offline cache setting. Anyone who can use your keychain can read them. Disable the offline cache of integrations used on shared machines, or set `SECRET_MANAGER_CACHE_MAX_AGE=0` there.
 - Backup files hold every value in plain text. Encrypt them and keep them out of git.
 - With the `file` backend, restrict access to the file and its directory. Without an encryption key, values are stored in plain text in it.
 - With the controller enabled, the server can manage Secrets in every namespace, where `SecretSync` targets live. With `controller.enabled=false` it can only manage Secrets in its own namespace.

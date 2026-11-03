@@ -22,7 +22,8 @@ import (
 )
 
 // EnvCacheMaxAge is how long cached secrets may be used while the server is
-// unreachable, as a Go duration. 0 disables the cache.
+// unreachable, as a Go duration. 0 disables the cache. It only lowers the max
+// age the server allows.
 const EnvCacheMaxAge = "SECRET_MANAGER_CACHE_MAX_AGE"
 
 const (
@@ -41,6 +42,9 @@ type cache struct {
 type cacheEntry struct {
 	Time time.Time         `json:"time"`
 	Data map[string]string `json:"data"`
+	// MaxAge is the max age in force when the entry was saved. Entries saved
+	// before servers sent one have none.
+	MaxAge time.Duration `json:"maxAge,omitzero"`
 }
 
 func (c *CLI) cache() (cache, error) {
@@ -96,27 +100,39 @@ func cacheAEAD(create bool) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-// save stores data. A missing keychain is not an error: nothing is cached.
-func (ch cache) save(server, path string, recursive bool, data map[string]string) error {
+// save stores data for up to serverMaxAge, or the client max age when it is
+// lower or the server sent none. A max age of 0 removes the entry. A missing
+// keychain is not an error: nothing is cached.
+func (ch cache) save(server, path string, recursive bool, data map[string]string, serverMaxAge *time.Duration) error {
 	if ch.maxAge == 0 {
+		return nil
+	}
+	maxAge := ch.maxAge
+	if serverMaxAge != nil {
+		maxAge = min(maxAge, *serverMaxAge)
+	}
+	file, id := ch.entry(server, path, recursive)
+	if maxAge <= 0 {
+		if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 		return nil
 	}
 	aead, err := cacheAEAD(true)
 	if err != nil {
 		return nil //nolint:nilerr // no usable keychain disables the cache
 	}
-	plain, err := json.Marshal(cacheEntry{Time: time.Now(), Data: data})
+	plain, err := json.Marshal(cacheEntry{Time: time.Now(), Data: data, MaxAge: maxAge})
 	if err != nil {
 		return err
 	}
-	file, id := ch.entry(server, path, recursive)
 	nonce := make([]byte, aead.NonceSize())
 	_, _ = rand.Read(nonce)
 	return writeAtomic(filepath.Dir(file), filepath.Base(file), aead.Seal(nonce, nonce, plain, []byte(id)))
 }
 
-// load returns the entry when it exists and is not older than maxAge.
-// Expired entries are removed.
+// load returns the entry when it exists and is not older than its own max
+// age and the client max age. Expired entries are removed.
 func (ch cache) load(server, path string, recursive bool) (cacheEntry, bool) {
 	if ch.maxAge == 0 {
 		return cacheEntry{}, false
@@ -136,7 +152,11 @@ func (ch cache) load(server, path string, recursive bool) (cacheEntry, bool) {
 	if err != nil || json.Unmarshal(plain, &e) != nil {
 		return cacheEntry{}, false
 	}
-	if time.Since(e.Time) > ch.maxAge {
+	maxAge := ch.maxAge
+	if e.MaxAge > 0 {
+		maxAge = min(maxAge, e.MaxAge)
+	}
+	if time.Since(e.Time) > maxAge {
 		_ = os.Remove(file)
 		return cacheEntry{}, false
 	}
@@ -172,9 +192,9 @@ func (c *CLI) getSecrets(ctx context.Context, f *flags, api *client.Client) (map
 	if err != nil {
 		return nil, err
 	}
-	data, err := api.Get(ctx, f.path, f.recursive)
+	data, serverMaxAge, err := api.Read(ctx, f.path, f.recursive)
 	if err == nil {
-		if err := ch.save(f.server, f.path, f.recursive, data); err != nil {
+		if err := ch.save(f.server, f.path, f.recursive, data, serverMaxAge); err != nil {
 			fmt.Fprintln(c.Stderr, "warning: offline cache not updated:", err)
 		}
 		return data, nil

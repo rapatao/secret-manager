@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zalando/go-keyring"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -41,6 +42,7 @@ func TestMain(m *testing.M) {
 
 type harness struct {
 	t        *testing.T
+	srv      *server.Server
 	ts       *httptest.Server
 	env      map[string]string
 	url      string
@@ -69,7 +71,7 @@ func newHarness(t *testing.T) *harness {
 	srv.Version = "1.4.0"
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
-	return &harness{t: t, ts: ts, env: map[string]string{}, url: ts.URL, envURL: ts.URL, envToken: token, dir: t.TempDir()}
+	return &harness{t: t, srv: srv, ts: ts, env: map[string]string{}, url: ts.URL, envURL: ts.URL, envToken: token, dir: t.TempDir()}
 }
 
 func (h *harness) run(args ...string) int {
@@ -542,6 +544,36 @@ func TestOfflineCache(t *testing.T) {
 	h.env[EnvCacheMaxAge] = "soon"
 	if code := h.run("get", "--path", "/tools", "A"); code != 2 {
 		t.Fatalf("invalid max age: exit %d", code)
+	}
+}
+
+func TestOfflineCacheServerMaxAge(t *testing.T) {
+	keyring.MockInit()
+	h := newHarness(t)
+	h.mustRun("set", "--path", "/tools", "A=1")
+	h.mustRun("get", "--path", "/tools", "A")
+	entries := func() []string {
+		e, _ := filepath.Glob(filepath.Join(h.dir, "cache", "*", "*"))
+		return e
+	}
+	if len(entries()) != 1 {
+		t.Fatalf("cache entries %v", entries())
+	}
+	h.srv.CacheMaxAge = 0
+	h.mustRun("get", "--path", "/tools", "A")
+	if len(entries()) != 0 {
+		t.Fatalf("server disabled the cache, entries left %v", entries())
+	}
+
+	h.srv.CacheMaxAge = time.Second
+	h.mustRun("get", "--path", "/tools", "A")
+	h.ts.Close()
+	if got := h.mustRun("get", "--path", "/tools", "A"); got != "1\n" {
+		t.Fatalf("offline get within server max age: %q", got)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if code := h.run("get", "--path", "/tools", "A"); code != 1 {
+		t.Fatalf("entry used past server max age: exit %d", code)
 	}
 }
 

@@ -15,7 +15,7 @@
 <div class="card">
 <h2>Integrations <span class="badge">{{len .Integrations}}</span></h2>
 <table>
-<thead><tr><th>Name</th><th>Access</th><th>Created</th><th>Expires</th><th>Last used</th><th></th></tr></thead>
+<thead><tr><th>Name</th><th>Access</th><th>Created</th><th>Expires</th><th>Offline cache</th><th>Last used</th><th></th></tr></thead>
 <tbody>
 {{range .Integrations}}{{$t := .Token}}
 <tr>
@@ -23,11 +23,12 @@
 <td><code>{{$t.Path}}</code> <span class="badge">{{if $t.ReadOnly}}read-only{{else}}read-write{{end}}</span></td>
 <td class="muted">{{$t.Created.Format "2006-01-02 15:04"}}</td>
 <td class="muted">{{if .Expired}}<span class="badge">expired</span> {{end}}{{if $t.Expires.IsZero}}never{{else}}{{$t.Expires.Format "2006-01-02 15:04"}}{{end}}</td>
+<td class="muted">{{.CacheLabel}}</td>
 <td class="muted">{{if $t.LastUsed.IsZero}}never{{else}}{{$t.LastUsed.Format "2006-01-02 15:04"}}{{end}}</td>
 <td class="actions">
 <button type="button" class="small" commandfor="edit-{{$t.Name}}" command="show-modal">Edit</button>
 <dialog id="edit-{{$t.Name}}">
-<form class="stack edit-integration" method="post" action="/integrations/update" data-name="{{$t.Name}}" data-path="{{$t.Path}}" data-access="{{if $t.ReadOnly}}read-only{{else}}read-write{{end}}">
+<form class="stack edit-integration" method="post" action="/integrations/update" data-name="{{$t.Name}}" data-path="{{$t.Path}}" data-access="{{if $t.ReadOnly}}read-only{{else}}read-write{{end}}" data-cache="{{.CacheLabel}}">
 <h3>Edit integration <code>{{$t.Name}}</code></h3>
 <p class="muted">The token stays the same; clients using it get the new access on their next request.</p>
 {{template "grant-fields" .}}
@@ -52,7 +53,7 @@
 </td>
 </tr>
 {{else}}
-<tr><td colspan="6" class="empty">No integrations yet. Create one below, or run <code>secret-manager servers login</code>.</td></tr>
+<tr><td colspan="7" class="empty">No integrations yet. Create one below, or run <code>secret-manager servers login</code>.</td></tr>
 {{end}}
 </tbody>
 </table>

@@ -174,6 +174,7 @@ function grantSummary(form) {
     Path: form.elements.path.value,
     Access: form.elements["read-only"].checked ? "read-only" : "read-write",
     Expires: label ? label() : expires.selectedOptions[0].text,
+    "Offline cache": form.elements["cache-max-age"].selectedOptions[0].text,
   };
 }
 
@@ -222,7 +223,8 @@ function discardEdit(form) {
 }
 
 function editCurrent(form) {
-  return { Path: form.dataset.path, Access: form.dataset.access, Expires: keptExpiry(form.elements.expires) };
+  const d = form.dataset;
+  return { Path: d.path, Access: d.access, Expires: keptExpiry(form.elements.expires), "Offline cache": d.cache };
 }
 
 function editChanged(form) {

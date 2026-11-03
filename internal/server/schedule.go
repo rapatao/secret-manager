@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+type backupRun struct {
+	Time      time.Time
+	File, Err string
+}
+
 // BackupSchedule configures backups written by the server itself.
 type BackupSchedule struct {
 	// Dir receives one backup-<UTC time>.json file per run, mode 0600.
@@ -31,6 +36,11 @@ func (s *Server) RunBackups(ctx context.Context, sched BackupSchedule) {
 			return
 		case <-t.C:
 			file, err := s.BackupToDir(ctx, sched)
+			run := &backupRun{Time: time.Now(), File: file}
+			if err != nil {
+				run.Err = err.Error()
+			}
+			s.lastBackup.Store(run)
 			if err != nil {
 				s.log.Warn("audit", "source", "schedule", "op", "backup", "error", err.Error())
 				continue

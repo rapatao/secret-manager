@@ -1,5 +1,5 @@
 {{define "content"}}
-<p class="muted"><a href="/">Paths</a> /</p>
+<p class="muted"><a href="/secrets">Paths</a> /</p>
 <h1 class="mono">{{.Path}}</h1>
 {{$path := .Path}}
 {{if .Deleted}}
@@ -130,7 +130,6 @@
 </details>
 {{end}}
 {{end}}
-{{define "op"}}{{if eq . "+"}}add{{else if eq . "-"}}del{{else}}mod{{end}}{{end}}
 {{define "diff"}}
 <div class="diff-scroll">
 <table class="diff">
