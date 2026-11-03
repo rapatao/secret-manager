@@ -18,6 +18,10 @@ import (
 
 const sessionCookie = "sm_session"
 
+// crossOrigin rejects cross-site form posts using Sec-Fetch-Site, falling back
+// to Origin for older browsers.
+var crossOrigin = http.NewCrossOriginProtection()
+
 //go:embed ui/*.html
 var uiFS embed.FS
 
@@ -74,23 +78,12 @@ func (s *Server) ui(next http.HandlerFunc) http.Handler {
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Cache-Control", "no-store")
-		if r.Method == http.MethodPost && !sameOrigin(r) {
+		if err := crossOrigin.Check(r); err != nil {
 			http.Error(w, "cross-origin request rejected", http.StatusForbidden)
 			return
 		}
 		next(w, r)
 	})
-}
-
-// sameOrigin compares the Origin host with the request host. Requests without
-// Origin are accepted; SameSite=Strict already keeps the cookie off them.
-func sameOrigin(r *http.Request) bool {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		return true
-	}
-	u, err := url.Parse(origin)
-	return err == nil && u.Host == r.Host
 }
 
 func (s *Server) session(next http.HandlerFunc) http.HandlerFunc {

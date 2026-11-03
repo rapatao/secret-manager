@@ -133,12 +133,15 @@ func uiClient(t *testing.T, ts *httptest.Server) *http.Client {
 	return c
 }
 
-func postForm(t *testing.T, c *http.Client, ts *httptest.Server, path string, form url.Values, origin string) (int, string) {
+func postForm(t *testing.T, c *http.Client, ts *httptest.Server, path string, form url.Values, origin string, headers ...string) (int, string) {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodPost, ts.URL+path, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	if origin != "" {
 		req.Header.Set("Origin", origin)
+	}
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
 	}
 	res, err := c.Do(req)
 	if err != nil {
@@ -207,5 +210,22 @@ func TestUIFlow(t *testing.T) {
 	_, body = get(t, c, ts.URL+"/")
 	if !strings.Contains(body, `name="token"`) {
 		t.Fatal("session still valid after logout")
+	}
+}
+
+func TestUICrossOrigin(t *testing.T) {
+	ts := newTestServer(t)
+	c := uiClient(t, ts)
+	login := url.Values{"token": {token}}
+
+	// Browsers send Origin: null on same-origin posts under Referrer-Policy: no-referrer.
+	if code, _ := postForm(t, c, ts, "/login", login, "null", "Sec-Fetch-Site", "same-origin"); code != http.StatusOK {
+		t.Fatalf("same-origin post with Origin null: %d", code)
+	}
+	if code, _ := postForm(t, c, ts, "/login", login, "https://evil.example", "Sec-Fetch-Site", "cross-site"); code != http.StatusForbidden {
+		t.Fatalf("cross-site post: %d", code)
+	}
+	if code, _ := postForm(t, c, ts, "/login", login, ""); code != http.StatusOK {
+		t.Fatalf("post without browser headers: %d", code)
 	}
 }
