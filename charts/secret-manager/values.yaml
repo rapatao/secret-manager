@@ -28,6 +28,9 @@ ingress:
   #    hosts:
   #      - secrets.example.com
 
+# debug, info, warn or error.
+logLevel: info
+
 # Prometheus metrics are served on port 8081 (Service port "metrics").
 metrics:
   serviceMonitor:

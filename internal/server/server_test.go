@@ -2,7 +2,9 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,7 +15,9 @@ import (
 	"sync"
 	"testing"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/rapatao/secret-manager/internal/secrets"
 	k8sstorage "github.com/rapatao/secret-manager/internal/storage/kubernetes"
@@ -300,4 +304,57 @@ func TestAuditLog(t *testing.T) {
 func fmtEntries[T any](v []T) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// brokenServer returns a Server whose storage fails every List and Get.
+func brokenServer(t *testing.T) (*Server, *syncBuffer) {
+	t.Helper()
+	fail := errors.New("apiserver down")
+	c := fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+		List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error { return fail },
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return fail
+		},
+	}).Build()
+	s, err := New(secrets.New(k8sstorage.New(c, "sm"), nil), token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := &syncBuffer{}
+	s.log = slog.New(slog.NewJSONHandler(logs, nil))
+	return s, logs
+}
+
+func serve(s http.Handler, req *http.Request) int {
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	return rec.Code
+}
+
+func TestReadyz(t *testing.T) {
+	ts := newTestServer(t)
+	if code, _ := do(t, ts, "GET", "/readyz", "", ""); code != http.StatusOK {
+		t.Fatalf("healthy readyz: %d", code)
+	}
+	s, _ := brokenServer(t)
+	if code := serve(s, httptest.NewRequest(http.MethodGet, "/readyz", nil)); code != http.StatusServiceUnavailable {
+		t.Fatalf("broken readyz: %d", code)
+	}
+}
+
+func TestFailureLogHasRequestContext(t *testing.T) {
+	s, logs := brokenServer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/secrets?path=/app", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	if code := serve(s, req); code != http.StatusInternalServerError {
+		t.Fatalf("code %d", code)
+	}
+	var e struct{ Msg, Method, URL, Path, Error string }
+	if err := json.Unmarshal([]byte(logs.String()), &e); err != nil {
+		t.Fatalf("log %q: %v", logs.String(), err)
+	}
+	if e.Msg != "secret operation failed" || e.Method != http.MethodGet || e.URL != "/api/v1/secrets" || e.Path != "/app" ||
+		!strings.Contains(e.Error, "apiserver down") {
+		t.Fatalf("log entry %+v", e)
+	}
 }
