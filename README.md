@@ -223,6 +223,8 @@ Entries are encrypted with AES-256-GCM and stored in the `cache` directory next 
 
 Every write that changes a path (setting keys, deleting a key) stores the path's new data as a version numbered one above the previous, and so does every rollback, even to identical data. Other writes that change nothing, and changes made directly on the stored Secrets, are not recorded. The newest versions are kept, current one included, up to `--history-limit` (chart value `historyLimit`, default `10`). Lowering the limit removes the extra versions of a path on its next write. `0` stops recording; versions already stored stay until removed by hand (`kubectl delete secret -l secretmanager.rapatao.com/history=true`).
 
+`secret-manager history --path P --diff N` lists the keys added (`+`), removed (`-`) or changed (`~`) from version `N` to the current data; `--diff N M` compares two versions. Values are not printed; `history --path P N` prints a version. The Web UI shows the same changes for each version, compared with the version before it.
+
 Deleting a path keeps its versions, so `rollback` can bring it back. Rolling back writes the old data as a new version, so it can itself be undone. Rolling back a synced path updates its targets like any other write.
 
 History starts when the feature is first used: paths written before have no versions until their next change.

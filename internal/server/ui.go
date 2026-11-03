@@ -172,10 +172,16 @@ func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 		entries = append(entries, entry{k, data[k]})
 	}
 	var history []uiVersion
-	for _, v := range versions {
+	for i, v := range versions {
 		h := uiVersion{Number: v.Number, Time: v.Time.Format(time.RFC3339)}
 		for _, k := range slices.Sorted(maps.Keys(v.Data)) {
 			h.Entries = append(h.Entries, entry{k, v.Data[k]})
+		}
+		switch {
+		case i+1 < len(versions):
+			h.Changes = secrets.Diff(versions[i+1].Data, v.Data)
+		case v.Number == 1:
+			h.Changes = secrets.Diff(nil, v.Data)
 		}
 		history = append(history, h)
 	}
@@ -186,6 +192,7 @@ type uiVersion struct {
 	Number  int
 	Time    string
 	Entries []entry
+	Changes []secrets.Change
 }
 
 func (s *Server) uiRollback(w http.ResponseWriter, r *http.Request) {

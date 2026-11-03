@@ -122,6 +122,12 @@ func TestHistoryAndRollback(t *testing.T) {
 	if got := h.mustRun("history", "--path", "/tools", "1"); got != "A=\"1\"\n" {
 		t.Fatalf("history version: %q", got)
 	}
+	if got := h.mustRun("history", "--path", "/tools", "--diff", "1"); got != "~ A\n+ B\n" {
+		t.Fatalf("diff to current: %q", got)
+	}
+	if got := h.mustRun("history", "--path", "/tools", "--diff", "2", "1"); got != "~ A\n- B\n" {
+		t.Fatalf("diff between versions: %q", got)
+	}
 	h.mustRun("rollback", "--path", "/tools", "1")
 	if got := h.mustRun("get", "--path", "/tools"); got != "A=\"1\"\n" {
 		t.Fatalf("after rollback: %q", got)
@@ -130,6 +136,8 @@ func TestHistoryAndRollback(t *testing.T) {
 		{"rollback", "--path", "/tools"},
 		{"rollback", "--path", "/tools", "x"},
 		{"history", "--path", "/tools", "1", "2"},
+		{"history", "--path", "/tools", "--diff"},
+		{"history", "--path", "/tools", "--diff", "1", "2", "3"},
 	} {
 		if code := h.run(args...); code != 2 {
 			t.Errorf("%v: exit %d, want 2", args, code)
