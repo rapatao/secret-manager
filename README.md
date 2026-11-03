@@ -179,6 +179,8 @@ export SECRET_MANAGER_TOKEN=...
 secret-manager list
 secret-manager set --path /tools GITHUB_TOKEN=abc OTHER=1
 secret-manager set --path /tools --env-file .env       # or --env-file - for stdin
+secret-manager keys --path /tools                      # key names, no values
+secret-manager keys --path /tools --recursive          # PATH KEY for every nested path
 secret-manager get --path /tools GITHUB_TOKEN
 secret-manager get --path /tools --recursive           # dotenv output
 secret-manager export --path /tools --format json

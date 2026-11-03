@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/rapatao/secret-manager/internal/client"
 	"github.com/rapatao/secret-manager/internal/secrets"
+	"github.com/rapatao/secret-manager/internal/storage"
 )
 
 const (
@@ -42,6 +44,9 @@ const Usage = `Client commands:
   servers logout [--server URL]                remove the stored token
   servers use URL                              make a logged-in server the default
   list                                         list paths
+  keys    --path P [--recursive]               list key names, without values; with
+                                               --recursive, as PATH KEY for every
+                                               nested path
   get     --path P [--recursive] [KEY]         print one value, or all as dotenv
   set     --path P [--env-file F|-] [K=V...]   merge keys into a path
   delete  --path P (KEY... | --all)            delete keys, or the whole path
@@ -107,6 +112,7 @@ func (c *CLI) Run(ctx context.Context, args []string) int {
 	cmds := map[string]func(context.Context, []string) error{
 		"servers":  c.servers,
 		"list":     c.list,
+		"keys":     c.keys,
 		"get":      c.get,
 		"set":      c.set,
 		"delete":   c.delete,
@@ -409,6 +415,58 @@ func (c *CLI) list(ctx context.Context, args []string) error {
 		fmt.Fprintln(c.Stdout, p)
 	}
 	return nil
+}
+
+func (c *CLI) keys(ctx context.Context, args []string) error {
+	f := c.flags("keys", true, true)
+	api, err := f.parse(args)
+	if err != nil {
+		return err
+	}
+	if f.fs.NArg() > 0 {
+		return fmt.Errorf("%w: keys takes no arguments", errUsage)
+	}
+	root, err := secrets.NormalizePath(f.path)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errUsage, err)
+	}
+	if !f.recursive {
+		data, err := api.Get(ctx, root, false)
+		if err != nil {
+			return err
+		}
+		for _, k := range slices.Sorted(maps.Keys(data)) {
+			fmt.Fprintln(c.Stdout, k)
+		}
+		return nil
+	}
+	paths, err := api.Paths(ctx)
+	if err != nil {
+		return err
+	}
+	w := tabwriter.NewWriter(c.Stdout, 0, 4, 2, ' ', 0)
+	found := false
+	for _, p := range paths {
+		if !storage.Under(p, root) {
+			continue
+		}
+		data, err := api.Get(ctx, p, false)
+		var apiErr *client.Error
+		if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		found = true
+		for _, k := range slices.Sorted(maps.Keys(data)) {
+			fmt.Fprintf(w, "%s\t%s\n", p, k)
+		}
+	}
+	if !found {
+		return fmt.Errorf("no paths under %s", root)
+	}
+	return w.Flush()
 }
 
 func (c *CLI) get(ctx context.Context, args []string) error {
