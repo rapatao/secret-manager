@@ -1,4 +1,5 @@
-// Package kubernetes stores secrets as Kubernetes Secrets, one per path.
+// Package kubernetes stores secrets as Kubernetes Secrets, one per path and
+// one per version.
 package kubernetes
 
 import (

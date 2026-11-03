@@ -37,7 +37,7 @@ Writes made through the API reach target Secrets immediately. Every `SecretSync`
 
 Storage is pluggable behind a small interface (`internal/storage.Backend`). The only backend today is `kubernetes`: each path is a Secret in the server's namespace (`/kubernetes/app` is stored as `sm.kubernetes.app`, labeled `secretmanager.rapatao.com/store=true`). There is no database or volume to run.
 
-Each write through the API, the Web UI or the CLI is also stored as a version: a Secret named `smh.<path>.<version>` (`/kubernetes/app` version 3 is `smh.kubernetes.app.3`), labeled `secretmanager.rapatao.com/history=true`. See [History](#history).
+Each write that changes a path is also stored as a version, unless history is disabled: a Secret named `smh.<path>.<version>` (`/kubernetes/app` version 3 is `smh.kubernetes.app.3`), labeled `secretmanager.rapatao.com/history=true`. See [History](#history).
 
 To add a backend (SQLite, Postgres, ...), implement `storage.Backend`, run `storagetest.Run` against it in its tests, and add a case to the `--storage` switch in `cmd/secret-manager/main.go`.
 
@@ -65,6 +65,21 @@ kubectl apply -f /tmp/sm/secret-manager/crds
 ```
 
 The server runs as a single replica: writes are serialized in process.
+
+### Server flags
+
+The chart sets these; set them yourself when running `secret-manager server` outside it.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--addr` | `:8080` | Listen address of the API and Web UI |
+| `--metrics-addr` | `:8081` | Listen address of the Prometheus metrics, `0` disables them |
+| `--namespace` | `$POD_NAMESPACE` | Namespace holding the stored secrets and their versions |
+| `--storage` | `kubernetes` | Storage backend |
+| `--history-limit` | `10` | Versions kept per path, current included, `0` disables history |
+| `--log-level` | `info` | `debug`, `info`, `warn` or `error` |
+
+The admin token is read from `SECRET_MANAGER_TOKEN`.
 
 ## SecretSync
 
@@ -179,7 +194,7 @@ The token is never accepted as a flag, so it doesn't end up in shell history or 
 
 ## History
 
-Every write that changes a path (setting keys, deleting a key, a rollback) stores the path's new data as a version numbered one above the previous. Writes that change nothing, and changes made directly on the stored Secrets, are not recorded. The newest versions are kept, current one included, up to `--history-limit` (chart value `historyLimit`, default `10`). `0` stops recording; versions already stored stay until removed by hand (`kubectl delete secret -l secretmanager.rapatao.com/history=true`).
+Every write that changes a path (setting keys, deleting a key, a rollback) stores the path's new data as a version numbered one above the previous. Writes that change nothing, and changes made directly on the stored Secrets, are not recorded. The newest versions are kept, current one included, up to `--history-limit` (chart value `historyLimit`, default `10`). Lowering the limit removes the extra versions of a path on its next write. `0` stops recording; versions already stored stay until removed by hand (`kubectl delete secret -l secretmanager.rapatao.com/history=true`).
 
 Deleting a path keeps its versions, so `rollback` can bring it back. Rolling back writes the old data as a new version, so it can itself be undone. Rolling back a synced path updates its targets like any other write.
 
@@ -191,7 +206,7 @@ Open the server URL and sign in with the admin token. The UI lists paths and let
 
 ## API
 
-All endpoints except `/healthz` require `Authorization: Bearer <token>`.
+All endpoints except `/healthz` and `/readyz` require `Authorization: Bearer <token>`.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -254,23 +269,14 @@ make test
 make lint
 make build      # bin/secret-manager
 make docker
+make helm-lint
+make check-generated   # fails if generated files are out of date
 ```
 
 ## CI and releases
 
-The canonical repository is `git.rapatao.com/rapatao/secret-manager`, mirrored to `github.com/rapatao/secret-manager`. The workflows in `.github/workflows` run on both: Gitea Actions uses that folder when there's no `.gitea/workflows`.
-
 - `ci.yaml` runs on pushes to `main` and on pull requests: generated files check, tests, lint, build, chart lint, and a multi-arch image build without push.
-- `release.yaml` runs on `v*` tags. It pushes `linux/amd64` and `linux/arm64` images tagged with the version and `major.minor`, then the Helm chart as an OCI artifact. The chart's `version` and `appVersion` are set from the tag (`v1.2.0` becomes `1.2.0`), and its default image points at the same registry:
-  - on GitHub: image `ghcr.io/rapatao/secret-manager`, chart `oci://ghcr.io/rapatao/charts/secret-manager`, using `GITHUB_TOKEN`
-  - on Gitea: image `git.rapatao.com/rapatao/secret-manager`, chart `oci://git.rapatao.com/rapatao/charts/secret-manager`, using the `REGISTRY_TOKEN` repository secret (a token with `write:package`)
-
-  After the image and chart are pushed, it creates a release for the tag. The notes list the commit subjects since the previous tag.
-
-Setup:
-
-- Gitea: add the `REGISTRY_TOKEN` secret and register an act_runner with the `ubuntu-latest` label and Docker access.
-- Push mirror to GitHub: the GitHub token needs the `workflow` scope, otherwise GitHub rejects pushes that change `.github/workflows`. Tags must be mirrored for releases to run there.
+- `release.yaml` runs on `v*` tags. It pushes `linux/amd64` and `linux/arm64` images tagged with the version and `major.minor`, then the Helm chart as an OCI artifact. The image goes to `ghcr.io/rapatao/secret-manager` and the chart to `oci://ghcr.io/rapatao/charts/secret-manager`, using `GITHUB_TOKEN`. The chart's `version` and `appVersion` are set from the tag (`v1.2.0` becomes `1.2.0`). After the image and chart are pushed, it creates a release for the tag. The notes list the commit subjects since the previous tag.
 
 ## Security
 

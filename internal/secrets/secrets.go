@@ -1,5 +1,5 @@
-// Package secrets implements validation, recursive resolution and change
-// notification on top of any storage.Backend.
+// Package secrets implements validation, recursive resolution, change
+// notification and version history on top of any storage.Backend.
 package secrets
 
 import (
