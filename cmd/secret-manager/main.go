@@ -32,6 +32,7 @@ import (
 	"github.com/rapatao/secret-manager/internal/storage/encrypted"
 	filestorage "github.com/rapatao/secret-manager/internal/storage/file"
 	k8sstorage "github.com/rapatao/secret-manager/internal/storage/kubernetes"
+	"github.com/rapatao/secret-manager/internal/tokens"
 )
 
 var version = "dev"
@@ -177,7 +178,7 @@ func runServer(args []string) error {
 		}
 	}
 
-	handler, err := server.New(svc, os.Getenv(cli.EnvToken))
+	handler, err := server.New(svc, tokens.New(backend), os.Getenv(cli.EnvToken))
 	if err != nil {
 		return err
 	}

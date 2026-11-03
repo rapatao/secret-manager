@@ -20,6 +20,7 @@ import (
 	"github.com/rapatao/secret-manager/internal/secrets"
 	"github.com/rapatao/secret-manager/internal/server"
 	k8sstorage "github.com/rapatao/secret-manager/internal/storage/kubernetes"
+	"github.com/rapatao/secret-manager/internal/tokens"
 )
 
 const token = "0123456789abcdef0123456789abcdef"
@@ -44,9 +45,10 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	svc := secrets.New(k8sstorage.New(fake.NewClientBuilder().Build(), "sm"), nil)
+	backend := k8sstorage.New(fake.NewClientBuilder().Build(), "sm")
+	svc := secrets.New(backend, nil)
 	svc.KeepVersions = 10
-	srv, err := server.New(svc, token)
+	srv, err := server.New(svc, tokens.New(backend), token)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,6 +56,11 @@ func newHarness(t *testing.T) *harness {
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	return &harness{t: t, ts: ts, env: map[string]string{}, url: ts.URL, envURL: ts.URL, envToken: token, dir: t.TempDir()}
+}
+
+// withToken returns a harness for the same server using token.
+func (h *harness) withToken(token string) *harness {
+	return &harness{t: h.t, ts: h.ts, env: map[string]string{}, url: h.url, envURL: h.envURL, envToken: token, dir: h.t.TempDir()}
 }
 
 func (h *harness) run(args ...string) int {
@@ -402,7 +409,7 @@ func TestServersListAndUse(t *testing.T) {
 
 func TestVersion(t *testing.T) {
 	h := newHarness(t)
-	want := "client: 1.5.0\nserver: 1.4.0 (" + h.url + ")\ncapabilities: backup, history, paths, secrets\n"
+	want := "client: 1.5.0\nserver: 1.4.0 (" + h.url + ")\ncapabilities: backup, history, paths, secrets, tokens\n"
 	if got := h.mustRun("version"); got != want {
 		t.Fatalf("version: %q", got)
 	}
@@ -562,5 +569,49 @@ func TestUnreachable(t *testing.T) {
 	cancel()
 	if unreachable(canceled, errors.New("context canceled")) {
 		t.Error("canceled context must not fall back")
+	}
+}
+
+func TestTokens(t *testing.T) {
+	h := newHarness(t)
+	h.mustRun("set", "--path", "/app", "A=1")
+	h.mustRun("set", "--path", "/other", "B=2")
+
+	secret := strings.TrimSpace(h.mustRun("tokens", "create", "--name", "ci", "--path", "/app", "--read-only"))
+	if !strings.HasPrefix(secret, tokens.Prefix) {
+		t.Fatalf("created token %q", secret)
+	}
+	out := h.mustRun("tokens")
+	if !strings.Contains(out, "NAME") || !strings.Contains(out, "ci    /app  read-only") {
+		t.Fatalf("tokens list: %q", out)
+	}
+
+	scoped := h.withToken(secret)
+	if got := scoped.mustRun("get", "--path", "/app", "A"); got != "1\n" {
+		t.Fatalf("scoped get: %q", got)
+	}
+	if got := scoped.mustRun("list"); got != "/app\n" {
+		t.Fatalf("scoped list: %q", got)
+	}
+	if code := scoped.run("get", "--path", "/other"); code != 1 {
+		t.Fatalf("scoped get outside path: exit %d", code)
+	}
+	if code := scoped.run("set", "--path", "/app", "A=2"); code != 1 {
+		t.Fatalf("read-only set: exit %d", code)
+	}
+
+	h.mustRun("tokens", "revoke", "ci")
+	if code := scoped.run("list"); code != 1 {
+		t.Fatalf("revoked token: exit %d", code)
+	}
+	for _, args := range [][]string{
+		{"tokens", "create", "--name", "x"},
+		{"tokens", "revoke"},
+		{"tokens", "list", "extra"},
+		{"tokens", "bogus"},
+	} {
+		if code := h.run(args...); code != 2 {
+			t.Errorf("%v: exit %d, want 2", args, code)
+		}
 	}
 }

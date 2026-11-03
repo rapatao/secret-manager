@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/rapatao/secret-manager/internal/secrets"
+	"github.com/rapatao/secret-manager/internal/storage"
+	"github.com/rapatao/secret-manager/internal/tokens"
 )
 
 // MinTokenLength is the shortest admin token accepted by New.
@@ -35,7 +37,7 @@ const BackupFormat = 1
 // GET /api/v1/info. Clients check them before using a feature added after
 // the first release. A shipped capability never changes meaning and is never
 // removed; changed behavior gets a new name.
-var Capabilities = []string{"backup", "history", "paths", "secrets"}
+var Capabilities = []string{"backup", "history", "paths", "secrets", "tokens"}
 
 // Server serves the API under /api/v1 and the Web UI under /.
 type Server struct {
@@ -43,19 +45,22 @@ type Server struct {
 	Version string
 
 	secrets  *secrets.Service
+	tokens   *tokens.Store
 	token    []byte
 	sessions *sessions
 	mux      *http.ServeMux
 	log      *slog.Logger
 }
 
-// New returns a Server authenticating with token.
-func New(svc *secrets.Service, token string) (*Server, error) {
+// New returns a Server authenticating with the admin token and with the
+// scoped tokens in tks.
+func New(svc *secrets.Service, tks *tokens.Store, token string) (*Server, error) {
 	if len(token) < MinTokenLength {
 		return nil, errors.New("admin token must have at least 32 characters")
 	}
 	s := &Server{
 		secrets:  svc,
+		tokens:   tks,
 		token:    []byte(token),
 		sessions: newSessions([]byte(token), 12*time.Hour),
 		mux:      http.NewServeMux(),
@@ -75,17 +80,20 @@ func (s *Server) routes() {
 	})
 	s.mux.HandleFunc("GET /readyz", s.readyz)
 
-	s.mux.Handle("GET /api/v1/info", s.bearer(s.apiInfo))
-	s.mux.Handle("GET /api/v1/paths", s.bearer(s.apiListPaths))
-	s.mux.Handle("DELETE /api/v1/paths", s.bearer(s.apiDeletePath))
-	s.mux.Handle("GET /api/v1/secrets", s.bearer(s.apiGet))
-	s.mux.Handle("PUT /api/v1/secrets", s.bearer(s.apiSet))
-	s.mux.Handle("DELETE /api/v1/secrets/{key}", s.bearer(s.apiDeleteKey))
-	s.mux.Handle("GET /api/v1/backup", s.bearer(s.apiBackup))
-	s.mux.Handle("POST /api/v1/restore", s.bearer(s.apiRestore))
-	s.mux.Handle("GET /api/v1/history", s.bearer(s.apiHistory))
-	s.mux.Handle("GET /api/v1/history/{version}", s.bearer(s.apiVersion))
-	s.mux.Handle("POST /api/v1/history/{version}/rollback", s.bearer(s.apiRollback))
+	s.mux.Handle("GET /api/v1/info", s.bearer(anyToken, s.apiInfo))
+	s.mux.Handle("GET /api/v1/paths", s.bearer(anyToken, s.apiListPaths))
+	s.mux.Handle("DELETE /api/v1/paths", s.bearer(writePath, s.apiDeletePath))
+	s.mux.Handle("GET /api/v1/secrets", s.bearer(readPath, s.apiGet))
+	s.mux.Handle("PUT /api/v1/secrets", s.bearer(writePath, s.apiSet))
+	s.mux.Handle("DELETE /api/v1/secrets/{key}", s.bearer(writePath, s.apiDeleteKey))
+	s.mux.Handle("GET /api/v1/backup", s.bearer(adminOnly, s.apiBackup))
+	s.mux.Handle("POST /api/v1/restore", s.bearer(adminOnly, s.apiRestore))
+	s.mux.Handle("GET /api/v1/history", s.bearer(readPath, s.apiHistory))
+	s.mux.Handle("GET /api/v1/history/{version}", s.bearer(readPath, s.apiVersion))
+	s.mux.Handle("POST /api/v1/history/{version}/rollback", s.bearer(writePath, s.apiRollback))
+	s.mux.Handle("GET /api/v1/tokens", s.bearer(adminOnly, s.apiListTokens))
+	s.mux.Handle("POST /api/v1/tokens", s.bearer(adminOnly, s.apiCreateToken))
+	s.mux.Handle("DELETE /api/v1/tokens/{name}", s.bearer(adminOnly, s.apiRevokeToken))
 
 	s.mux.Handle("GET /ui.js", s.ui(s.uiScript))
 	s.mux.Handle("GET /login", s.ui(s.uiLoginForm))
@@ -117,16 +125,70 @@ func (s *Server) validToken(got string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), s.token) == 1
 }
 
-func (s *Server) bearer(next http.HandlerFunc) http.Handler {
+// need is the access a route requires from a scoped token. The admin token
+// passes every check.
+type need int
+
+const (
+	anyToken need = iota
+	readPath
+	writePath
+	adminOnly
+)
+
+type tokenKey struct{}
+
+// scopedToken returns the scoped token that authenticated r, if any.
+func scopedToken(r *http.Request) (tokens.Token, bool) {
+	t, ok := r.Context().Value(tokenKey{}).(tokens.Token)
+	return t, ok
+}
+
+func (s *Server) bearer(n need, next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok || !s.validToken(token) {
+		got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if ok && s.validToken(got) {
+			next(w, r)
+			return
+		}
+		var t tokens.Token
+		if ok {
+			var err error
+			if t, ok, err = s.tokens.Lookup(r.Context(), got); err != nil {
+				s.serviceError(w, r, err)
+				return
+			}
+		}
+		if !ok {
 			s.audit(r, "api", "auth", "", nil, errInvalidToken)
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
+		r = r.WithContext(context.WithValue(r.Context(), tokenKey{}, t))
+		if err := allowed(t, n, r.URL.Query().Get("path")); err != nil {
+			s.audit(r, "api", "auth", r.URL.Query().Get("path"), nil, err)
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
 		next(w, r)
 	})
+}
+
+func allowed(t tokens.Token, n need, path string) error {
+	switch n {
+	case anyToken:
+		return nil
+	case adminOnly:
+		return fmt.Errorf("token %s cannot do this; it needs the admin token", t.Name)
+	case writePath:
+		if t.ReadOnly {
+			return fmt.Errorf("token %s is read-only", t.Name)
+		}
+	}
+	if p, err := secrets.NormalizePath(path); err != nil || !storage.Under(p, t.Path) {
+		return fmt.Errorf("token %s is limited to %s", t.Name, t.Path)
+	}
+	return nil
 }
 
 func (s *Server) apiInfo(w http.ResponseWriter, _ *http.Request) {
@@ -138,6 +200,9 @@ func (s *Server) apiListPaths(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.serviceError(w, r, err)
 		return
+	}
+	if t, ok := scopedToken(r); ok {
+		paths = slices.DeleteFunc(paths, func(p string) bool { return !storage.Under(p, t.Path) })
 	}
 	if paths == nil {
 		paths = []string{}
@@ -319,12 +384,62 @@ func parseVersion(v string) (int, error) {
 	return n, nil
 }
 
+type tokenJSON struct {
+	Name     string    `json:"name"`
+	Path     string    `json:"path"`
+	ReadOnly bool      `json:"readOnly"`
+	Created  time.Time `json:"created"`
+	Token    string    `json:"token,omitempty"`
+}
+
+func (s *Server) apiListTokens(w http.ResponseWriter, r *http.Request) {
+	list, err := s.tokens.List(r.Context())
+	if err != nil {
+		s.serviceError(w, r, err)
+		return
+	}
+	out := []tokenJSON{}
+	for _, t := range list {
+		out = append(out, tokenJSON{Name: t.Name, Path: t.Path, ReadOnly: t.ReadOnly, Created: t.Created})
+	}
+	writeJSON(w, http.StatusOK, map[string][]tokenJSON{"tokens": out})
+}
+
+func (s *Server) apiCreateToken(w http.ResponseWriter, r *http.Request) {
+	var in tokenJSON
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&in); err != nil {
+		writeError(w, http.StatusBadRequest, `body must be {"name": ..., "path": ..., "readOnly": ...}`)
+		return
+	}
+	t, secret, err := s.tokens.Create(r.Context(), in.Name, in.Path, in.ReadOnly)
+	s.audit(r, "api", "create_token", in.Path, nil, err, "name", in.Name)
+	if err != nil {
+		s.serviceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, tokenJSON{Name: t.Name, Path: t.Path, ReadOnly: t.ReadOnly, Created: t.Created, Token: secret})
+}
+
+func (s *Server) apiRevokeToken(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	err := s.tokens.Revoke(r.Context(), name)
+	s.audit(r, "api", "revoke_token", "", nil, err, "name", name)
+	if err != nil {
+		s.serviceError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 var errInvalidToken = errors.New("invalid token")
 
 // audit logs a change or an authentication attempt. Key names are logged,
 // values never are. X-Forwarded-For is client supplied and only informative.
-func (s *Server) audit(r *http.Request, source, op, path string, keys []string, err error) {
+func (s *Server) audit(r *http.Request, source, op, path string, keys []string, err error, extra ...any) {
 	attrs := []any{"source", source, "op", op, "remote", r.RemoteAddr}
+	if t, ok := scopedToken(r); ok {
+		attrs = append(attrs, "token", t.Name)
+	}
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
 		attrs = append(attrs, "forwarded_for", fwd)
 	}
@@ -334,6 +449,7 @@ func (s *Server) audit(r *http.Request, source, op, path string, keys []string, 
 	if len(keys) > 0 {
 		attrs = append(attrs, "keys", keys)
 	}
+	attrs = append(attrs, extra...)
 	if err != nil {
 		s.log.Warn("audit", append(attrs, "error", err.Error())...)
 		return

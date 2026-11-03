@@ -53,6 +53,11 @@ const Usage = `Client commands:
   rollback --path P VERSION                    restore a version
   backup  [--history] [--output F]             print or write (0600) every path as JSON
   restore FILE|-                               replace the paths held in a backup
+  tokens  [list]                               list scoped tokens
+  tokens  create --name N --path P [--read-only]
+                                               create a token limited to the paths
+                                               under P and print it once
+  tokens  revoke NAME                          delete a token
   run     --path P [--recursive] -- CMD [ARGS...]
                                                run CMD with secrets as env vars
   version                                      print the client version and, when a
@@ -112,6 +117,7 @@ func (c *CLI) Run(ctx context.Context, args []string) int {
 		"version":  c.version,
 		"backup":   c.backup,
 		"restore":  c.restore,
+		"tokens":   c.tokens,
 	}
 	if len(args) == 0 {
 		fmt.Fprint(c.Stderr, Usage)
@@ -688,6 +694,67 @@ func (c *CLI) restore(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(c.Stdout, "Restored %d paths\n", n)
 	return nil
+}
+
+func (c *CLI) tokens(ctx context.Context, args []string) error {
+	sub, rest := "list", args
+	if len(args) > 0 {
+		sub, rest = args[0], args[1:]
+	}
+	f := c.flags("tokens "+sub, false, false)
+	var name, path *string
+	var readOnly *bool
+	if sub == "create" {
+		name = f.fs.String("name", "", "token name, [a-z0-9-]")
+		path = f.fs.String("path", "", "path the token is limited to, nested paths included")
+		readOnly = f.fs.Bool("read-only", false, "only allow reads")
+	}
+	api, err := f.parse(rest)
+	if err != nil {
+		return err
+	}
+	switch {
+	case sub == "list" && f.fs.NArg() == 0:
+	case sub == "create" && f.fs.NArg() == 0:
+		if *name == "" || *path == "" {
+			return fmt.Errorf("%w: tokens create needs --name and --path", errUsage)
+		}
+	case sub == "revoke" && f.fs.NArg() == 1:
+	case sub == "list", sub == "create", sub == "revoke":
+		return fmt.Errorf("%w: tokens %s: wrong arguments", errUsage, sub)
+	default:
+		return fmt.Errorf("%w: unknown tokens command %q", errUsage, sub)
+	}
+	if err := api.Require(ctx, "tokens"); err != nil {
+		return err
+	}
+
+	switch sub {
+	case "create":
+		t, err := api.CreateToken(ctx, *name, *path, *readOnly)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(c.Stdout, t.Token)
+		fmt.Fprintf(c.Stderr, "Token %s for %s created. It is shown only once.\n", t.Name, t.Path)
+		return nil
+	case "revoke":
+		return api.RevokeToken(ctx, f.fs.Arg(0))
+	}
+	list, err := api.Tokens(ctx)
+	if err != nil {
+		return err
+	}
+	w := tabwriter.NewWriter(c.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tPATH\tACCESS\tCREATED")
+	for _, t := range list {
+		access := "read-write"
+		if t.ReadOnly {
+			access = "read-only"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", t.Name, t.Path, access, t.Created.Format(time.RFC3339))
+	}
+	return w.Flush()
 }
 
 func parseVersion(s string) (int, error) {

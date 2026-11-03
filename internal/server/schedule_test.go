@@ -13,16 +13,18 @@ import (
 
 	"github.com/rapatao/secret-manager/internal/secrets"
 	k8sstorage "github.com/rapatao/secret-manager/internal/storage/kubernetes"
+	"github.com/rapatao/secret-manager/internal/tokens"
 )
 
 func TestBackupToDir(t *testing.T) {
 	ctx := context.Background()
-	svc := secrets.New(k8sstorage.New(fake.NewClientBuilder().Build(), "sm"), nil)
+	backend := k8sstorage.New(fake.NewClientBuilder().Build(), "sm")
+	svc := secrets.New(backend, nil)
 	svc.KeepVersions = 10
 	if err := svc.SetKeys(ctx, "/app", map[string]string{"A": "1"}); err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(svc, token)
+	s, err := New(svc, tokens.New(backend), token)
 	if err != nil {
 		t.Fatal(err)
 	}

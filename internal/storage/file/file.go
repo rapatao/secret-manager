@@ -28,6 +28,7 @@ type Backend struct {
 type state struct {
 	Paths    map[string]map[string]string `json:"paths"`
 	Versions map[string][]storage.Version `json:"versions"`
+	Tokens   []storage.Token              `json:"tokens,omitempty"`
 }
 
 var _ storage.Backend = (*Backend)(nil)
@@ -185,4 +186,19 @@ func (b *Backend) Versions(_ context.Context, path string) ([]storage.Version, e
 		vs[i] = v
 	}
 	return vs, nil
+}
+
+// Tokens implements storage.Backend.
+func (b *Backend) Tokens(_ context.Context) ([]storage.Token, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Clone(b.state.Tokens), nil
+}
+
+// PutTokens implements storage.Backend.
+func (b *Backend) PutTokens(_ context.Context, tokens []storage.Token) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.state.Tokens = slices.Clone(tokens)
+	return b.commit()
 }

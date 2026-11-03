@@ -166,6 +166,35 @@ func (c *Client) Restore(ctx context.Context, backup json.RawMessage) (int, erro
 	return out.Paths, err
 }
 
+// Token is a scoped access token. Token is only set by CreateToken.
+type Token struct {
+	Name     string    `json:"name"`
+	Path     string    `json:"path"`
+	ReadOnly bool      `json:"readOnly"`
+	Created  time.Time `json:"created"`
+	Token    string    `json:"token,omitempty"`
+}
+
+// Tokens lists the scoped tokens.
+func (c *Client) Tokens(ctx context.Context) ([]Token, error) {
+	var out struct{ Tokens []Token }
+	err := c.do(ctx, http.MethodGet, "/api/v1/tokens", nil, nil, &out)
+	return out.Tokens, err
+}
+
+// CreateToken creates a token for the paths under path and returns it with
+// its value, which the server does not keep.
+func (c *Client) CreateToken(ctx context.Context, name, path string, readOnly bool) (Token, error) {
+	var out Token
+	err := c.do(ctx, http.MethodPost, "/api/v1/tokens", nil, Token{Name: name, Path: path, ReadOnly: readOnly}, &out)
+	return out, err
+}
+
+// RevokeToken deletes the token named name.
+func (c *Client) RevokeToken(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodDelete, "/api/v1/tokens/"+url.PathEscape(name), nil, nil, nil)
+}
+
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, in, out any) error {
 	var body io.Reader
 	if in != nil {

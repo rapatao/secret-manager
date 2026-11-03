@@ -22,6 +22,7 @@ import (
 
 	"github.com/rapatao/secret-manager/internal/secrets"
 	k8sstorage "github.com/rapatao/secret-manager/internal/storage/kubernetes"
+	"github.com/rapatao/secret-manager/internal/tokens"
 )
 
 const token = "0123456789abcdef0123456789abcdef"
@@ -50,9 +51,10 @@ func newTestServer(t *testing.T) *httptest.Server {
 
 func newLoggedServer(t *testing.T) (*httptest.Server, *syncBuffer) {
 	t.Helper()
-	svc := secrets.New(k8sstorage.New(fake.NewClientBuilder().Build(), "sm"), nil)
+	backend := k8sstorage.New(fake.NewClientBuilder().Build(), "sm")
+	svc := secrets.New(backend, nil)
 	svc.KeepVersions = 10
-	s, err := New(svc, token)
+	s, err := New(svc, tokens.New(backend), token)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +84,7 @@ func do(t *testing.T, ts *httptest.Server, method, path, auth, body string) (int
 }
 
 func TestNewRejectsShortToken(t *testing.T) {
-	if _, err := New(nil, "short"); err == nil {
+	if _, err := New(nil, nil, "short"); err == nil {
 		t.Fatal("want error")
 	}
 }
@@ -423,7 +425,7 @@ func brokenServer(t *testing.T) (*Server, *syncBuffer) {
 			return fail
 		},
 	}).Build()
-	s, err := New(secrets.New(k8sstorage.New(c, "sm"), nil), token)
+	s, err := New(secrets.New(k8sstorage.New(c, "sm"), nil), tokens.New(k8sstorage.New(c, "sm")), token)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +474,7 @@ func TestAPIInfo(t *testing.T) {
 		t.Fatalf("info without token: %d", code)
 	}
 	code, body := do(t, ts, "GET", "/api/v1/info", token, "")
-	if code != http.StatusOK || strings.TrimSpace(body) != `{"capabilities":["backup","history","paths","secrets"],"version":""}` {
+	if code != http.StatusOK || strings.TrimSpace(body) != `{"capabilities":["backup","history","paths","secrets","tokens"],"version":""}` {
 		t.Fatalf("info: %d %s", code, body)
 	}
 }
@@ -527,5 +529,88 @@ func TestSessionSurvivesRestart(t *testing.T) {
 	expired := newSessions([]byte(token), -time.Hour)
 	if expired.valid(expired.create()) {
 		t.Fatal("expired session accepted")
+	}
+}
+
+func createToken(t *testing.T, ts *httptest.Server, body string) string {
+	t.Helper()
+	code, out := do(t, ts, "POST", "/api/v1/tokens", token, body)
+	var created struct{ Token string }
+	if err := json.Unmarshal([]byte(out), &created); code != http.StatusCreated || err != nil || created.Token == "" {
+		t.Fatalf("create token %s: %d %s", body, code, out)
+	}
+	return created.Token
+}
+
+func TestScopedTokens(t *testing.T) {
+	ts, logs := newLoggedServer(t)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/app", token, `{"A":"1"}`)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/app/db", token, `{"B":"2"}`)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/apple", token, `{"C":"3"}`)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/other", token, `{"D":"4"}`)
+
+	ro := createToken(t, ts, `{"name":"ci","path":"/app","readOnly":true}`)
+	rw := createToken(t, ts, `{"name":"dev","path":"/app/db"}`)
+
+	cases := []struct {
+		auth, method, path, body string
+		want                     int
+	}{
+		{ro, "GET", "/api/v1/info", "", http.StatusOK},
+		{ro, "GET", "/api/v1/secrets?path=/app", "", http.StatusOK},
+		{ro, "GET", "/api/v1/secrets?path=/app&recursive=true", "", http.StatusOK},
+		{ro, "GET", "/api/v1/secrets?path=/app/db", "", http.StatusOK},
+		{ro, "GET", "/api/v1/history?path=/app", "", http.StatusOK},
+		{ro, "GET", "/api/v1/secrets?path=/apple", "", http.StatusForbidden},
+		{ro, "GET", "/api/v1/secrets?path=/other", "", http.StatusForbidden},
+		{ro, "GET", "/api/v1/secrets?path=/", "", http.StatusForbidden},
+		{ro, "GET", "/api/v1/secrets?path=bad", "", http.StatusForbidden},
+		{ro, "PUT", "/api/v1/secrets?path=/app", `{"A":"x"}`, http.StatusForbidden},
+		{ro, "DELETE", "/api/v1/paths?path=/app", "", http.StatusForbidden},
+		{ro, "POST", "/api/v1/history/1/rollback?path=/app", "", http.StatusForbidden},
+		{ro, "GET", "/api/v1/backup", "", http.StatusForbidden},
+		{ro, "GET", "/api/v1/tokens", "", http.StatusForbidden},
+		{rw, "PUT", "/api/v1/secrets?path=/app/db", `{"B":"x"}`, http.StatusNoContent},
+		{rw, "PUT", "/api/v1/secrets?path=/app/db/new", `{"E":"5"}`, http.StatusNoContent},
+		{rw, "DELETE", "/api/v1/secrets/E?path=/app/db/new", "", http.StatusNoContent},
+		{rw, "PUT", "/api/v1/secrets?path=/app", `{"A":"x"}`, http.StatusForbidden},
+		{rw, "POST", "/api/v1/restore", `{"format":1,"paths":[]}`, http.StatusForbidden},
+		{rw, "POST", "/api/v1/tokens", `{"name":"x","path":"/"}`, http.StatusForbidden},
+		{"smt_unknown", "GET", "/api/v1/info", "", http.StatusUnauthorized},
+	}
+	for _, tc := range cases {
+		if code, body := do(t, ts, tc.method, tc.path, tc.auth, tc.body); code != tc.want {
+			t.Errorf("%s %s with %.8s: %d %s, want %d", tc.method, tc.path, tc.auth, code, body, tc.want)
+		}
+	}
+
+	if _, body := do(t, ts, "GET", "/api/v1/paths", ro, ""); strings.TrimSpace(body) != `{"paths":["/app","/app/db","/app/db/new"]}` {
+		t.Fatalf("scoped paths: %s", body)
+	}
+	if !strings.Contains(logs.String(), `"op":"set","remote"`) || !strings.Contains(logs.String(), `"token":"dev"`) {
+		t.Fatalf("scoped write not audited with token name: %s", logs)
+	}
+
+	_, body := do(t, ts, "GET", "/api/v1/tokens", token, "")
+	if strings.Contains(body, "hash") || strings.Contains(body, ro) || !strings.Contains(body, `"name":"ci","path":"/app","readOnly":true`) {
+		t.Fatalf("token list: %s", body)
+	}
+	if code, _ := do(t, ts, "POST", "/api/v1/tokens", token, `{"name":"ci","path":"/x"}`); code != http.StatusBadRequest {
+		t.Fatalf("duplicate token: %d", code)
+	}
+	if code, _ := do(t, ts, "DELETE", "/api/v1/tokens/ci", token, ""); code != http.StatusNoContent {
+		t.Fatalf("revoke: %d", code)
+	}
+	if code, _ := do(t, ts, "GET", "/api/v1/secrets?path=/app", ro, ""); code != http.StatusUnauthorized {
+		t.Fatalf("revoked token: %d", code)
+	}
+	if code, _ := do(t, ts, "DELETE", "/api/v1/tokens/ci", token, ""); code != http.StatusNotFound {
+		t.Fatalf("revoke missing: %d", code)
+	}
+	ts2 := newTestServer(t)
+	c := uiClient(t, ts2)
+	scoped := createToken(t, ts2, `{"name":"ui","path":"/"}`)
+	if code, _ := postForm(t, c, ts2, "/login", url.Values{"token": {scoped}}, ts2.URL); code != http.StatusUnauthorized {
+		t.Fatalf("scoped token logged into the UI: %d", code)
 	}
 }
