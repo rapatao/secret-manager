@@ -385,6 +385,7 @@ func TestUISummary(t *testing.T) {
 		`<span class="change add">&#43;C</span>`,
 		`<tr><td>History limit</td><td>10 versions per path</td></tr>`,
 		`<tr><td>Offline cache default</td><td>7 days</td></tr>`,
+		` UTC</time></td>`,
 	} {
 		if code != http.StatusOK || !strings.Contains(body, want) {
 			t.Fatalf("summary: %d, missing %s\n%s", code, want, body)

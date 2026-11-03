@@ -246,7 +246,7 @@ func (s *Server) renderIntegrations(w http.ResponseWriter, r *http.Request, stat
 	for _, t := range list {
 		current := "never"
 		if !t.Expires.IsZero() {
-			current = t.Expires.Format("2006-01-02 15:04")
+			current = formatTime(t.Expires)
 		}
 		presets := append([]struct{ Value, Label string }{{"keep", "Keep current (" + current + ")"}}, expiryPresets...)
 		rows = append(rows, map[string]any{

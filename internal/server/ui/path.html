@@ -74,7 +74,7 @@
 {{range $v := .}}
 <tr>
 <td><span class="badge">v{{$v.Number}}</span></td>
-<td class="muted">{{$v.Time}}</td>
+<td class="muted">{{time $v.Time}}</td>
 <td class="mono">{{range $v.Changes}}<span class="change {{template "op" .Op}}">{{.Op}}{{.Key}}</span> {{else}}<span class="muted">-</span>{{end}}</td>
 <td class="actions">
 {{if $v.Current}}<span class="badge">current</span>{{else if $v.Same}}<span class="muted">same as current</span>{{else}}

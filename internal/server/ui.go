@@ -34,9 +34,22 @@ var uiFS embed.FS
 
 var pages = map[string]*template.Template{}
 
+// timeLayout formats every time the Web UI shows, in UTC.
+const timeLayout = "2006-01-02 15:04 UTC"
+
+func formatTime(t time.Time) string {
+	return t.UTC().Format(timeLayout)
+}
+
+var pageFuncs = template.FuncMap{
+	"time": func(t time.Time) template.HTML {
+		return template.HTML(`<time datetime="` + t.UTC().Format(time.RFC3339) + `">` + formatTime(t) + `</time>`) //nolint:gosec // only formatted digits
+	},
+}
+
 func init() {
 	for _, name := range []string{"login", "summary", "secrets", "path", "integrations", "authorize"} {
-		pages[name] = template.Must(template.ParseFS(uiFS, "ui/layout.html", "ui/"+name+".html"))
+		pages[name] = template.Must(template.New(name).Funcs(pageFuncs).ParseFS(uiFS, "ui/layout.html", "ui/"+name+".html"))
 	}
 }
 
@@ -185,7 +198,7 @@ func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 	}
 	var history []uiVersion
 	for i, v := range versions {
-		h := uiVersion{Number: v.Number, Time: v.Time.Format(time.RFC3339), Current: !deleted && i == 0, Same: !deleted && maps.Equal(v.Data, data)}
+		h := uiVersion{Number: v.Number, Time: v.Time, Current: !deleted && i == 0, Same: !deleted && maps.Equal(v.Data, data)}
 		for _, c := range secrets.Diff(data, v.Data) {
 			h.Restore = append(h.Restore, uiChange{c, data[c.Key], v.Data[c.Key]})
 		}
@@ -202,7 +215,7 @@ func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 
 type uiVersion struct {
 	Number  int
-	Time    string
+	Time    time.Time
 	Changes []secrets.Change
 	Current bool
 	Same    bool
