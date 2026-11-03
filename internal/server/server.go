@@ -23,11 +23,19 @@ const MinTokenLength = 32
 
 const maxBodyBytes = 1 << 20
 
+// ponytail: restore decodes the whole backup in memory; stream it if stores
+// outgrow this limit.
+const maxRestoreBytes = 64 << 20
+
+// BackupFormat is the version of the backup document. Restore rejects other
+// formats.
+const BackupFormat = 1
+
 // Capabilities lists the API features this server supports, reported by
 // GET /api/v1/info. Clients check them before using a feature added after
 // the first release. A shipped capability never changes meaning and is never
 // removed; changed behavior gets a new name.
-var Capabilities = []string{"history", "paths", "secrets"}
+var Capabilities = []string{"backup", "history", "paths", "secrets"}
 
 // Server serves the API under /api/v1 and the Web UI under /.
 type Server struct {
@@ -73,6 +81,8 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /api/v1/secrets", s.bearer(s.apiGet))
 	s.mux.Handle("PUT /api/v1/secrets", s.bearer(s.apiSet))
 	s.mux.Handle("DELETE /api/v1/secrets/{key}", s.bearer(s.apiDeleteKey))
+	s.mux.Handle("GET /api/v1/backup", s.bearer(s.apiBackup))
+	s.mux.Handle("POST /api/v1/restore", s.bearer(s.apiRestore))
 	s.mux.Handle("GET /api/v1/history", s.bearer(s.apiHistory))
 	s.mux.Handle("GET /api/v1/history/{version}", s.bearer(s.apiVersion))
 	s.mux.Handle("POST /api/v1/history/{version}/rollback", s.bearer(s.apiRollback))
@@ -186,6 +196,64 @@ type versionJSON struct {
 	Time    time.Time         `json:"time"`
 	Keys    []string          `json:"keys,omitempty"`
 	Data    map[string]string `json:"data,omitempty"`
+}
+
+type backupJSON struct {
+	Format  int              `json:"format"`
+	Version string           `json:"version,omitempty"`
+	Time    time.Time        `json:"time"`
+	Paths   []backupPathJSON `json:"paths"`
+}
+
+type backupPathJSON struct {
+	Path     string            `json:"path"`
+	Data     map[string]string `json:"data"`
+	Versions []versionJSON     `json:"versions,omitempty"`
+}
+
+func (s *Server) apiBackup(w http.ResponseWriter, r *http.Request) {
+	backup, err := s.secrets.Backup(r.Context(), r.URL.Query().Get("history") == "true")
+	s.audit(r, "api", "backup", "", nil, err)
+	if err != nil {
+		s.serviceError(w, r, err)
+		return
+	}
+	out := backupJSON{Format: BackupFormat, Version: s.Version, Time: time.Now().UTC(), Paths: []backupPathJSON{}}
+	for _, b := range backup {
+		p := backupPathJSON{Path: b.Path, Data: b.Data}
+		for _, v := range b.Versions {
+			p.Versions = append(p.Versions, versionJSON{Version: v.Number, Time: v.Time, Data: v.Data})
+		}
+		out.Paths = append(out.Paths, p)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) apiRestore(w http.ResponseWriter, r *http.Request) {
+	var in backupJSON
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRestoreBytes)).Decode(&in); err != nil {
+		writeError(w, http.StatusBadRequest, "body must be a backup document")
+		return
+	}
+	if in.Format != BackupFormat {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unsupported backup format %d, want %d", in.Format, BackupFormat))
+		return
+	}
+	backup := make([]secrets.PathBackup, 0, len(in.Paths))
+	for _, p := range in.Paths {
+		b := secrets.PathBackup{Path: p.Path, Data: p.Data}
+		for _, v := range p.Versions {
+			b.Versions = append(b.Versions, secrets.Version{Number: v.Version, Time: v.Time, Data: v.Data})
+		}
+		backup = append(backup, b)
+	}
+	err := s.secrets.Restore(r.Context(), backup)
+	s.audit(r, "api", "restore", "", nil, err)
+	if err != nil {
+		s.serviceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"paths": len(backup)})
 }
 
 func (s *Server) apiHistory(w http.ResponseWriter, r *http.Request) {

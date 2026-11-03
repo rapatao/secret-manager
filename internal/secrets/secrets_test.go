@@ -210,3 +210,87 @@ func TestHistoryDisabled(t *testing.T) {
 		t.Fatalf("History = %v, %v; want none", versions, err)
 	}
 }
+
+func TestBackupRestore(t *testing.T) {
+	ctx := context.Background()
+	src := New(newMem(), nil)
+	src.KeepVersions = 10
+	if err := src.SetKeys(ctx, "/app", map[string]string{"A": "1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := src.SetKeys(ctx, "/app", map[string]string{"A": "2"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := src.SetKeys(ctx, "/tools", map[string]string{"T": "x"}); err != nil {
+		t.Fatal(err)
+	}
+
+	plain, err := src.Backup(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plain) != 2 || plain[0].Path != "/app" || plain[0].Data["A"] != "2" || plain[0].Versions != nil {
+		t.Fatalf("backup without history: %+v", plain)
+	}
+	full, err := src.Backup(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full[0].Versions) != 2 {
+		t.Fatalf("backup with history: %+v", full)
+	}
+
+	var changed []string
+	dst := New(newMem(), func(p string) { changed = append(changed, p) })
+	dst.KeepVersions = 10
+	if err := dst.SetKeys(ctx, "/app", map[string]string{"A": "old", "B": "gone"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst.SetKeys(ctx, "/keep", map[string]string{"K": "1"}); err != nil {
+		t.Fatal(err)
+	}
+	changed = nil
+	if err := dst.Restore(ctx, full); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := dst.Get(ctx, "/app", false)
+	if want := map[string]string{"A": "2"}; !maps.Equal(got, want) {
+		t.Fatalf("/app = %v, want %v", got, want)
+	}
+	if _, err := dst.Get(ctx, "/keep", false); err != nil {
+		t.Fatalf("path missing from backup was removed: %v", err)
+	}
+	if want := []string{"/app", "/tools"}; !slices.Equal(changed, want) {
+		t.Fatalf("changes %v, want %v", changed, want)
+	}
+
+	appHistory, _ := dst.History(ctx, "/app")
+	if len(appHistory) != 2 || appHistory[0].Data["A"] != "2" {
+		t.Fatalf("/app had versions, restore must only record the new data: %+v", appHistory)
+	}
+	toolsHistory, _ := dst.History(ctx, "/tools")
+	if len(toolsHistory) != 1 || !toolsHistory[0].Time.Equal(full[1].Versions[0].Time) {
+		t.Fatalf("/tools versions not restored with their time: %+v", toolsHistory)
+	}
+
+	changed = nil
+	if err := dst.Restore(ctx, full); err != nil || len(changed) != 0 {
+		t.Fatalf("second restore: %v, changes %v", err, changed)
+	}
+}
+
+func TestRestoreValidatesBeforeWriting(t *testing.T) {
+	ctx := context.Background()
+	s := New(newMem(), nil)
+	err := s.Restore(ctx, []PathBackup{
+		{Path: "/ok", Data: map[string]string{"A": "1"}},
+		{Path: "/bad", Data: map[string]string{"a b": "1"}},
+	})
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("want ErrInvalid, got %v", err)
+	}
+	if paths, _ := s.ListPaths(ctx); len(paths) != 0 {
+		t.Fatalf("wrote %v before failing", paths)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -233,6 +234,125 @@ func (s *Service) Rollback(ctx context.Context, path string, n int) error {
 	}
 	s.onChange(path)
 	return s.record(ctx, path, v.Data)
+}
+
+// PathBackup is the data of one path and, optionally, its versions, newest
+// first.
+type PathBackup struct {
+	Path     string
+	Data     map[string]string
+	Versions []Version
+}
+
+// Backup returns the data of every stored path, sorted by path, with its
+// versions when withHistory. Versions of deleted paths are not included.
+func (s *Service) Backup(ctx context.Context, withHistory bool) ([]PathBackup, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	paths, err := s.backend.List(ctx, "/")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PathBackup, 0, len(paths))
+	for _, p := range paths {
+		data, err := s.backend.Get(ctx, p)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		b := PathBackup{Path: p, Data: data}
+		if withHistory {
+			if b.Versions, err = s.backend.Versions(ctx, p); err != nil {
+				return nil, err
+			}
+		}
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+// Restore replaces the data of every path in backup. Paths not in backup are
+// kept. Versions are restored, oldest first and renumbered from 1, only for
+// paths without stored versions and only when history is enabled. Every
+// path and key is validated before anything is written.
+func (s *Service) Restore(ctx context.Context, backup []PathBackup) error {
+	for i, b := range backup {
+		path, err := NormalizePath(b.Path)
+		if err != nil {
+			return err
+		}
+		backup[i].Path = path
+		for k := range b.Data {
+			if err := ValidateKey(k); err != nil {
+				return fmt.Errorf("%s: %w", path, err)
+			}
+		}
+		for _, v := range b.Versions {
+			for k := range v.Data {
+				if err := ValidateKey(k); err != nil {
+					return fmt.Errorf("%s version %d: %w", path, v.Number, err)
+				}
+			}
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, b := range backup {
+		if err := s.restore(ctx, b); err != nil {
+			return fmt.Errorf("restore %s: %w", b.Path, err)
+		}
+	}
+	return nil
+}
+
+func (s *Service) restore(ctx context.Context, b PathBackup) error {
+	data := b.Data
+	if data == nil {
+		data = map[string]string{}
+	}
+	newest, err := s.restoreVersions(ctx, b)
+	if err != nil {
+		return err
+	}
+	current, err := s.backend.Get(ctx, b.Path)
+	if err == nil && maps.Equal(current, data) {
+		return nil
+	}
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	if err := s.backend.Put(ctx, b.Path, data); err != nil {
+		return err
+	}
+	s.onChange(b.Path)
+	if newest != nil && maps.Equal(newest, data) {
+		return nil
+	}
+	return s.record(ctx, b.Path, data)
+}
+
+// restoreVersions adds the versions of b when path has none yet and returns
+// the data of the newest one added.
+func (s *Service) restoreVersions(ctx context.Context, b PathBackup) (map[string]string, error) {
+	if s.KeepVersions <= 0 || len(b.Versions) == 0 {
+		return nil, nil
+	}
+	existing, err := s.backend.Versions(ctx, b.Path)
+	if err != nil || len(existing) > 0 {
+		return nil, err
+	}
+	versions := b.Versions[:min(len(b.Versions), s.KeepVersions)]
+	for _, v := range slices.Backward(versions) {
+		if err := s.backend.AddVersion(ctx, b.Path, v.Time, v.Data, s.KeepVersions); err != nil {
+			return nil, err
+		}
+	}
+	return versions[0].Data, nil
 }
 
 // record stores data as the newest version of path when history is enabled.

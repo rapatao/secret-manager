@@ -47,6 +47,8 @@ const Usage = `Client commands:
   export  --path P [--recursive] [--format dotenv|json]
   history --path P [VERSION]                   list versions, or print one as dotenv
   rollback --path P VERSION                    restore a version
+  backup  [--history] [--output F]             print or write (0600) every path as JSON
+  restore FILE|-                               replace the paths held in a backup
   run     --path P [--recursive] -- CMD [ARGS...]
                                                run CMD with secrets as env vars
   version                                      print the client version and, when a
@@ -100,6 +102,8 @@ func (c *CLI) Run(ctx context.Context, args []string) int {
 		"history":  c.history,
 		"rollback": c.rollback,
 		"version":  c.version,
+		"backup":   c.backup,
+		"restore":  c.restore,
 	}
 	if len(args) == 0 {
 		fmt.Fprint(c.Stderr, Usage)
@@ -564,6 +568,76 @@ func (c *CLI) version(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(c.Stdout, "server: %s (%s)\n", cmp.Or(info.Version, "unknown, older than the client"), f.server)
 	fmt.Fprintf(c.Stdout, "capabilities: %s\n", strings.Join(info.Capabilities, ", "))
+	return nil
+}
+
+func (c *CLI) backup(ctx context.Context, args []string) error {
+	f := c.flags("backup", false, false)
+	withHistory := f.fs.Bool("history", false, "include the versions of every path")
+	output := f.fs.String("output", "", "file to write with 0600 permissions, default stdout")
+	api, err := f.parse(args)
+	if err != nil {
+		return err
+	}
+	if f.fs.NArg() > 0 {
+		return fmt.Errorf("%w: backup takes no arguments", errUsage)
+	}
+	if err := api.Require(ctx, "backup"); err != nil {
+		return err
+	}
+	data, err := api.Backup(ctx, *withHistory)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	if *output == "" {
+		_, err = c.Stdout.Write(data)
+		return err
+	}
+	file, err := os.OpenFile(*output, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = file.Write(data)
+	if chmodErr := file.Chmod(0o600); err == nil {
+		err = chmodErr
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+func (c *CLI) restore(ctx context.Context, args []string) error {
+	f := c.flags("restore", false, false)
+	api, err := f.parse(args)
+	if err != nil {
+		return err
+	}
+	if f.fs.NArg() != 1 {
+		return fmt.Errorf("%w: restore takes one FILE, - for stdin", errUsage)
+	}
+	name := f.fs.Arg(0)
+	var data []byte
+	if name == "-" {
+		data, err = io.ReadAll(c.Stdin)
+	} else {
+		data, err = os.ReadFile(name)
+	}
+	if err != nil {
+		return err
+	}
+	if !json.Valid(data) {
+		return fmt.Errorf("%s is not a JSON backup", name)
+	}
+	if err := api.Require(ctx, "backup"); err != nil {
+		return err
+	}
+	n, err := api.Restore(ctx, data)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(c.Stdout, "Restored %d paths\n", n)
 	return nil
 }
 
