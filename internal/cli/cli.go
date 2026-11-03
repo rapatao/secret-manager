@@ -16,8 +16,11 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
+	"text/tabwriter"
+	"time"
 
 	"golang.org/x/term"
 
@@ -42,6 +45,8 @@ const Usage = `Client commands:
   set     --path P [--env-file F|-] [K=V...]   merge keys into a path
   delete  --path P (KEY... | --all)            delete keys, or the whole path
   export  --path P [--recursive] [--format dotenv|json]
+  history --path P [VERSION]                   list versions, or print one as dotenv
+  rollback --path P VERSION                    restore a version
   run     --path P [--recursive] -- CMD [ARGS...]
                                                run CMD with secrets as env vars
 
@@ -79,13 +84,15 @@ func Default() *CLI {
 // Run executes args[0] with the remaining args and returns the exit code.
 func (c *CLI) Run(ctx context.Context, args []string) int {
 	cmds := map[string]func(context.Context, []string) error{
-		"servers": c.servers,
-		"list":    c.list,
-		"get":     c.get,
-		"set":     c.set,
-		"delete":  c.delete,
-		"export":  c.export,
-		"run":     c.run,
+		"servers":  c.servers,
+		"list":     c.list,
+		"get":      c.get,
+		"set":      c.set,
+		"delete":   c.delete,
+		"export":   c.export,
+		"run":      c.run,
+		"history":  c.history,
+		"rollback": c.rollback,
 	}
 	if len(args) == 0 {
 		fmt.Fprint(c.Stderr, Usage)
@@ -479,6 +486,63 @@ func (c *CLI) export(ctx context.Context, args []string) error {
 	enc := json.NewEncoder(c.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(data)
+}
+
+func (c *CLI) history(ctx context.Context, args []string) error {
+	f := c.flags("history", true, false)
+	api, err := f.parse(args)
+	if err != nil {
+		return err
+	}
+	switch f.fs.NArg() {
+	case 0:
+		versions, err := api.History(ctx, f.path)
+		if err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(c.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "VERSION\tWRITTEN\tKEYS")
+		for _, v := range versions {
+			fmt.Fprintf(w, "%d\t%s\t%s\n", v.Version, v.Time.Format(time.RFC3339), strings.Join(v.Keys, ","))
+		}
+		return w.Flush()
+	case 1:
+		n, err := parseVersion(f.fs.Arg(0))
+		if err != nil {
+			return err
+		}
+		v, err := api.Version(ctx, f.path, n)
+		if err != nil {
+			return err
+		}
+		return formatDotenv(c.Stdout, v.Data)
+	default:
+		return fmt.Errorf("%w: history takes at most one VERSION", errUsage)
+	}
+}
+
+func (c *CLI) rollback(ctx context.Context, args []string) error {
+	f := c.flags("rollback", true, false)
+	api, err := f.parse(args)
+	if err != nil {
+		return err
+	}
+	if f.fs.NArg() != 1 {
+		return fmt.Errorf("%w: rollback takes one VERSION", errUsage)
+	}
+	n, err := parseVersion(f.fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	return api.Rollback(ctx, f.path, n)
+}
+
+func parseVersion(s string) (int, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%w: VERSION %q must be a positive integer", errUsage, s)
+	}
+	return n, nil
 }
 
 func (c *CLI) run(ctx context.Context, args []string) error {

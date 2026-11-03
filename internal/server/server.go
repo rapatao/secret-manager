@@ -6,10 +6,12 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,6 +63,9 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /api/v1/secrets", s.bearer(s.apiGet))
 	s.mux.Handle("PUT /api/v1/secrets", s.bearer(s.apiSet))
 	s.mux.Handle("DELETE /api/v1/secrets/{key}", s.bearer(s.apiDeleteKey))
+	s.mux.Handle("GET /api/v1/history", s.bearer(s.apiHistory))
+	s.mux.Handle("GET /api/v1/history/{version}", s.bearer(s.apiVersion))
+	s.mux.Handle("POST /api/v1/history/{version}/rollback", s.bearer(s.apiRollback))
 
 	s.mux.Handle("GET /login", s.ui(s.uiLoginForm))
 	s.mux.Handle("POST /login", s.ui(s.uiLogin))
@@ -71,6 +76,7 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /path/delete", s.ui(s.session(s.uiDeletePath)))
 	s.mux.Handle("POST /key", s.ui(s.session(s.uiSetKey)))
 	s.mux.Handle("POST /key/delete", s.ui(s.session(s.uiDeleteKey)))
+	s.mux.Handle("POST /path/rollback", s.ui(s.session(s.uiRollback)))
 }
 
 // readyz reports whether the storage backend can be read.
@@ -159,6 +165,67 @@ func (s *Server) apiDeletePath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type versionJSON struct {
+	Version int               `json:"version"`
+	Time    time.Time         `json:"time"`
+	Keys    []string          `json:"keys,omitempty"`
+	Data    map[string]string `json:"data,omitempty"`
+}
+
+func (s *Server) apiHistory(w http.ResponseWriter, r *http.Request) {
+	versions, err := s.secrets.History(r.Context(), r.URL.Query().Get("path"))
+	if err != nil {
+		s.serviceError(w, r, err)
+		return
+	}
+	out := []versionJSON{}
+	for _, v := range versions {
+		out = append(out, versionJSON{Version: v.Number, Time: v.Time, Keys: slices.Sorted(maps.Keys(v.Data))})
+	}
+	writeJSON(w, http.StatusOK, map[string][]versionJSON{"versions": out})
+}
+
+func (s *Server) apiVersion(w http.ResponseWriter, r *http.Request) {
+	n, err := parseVersion(r.PathValue("version"))
+	if err != nil {
+		s.serviceError(w, r, err)
+		return
+	}
+	v, err := s.secrets.Version(r.Context(), r.URL.Query().Get("path"), n)
+	if err != nil {
+		s.serviceError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, versionJSON{Version: v.Number, Time: v.Time, Data: v.Data})
+}
+
+func (s *Server) apiRollback(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	err := s.rollback(r, path, r.PathValue("version"))
+	s.audit(r, "api", "rollback", path, nil, err)
+	if err != nil {
+		s.serviceError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) rollback(r *http.Request, path, version string) error {
+	n, err := parseVersion(version)
+	if err != nil {
+		return err
+	}
+	return s.secrets.Rollback(r.Context(), path, n)
+}
+
+func parseVersion(v string) (int, error) {
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%w: version %q must be a positive integer", secrets.ErrInvalid, v)
+	}
+	return n, nil
 }
 
 var errInvalidToken = errors.New("invalid token")

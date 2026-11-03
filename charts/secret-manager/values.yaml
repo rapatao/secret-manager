@@ -31,6 +31,10 @@ ingress:
 # debug, info, warn or error.
 logLevel: info
 
+# Versions kept per path, current included. Each version is a Secret in the
+# release namespace. 0 disables history.
+historyLimit: 10
+
 # Prometheus metrics are served on port 8081 (Service port "metrics").
 metrics:
   serviceMonitor:

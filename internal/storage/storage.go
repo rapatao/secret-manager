@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 )
 
 // ErrNotFound is returned by Backend.Get when the path does not exist.
@@ -21,6 +22,21 @@ type Backend interface {
 	Delete(ctx context.Context, path string) error
 	// List returns, sorted, every stored path equal to prefix or below it.
 	List(ctx context.Context, prefix string) ([]string, error)
+
+	// AddVersion stores data as the next version of path, numbered one above
+	// the newest stored version, then deletes all but the newest keep
+	// versions. keep is at least 1.
+	AddVersion(ctx context.Context, path string, at time.Time, data map[string]string, keep int) error
+	// Versions returns the stored versions of path, newest first. Versions
+	// outlive Delete.
+	Versions(ctx context.Context, path string) ([]Version, error)
+}
+
+// Version is a snapshot of the data stored at a path.
+type Version struct {
+	Number int
+	Time   time.Time
+	Data   map[string]string
 }
 
 // Under reports whether path equals prefix or is nested below it.

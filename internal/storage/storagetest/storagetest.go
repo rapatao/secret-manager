@@ -8,6 +8,7 @@ import (
 	"maps"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/rapatao/secret-manager/internal/storage"
 )
@@ -103,6 +104,54 @@ func Run(t *testing.T, newBackend func() storage.Backend) {
 			if !slices.Equal(got, want) {
 				t.Errorf("List(%q) = %v, want %v", prefix, got, want)
 			}
+		}
+	})
+
+	t.Run("versions", func(t *testing.T) {
+		b := newBackend()
+		at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+		for i := range 4 {
+			if err := b.AddVersion(ctx, "/a", at.Add(time.Duration(i)*time.Minute), map[string]string{"K": string(rune('0' + i))}, 3); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := b.AddVersion(ctx, "/a/b", at, map[string]string{"X": "1"}, 3); err != nil {
+			t.Fatal(err)
+		}
+		got, err := b.Versions(ctx, "/a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var numbers []int
+		for _, v := range got {
+			numbers = append(numbers, v.Number)
+		}
+		if want := []int{4, 3, 2}; !slices.Equal(numbers, want) {
+			t.Fatalf("versions %v, want %v", numbers, want)
+		}
+		if !got[0].Time.Equal(at.Add(3*time.Minute)) || got[0].Data["K"] != "3" {
+			t.Fatalf("newest version = %+v", got[0])
+		}
+		if paths, _ := b.List(ctx, "/"); len(paths) != 0 {
+			t.Fatalf("versions listed as paths: %v", paths)
+		}
+	})
+
+	t.Run("versions outlive delete", func(t *testing.T) {
+		b := newBackend()
+		mustPut(t, b, "/app", map[string]string{"A": "1"})
+		if err := b.AddVersion(ctx, "/app", time.Now(), map[string]string{"A": "1"}, 10); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.Delete(ctx, "/app"); err != nil {
+			t.Fatal(err)
+		}
+		got, err := b.Versions(ctx, "/app")
+		if err != nil || len(got) != 1 {
+			t.Fatalf("Versions = %v, %v; want one version", got, err)
+		}
+		if missing, err := b.Versions(ctx, "/missing"); err != nil || len(missing) != 0 {
+			t.Fatalf("Versions(missing) = %v, %v", missing, err)
 		}
 	})
 }

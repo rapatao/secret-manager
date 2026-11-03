@@ -6,6 +6,7 @@ A small, self-hosted key-value secret manager for Kubernetes.
 - A `SecretSync` resource syncs one or more paths into Kubernetes Secrets, in any namespace, optionally shaped with Go templates.
 - Deployments that opt in are restarted when a Secret they use changes.
 - `secret-manager run` injects secrets as environment variables into local commands.
+- Every write is kept as a version, so a path can be inspected or rolled back, even after it is deleted.
 
 One binary contains the controller, the REST API, the Web UI and the CLI.
 
@@ -17,10 +18,10 @@ One binary contains the controller, the REST API, the Web UI and the CLI.
 | Extra components | None | The external store | PostgreSQL and Redis | None |
 | Web UI and CLI | Yes | No | Yes | CLI to encrypt (`kubeseal`) |
 | Users, roles, environments | No, one admin token | From the external store | Yes | Git permissions |
-| Secret history | No | From the external store | Yes | Git history |
+| Secret history | Yes, last N versions per path | From the external store | Yes | Git history |
 | Restarts Deployments on change | Yes | No, needs a tool like Reloader | Yes | No |
 
-Choose secret-manager for a small cluster where one person or a small team manages the secrets and running a database for them is not worth it. Choose External Secrets Operator if you already have a secret store, Infisical if you need users, environments and history, and Sealed Secrets if secrets must live in git.
+Choose secret-manager for a small cluster where one person or a small team manages the secrets and running a database for them is not worth it. Choose External Secrets Operator if you already have a secret store, Infisical if you need users and environments, and Sealed Secrets if secrets must live in git.
 
 ## How it works
 
@@ -35,6 +36,8 @@ Writes made through the API reach target Secrets immediately. Every `SecretSync`
 ### Storage
 
 Storage is pluggable behind a small interface (`internal/storage.Backend`). The only backend today is `kubernetes`: each path is a Secret in the server's namespace (`/kubernetes/app` is stored as `sm.kubernetes.app`, labeled `secretmanager.rapatao.com/store=true`). There is no database or volume to run.
+
+Each write through the API, the Web UI or the CLI is also stored as a version: a Secret named `smh.<path>.<version>` (`/kubernetes/app` version 3 is `smh.kubernetes.app.3`), labeled `secretmanager.rapatao.com/history=true`. See [History](#history).
 
 To add a backend (SQLite, Postgres, ...), implement `storage.Backend`, run `storagetest.Run` against it in its tests, and add a case to the `--storage` switch in `cmd/secret-manager/main.go`.
 
@@ -52,7 +55,7 @@ helm install secret-manager oci://ghcr.io/rapatao/charts/secret-manager -n secre
   --set ingress.enabled=true --set ingress.host=secrets.example.com
 ```
 
-Add `--version 1.2.0` to pin a release. From a checkout, use `charts/secret-manager` instead of the `oci://` reference.
+Add `--version 1.2.0` to pin a release. Set `historyLimit` (default `10`, `0` disables history) to change how many versions are kept per path. From a checkout, use `charts/secret-manager` instead of the `oci://` reference.
 
 The chart installs the `SecretSync` CRD. Helm does not upgrade CRDs, so apply them after upgrading:
 
@@ -136,6 +139,9 @@ secret-manager export --path /tools --format json
 secret-manager delete --path /tools OTHER
 secret-manager delete --path /tools --all
 secret-manager run --path /tools -- make updates
+secret-manager history --path /tools                   # list versions
+secret-manager history --path /tools 3                 # print version 3 as dotenv
+secret-manager rollback --path /tools 3
 ```
 
 ### Servers and login
@@ -171,9 +177,17 @@ The token is never accepted as a flag, so it doesn't end up in shell history or 
 
 `run` adds the secrets to the current environment, overriding variables with the same name, and exits with the command's exit code.
 
+## History
+
+Every write that changes a path (setting keys, deleting a key, a rollback) stores the path's new data as a version numbered one above the previous. Writes that change nothing, and changes made directly on the stored Secrets, are not recorded. The newest versions are kept, current one included, up to `--history-limit` (chart value `historyLimit`, default `10`). `0` stops recording; versions already stored stay until removed by hand (`kubectl delete secret -l secretmanager.rapatao.com/history=true`).
+
+Deleting a path keeps its versions, so `rollback` can bring it back. Rolling back writes the old data as a new version, so it can itself be undone. Rolling back a synced path updates its targets like any other write.
+
+History starts when the feature is first used: paths written before have no versions until their next change.
+
 ## Web UI
 
-Open the server URL and sign in with the admin token. The UI lists paths and lets you create and delete paths and keys; values stay hidden until expanded. Sessions last 12 hours and are lost when the server restarts. The session cookie is `Secure`, so use HTTPS (an Ingress with TLS) or `localhost`.
+Open the server URL and sign in with the admin token. The UI lists paths and lets you create and delete paths and keys, and view and restore a path's versions; values stay hidden until expanded. Deleted paths are not listed; restore them with the CLI or the API. Sessions last 12 hours and are lost when the server restarts. The session cookie is `Secure`, so use HTTPS (an Ingress with TLS) or `localhost`.
 
 ## API
 
@@ -186,6 +200,9 @@ All endpoints except `/healthz` require `Authorization: Bearer <token>`.
 | `PUT` | `/api/v1/secrets?path=P` | Merge a JSON object of string values into P |
 | `DELETE` | `/api/v1/secrets/{key}?path=P` | Delete one key |
 | `DELETE` | `/api/v1/paths?path=P` | Delete a path (nested paths are kept) |
+| `GET` | `/api/v1/history?path=P` | `{"versions": [{"version": 3, "time": "...", "keys": [...]}]}`, newest first, without values |
+| `GET` | `/api/v1/history/{version}?path=P` | `{"version": 3, "time": "...", "data": {"KEY": "value"}}` |
+| `POST` | `/api/v1/history/{version}/rollback?path=P` | Replace the data at P with that version |
 | `GET` | `/healthz` | Liveness |
 | `GET` | `/readyz` | Readiness: 503 when the storage backend cannot be read |
 
@@ -217,11 +234,12 @@ Every change made through the API or the Web UI, and every failed authentication
 {"level":"WARN","msg":"audit","source":"ui","op":"login","remote":"10.42.0.7:51240","error":"invalid token"}
 ```
 
-`op` is one of `set`, `delete_key`, `delete_path`, `create_path`, `login` and `auth` (API bearer token). Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Reads are not logged.
+`op` is one of `set`, `delete_key`, `delete_path`, `create_path`, `rollback`, `login` and `auth` (API bearer token). Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Reads are not logged.
 
 ## Security notes
 
 - With the `kubernetes` backend, values are only as protected as Secrets in your cluster. Enable encryption at rest (k3s: `--secrets-encryption`) and restrict who can read Secrets in the server namespace.
+- Old values stay readable in history Secrets after they are changed or deleted. To purge a leaked value, delete its versions: `kubectl -n secret-manager get secrets -l secretmanager.rapatao.com/history=true` lists them.
 - The server needs cluster-wide permission to manage Secrets, because targets can live in any namespace.
 - The metrics port has no authentication. It exposes no secret values, but restrict it with a NetworkPolicy if other workloads should not read it.
 - The admin token grants full access. Keep it long and random, and rotate it by updating its Secret and restarting the server.

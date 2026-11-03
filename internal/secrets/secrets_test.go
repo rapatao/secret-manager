@@ -145,3 +145,68 @@ func mustSet(t *testing.T, s *Service, path string, v map[string]string) {
 		t.Fatal(err)
 	}
 }
+
+func TestHistoryAndRollback(t *testing.T) {
+	ctx := context.Background()
+	var changed []string
+	s := New(newMem(), func(p string) { changed = append(changed, p) })
+	s.KeepVersions = 3
+
+	mustSet := func(values map[string]string) {
+		t.Helper()
+		if err := s.SetKeys(ctx, "/app", values); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustSet(map[string]string{"A": "1"})
+	mustSet(map[string]string{"A": "1"})
+	mustSet(map[string]string{"A": "2", "B": "x"})
+	if err := s.DeleteKey(ctx, "/app", "B"); err != nil {
+		t.Fatal(err)
+	}
+
+	versions, err := s.History(ctx, "/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 3 || versions[0].Number != 3 {
+		t.Fatalf("unchanged write must not add a version: %+v", versions)
+	}
+
+	if err := s.DeletePath(ctx, "/app"); err != nil {
+		t.Fatal(err)
+	}
+	changed = nil
+	if err := s.Rollback(ctx, "/app", 1); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(ctx, "/app", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"A": "1"}; !maps.Equal(got, want) {
+		t.Fatalf("after rollback got %v, want %v", got, want)
+	}
+	if !slices.Equal(changed, []string{"/app"}) {
+		t.Fatalf("rollback changes %v", changed)
+	}
+	versions, _ = s.History(ctx, "/app")
+	if versions[0].Number != 4 || len(versions) != 3 {
+		t.Fatalf("rollback must add a pruned version: %+v", versions)
+	}
+
+	if err := s.Rollback(ctx, "/app", 1); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("rollback to pruned version: want ErrNotFound, got %v", err)
+	}
+}
+
+func TestHistoryDisabled(t *testing.T) {
+	ctx := context.Background()
+	s := New(newMem(), nil)
+	if err := s.SetKeys(ctx, "/app", map[string]string{"A": "1"}); err != nil {
+		t.Fatal(err)
+	}
+	if versions, err := s.History(ctx, "/app"); err != nil || len(versions) != 0 {
+		t.Fatalf("History = %v, %v; want none", versions, err)
+	}
+}
