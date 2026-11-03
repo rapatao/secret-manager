@@ -7,6 +7,7 @@ import (
 	"embed"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"html/template"
 	"log/slog"
 	"maps"
@@ -21,6 +22,8 @@ import (
 )
 
 const sessionCookie = "sm_session"
+
+var errUnconfirmed = fmt.Errorf("%w: confirm the action first", secrets.ErrInvalid)
 
 // crossOrigin rejects cross-site form posts using Sec-Fetch-Site, falling back
 // to Origin for older browsers.
@@ -76,7 +79,7 @@ func (s *sessions) valid(id string) bool {
 func (s *Server) ui(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", "default-src 'none'; img-src data:; script-src 'self'; style-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Cache-Control", "no-store")
@@ -104,13 +107,13 @@ func (s *Server) uiScript(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) uiLoginForm(w http.ResponseWriter, _ *http.Request) {
-	render(w, http.StatusOK, "login", nil)
+	s.render(w, http.StatusOK, "login", nil)
 }
 
 func (s *Server) uiLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.validToken(r.PostFormValue("token")) {
 		s.audit(r, "ui", "login", "", nil, errInvalidToken)
-		render(w, http.StatusUnauthorized, "login", map[string]string{"Error": "invalid token"})
+		s.render(w, http.StatusUnauthorized, "login", map[string]any{"Error": "invalid token"})
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
@@ -142,12 +145,9 @@ func (s *Server) uiIndex(w http.ResponseWriter, r *http.Request) {
 		s.uiError(w, r, err)
 		return
 	}
-	q := r.URL.Query().Get("q")
-	unmatched := func(p string) bool { return !strings.Contains(p, q) }
-	render(w, http.StatusOK, "index", map[string]any{
-		"Paths":   slices.DeleteFunc(paths, unmatched),
-		"Deleted": slices.DeleteFunc(deleted, unmatched),
-		"Query":   q,
+	s.render(w, http.StatusOK, "index", map[string]any{
+		"Paths":   paths,
+		"Deleted": deleted,
 		"Error":   r.URL.Query().Get("error"),
 	})
 }
@@ -173,9 +173,9 @@ func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 	}
 	var history []uiVersion
 	for i, v := range versions {
-		h := uiVersion{Number: v.Number, Time: v.Time.Format(time.RFC3339)}
-		for _, k := range slices.Sorted(maps.Keys(v.Data)) {
-			h.Entries = append(h.Entries, entry{k, v.Data[k]})
+		h := uiVersion{Number: v.Number, Time: v.Time.Format(time.RFC3339), Current: !deleted && i == 0, Same: !deleted && maps.Equal(v.Data, data)}
+		for _, c := range secrets.Diff(data, v.Data) {
+			h.Restore = append(h.Restore, uiChange{c, data[c.Key], v.Data[c.Key]})
 		}
 		switch {
 		case i+1 < len(versions):
@@ -185,19 +185,31 @@ func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 		}
 		history = append(history, h)
 	}
-	render(w, http.StatusOK, "path", map[string]any{"Path": path, "Deleted": deleted, "Entries": entries, "History": history, "Error": r.URL.Query().Get("error")})
+	s.render(w, http.StatusOK, "path", map[string]any{"Path": path, "Deleted": deleted, "Entries": entries, "History": history, "Error": r.URL.Query().Get("error")})
 }
 
 type uiVersion struct {
 	Number  int
 	Time    string
-	Entries []entry
 	Changes []secrets.Change
+	Current bool
+	Same    bool
+	Restore []uiChange
+}
+
+type uiChange struct {
+	secrets.Change
+	Before, After string
 }
 
 func (s *Server) uiRollback(w http.ResponseWriter, r *http.Request) {
 	path := r.PostFormValue("path")
-	err := s.rollback(r, path, r.PostFormValue("version"))
+	version := r.PostFormValue("version")
+	if r.PostFormValue("confirm") != version {
+		s.redirectWithError(w, r, pathURL(path)+"&", errUnconfirmed)
+		return
+	}
+	err := s.rollback(r, path, version)
 	s.audit(r, "ui", "rollback", path, nil, err)
 	if err != nil {
 		s.redirectWithError(w, r, pathURL(path)+"&", err)
@@ -208,6 +220,10 @@ func (s *Server) uiRollback(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) uiCreatePath(w http.ResponseWriter, r *http.Request) {
 	path := r.PostFormValue("path")
+	if r.PostFormValue("confirm") != "yes" {
+		s.redirectWithError(w, r, "/?", errUnconfirmed)
+		return
+	}
 	err := s.secrets.SetKeys(r.Context(), path, nil)
 	s.audit(r, "ui", "create_path", path, nil, err)
 	if err != nil {
@@ -220,6 +236,10 @@ func (s *Server) uiCreatePath(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) uiDeletePath(w http.ResponseWriter, r *http.Request) {
 	path := r.PostFormValue("path")
+	if r.PostFormValue("confirm") != path {
+		s.redirectWithError(w, r, pathURL(path)+"&", fmt.Errorf("%w: type the path to confirm the deletion", secrets.ErrInvalid))
+		return
+	}
 	err := s.secrets.DeletePath(r.Context(), path)
 	s.audit(r, "ui", "delete_path", path, nil, err)
 	if err != nil {
@@ -231,21 +251,47 @@ func (s *Server) uiDeletePath(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) uiSetKey(w http.ResponseWriter, r *http.Request) {
 	path := r.PostFormValue("path")
-	key := r.PostFormValue("key")
-	err := s.secrets.SetKeys(r.Context(), path, map[string]string{key: r.PostFormValue("value")})
-	s.audit(r, "ui", "set", path, []string{key}, err)
-	if err != nil {
-		s.redirectWithError(w, r, pathURL(path)+"&", err)
+	if r.PostFormValue("confirm") != "yes" {
+		s.redirectWithError(w, r, pathURL(path)+"&", errUnconfirmed)
 		return
 	}
-	http.Redirect(w, r, pathURL(path), http.StatusSeeOther)
-}
-
-func (s *Server) uiDeleteKey(w http.ResponseWriter, r *http.Request) {
-	path := r.PostFormValue("path")
-	key := r.PostFormValue("key")
-	err := s.secrets.DeleteKey(r.Context(), path, key)
-	s.audit(r, "ui", "delete_key", path, []string{key}, err)
+	keys, values := r.PostForm["key"], r.PostForm["value"]
+	newKeys, newValues := r.PostForm["new-key"], r.PostForm["new-value"]
+	if len(keys) != len(values) || len(newKeys) != len(newValues) {
+		s.redirectWithError(w, r, pathURL(path)+"&", fmt.Errorf("%w: every key needs a value", secrets.ErrInvalid))
+		return
+	}
+	data := make(map[string]string, len(keys)+len(newKeys))
+	for i, k := range keys {
+		data[k] = values[i]
+	}
+	// ponytail: checked before the write, so a key created concurrently can
+	// still be overwritten; move into secrets.UpdateKeys if that matters.
+	current, err := s.secrets.Get(r.Context(), path, false)
+	if err != nil && !errors.Is(err, secrets.ErrNotFound) {
+		s.uiError(w, r, err)
+		return
+	}
+	for i, k := range newKeys {
+		if _, ok := current[k]; ok {
+			s.redirectWithError(w, r, pathURL(path)+"&", fmt.Errorf("%w: key %q already exists", secrets.ErrInvalid, k))
+			return
+		}
+		if _, ok := data[k]; ok {
+			s.redirectWithError(w, r, pathURL(path)+"&", fmt.Errorf("%w: key %q is added twice", secrets.ErrInvalid, k))
+			return
+		}
+		data[k] = newValues[i]
+	}
+	keys = append(keys, newKeys...)
+	remove := r.PostForm["delete"]
+	err = s.secrets.UpdateKeys(r.Context(), path, data, remove)
+	if len(keys) > 0 || len(remove) == 0 {
+		s.audit(r, "ui", "set", path, keys, err)
+	}
+	if len(remove) > 0 {
+		s.audit(r, "ui", "delete_key", path, remove, err)
+	}
 	if err != nil {
 		s.redirectWithError(w, r, pathURL(path)+"&", err)
 		return
@@ -277,7 +323,11 @@ func (s *Server) uiError(w http.ResponseWriter, r *http.Request, err error) {
 	}
 }
 
-func render(w http.ResponseWriter, status int, page string, data any) {
+func (s *Server) render(w http.ResponseWriter, status int, page string, data map[string]any) {
+	if data == nil {
+		data = map[string]any{}
+	}
+	data["Version"] = s.Version
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	if err := pages[page].ExecuteTemplate(w, "layout", data); err != nil {
