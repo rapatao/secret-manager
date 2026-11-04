@@ -12,4 +12,6 @@ With `--backup-dir DIR`, the server writes a backup to `DIR/backup-<UTC time>.js
 
 With `SECRET_MANAGER_BACKUP_KEY` set on the server, every scheduled backup is encrypted like `secret-manager backup` does with that variable, and the summary page shows the schedule as encrypted. Restore one with `secret-manager restore` and the same key.
 
+The Web UI summary page downloads a backup on demand, optionally with history, encrypted with the server's `SECRET_MANAGER_BACKUP_KEY` when set. It cannot restore one; use `secret-manager restore`.
+
 In the chart, set `backup.enabled=true` (`backup.interval`, `backup.keep`, `backup.history`). To encrypt the files, create a Secret holding the key and set `backup.encryption.existingSecret` (and `backup.encryption.key`, default `key`). Backups go to a `ReadWriteOnce` PersistentVolumeClaim named `<release>-backups` (`backup.persistence.size`, default `1Gi`, and `backup.persistence.storageClass`), or to `backup.persistence.existingClaim`. Helm keeps the claim when the release is uninstalled. The image has no shell, so to copy a file out, mount the claim in another pod. Without a backup key, the same plain-text warning applies to these files.
