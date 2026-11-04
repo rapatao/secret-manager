@@ -1,0 +1,13 @@
+# Security notes
+
+- Without [encryption](storage.md#encryption), values are only as protected as the storage backend: Secrets in your cluster, or the `file` backend's file. Set an encryption key, or enable encryption at rest in the cluster (k3s: `--secrets-encryption`), and restrict who can read Secrets in the server namespace. The encryption key is as sensitive as the admin token.
+- Old values stay readable in history after they are changed or deleted. To purge a leaked value, delete the versions holding it with `history --delete` or the Web UI, see [History](history.md). Backups taken before still hold it.
+- The CLI caches the secrets it reads, encrypted with a key in the OS keychain, for up to the server's `--cache-max-age` (default 7 days) or the integration's offline cache setting. Anyone who can use your keychain can read them. Disable the offline cache of integrations used on shared machines, or set `SECRET_MANAGER_CACHE_MAX_AGE=0` there.
+- Backup files hold every value in plain text unless `SECRET_MANAGER_BACKUP_KEY` is set, see [Backup](backup.md). Keep them out of git either way.
+- A local vault is as strong as its passphrase, and anyone who can use your keychain, or read `credentials.json` without a keychain, can read the stored vault key and every value. The vault file is written with `0600` permissions; paths, key names and version times stay readable in it.
+- With the `file` backend, restrict access to the file and its directory. Without an encryption key, values are stored in plain text in it.
+- With the controller enabled, the server can manage Secrets in every namespace, where `SecretSync` targets live. With `controller.enabled=false` it can only manage Secrets in its own namespace.
+- The metrics port has no authentication. It exposes no secret values, but restrict it with a NetworkPolicy if other workloads should not read it.
+- The admin token signs in to the Web UI, which can read every value and create integrations. Keep it long and random, and rotate it by updating its Secret and restarting the server. Give every client its own [integration](integrations.md), as narrow and short-lived as it allows, restricted to the addresses it runs from when they are known, and revoke it when it is no longer used.
+- Failed Web UI sign-ins are slowed down per [client address](client-address.md). Without `--trusted-proxies`, every client behind an Ingress shares one limit; limit sign-in attempts at the Ingress too if the Web UI is reachable from the internet. Never list client ranges in `--trusted-proxies`.
+- Approve a CLI login only if you started it. For a device login, check that the code on the approval page matches the one in your terminal.
