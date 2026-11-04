@@ -292,7 +292,7 @@ func TestUIFlow(t *testing.T) {
 	}
 	postForm(t, c, ts, "/secrets", url.Values{"path": {"/other"}, "confirm": {"yes"}}, origin)
 	_, body := get(t, c, ts.URL+"/secrets")
-	if !strings.Contains(body, `Secret-Manager</a><span class="muted mono">(v9.9.9-test)</span>`) || !strings.Contains(body, `href="/secrets">Secrets</a>`) || !strings.Contains(body, `href="/integrations">Integrations</a>`) {
+	if !strings.Contains(body, `Secret Manager</a><span class="muted mono">(v9.9.9-test)</span>`) || !strings.Contains(body, `href="/secrets">Secrets</a>`) || !strings.Contains(body, `href="/integrations">Integrations</a>`) {
 		t.Fatalf("header missing server version:\n%s", body)
 	}
 	if !strings.Contains(body, `<tr data-path="/app">`) || !strings.Contains(body, `<tr data-path="/other">`) || strings.Contains(body, ">Search<") {
@@ -524,6 +524,27 @@ func TestDeleteVersion(t *testing.T) {
 	_, body = postForm(t, c, ts, "/secrets/versions/delete", url.Values{"path": {"/app"}, "version": {"1"}, "confirm": {"1"}}, origin)
 	if !strings.Contains(body, "<h1>Secrets</h1>") || strings.Contains(body, "Deleted paths") {
 		t.Fatalf("deleting the last version of a deleted path:\n%s", body)
+	}
+}
+
+func TestUIPageTitles(t *testing.T) {
+	ts := newTestServer(t)
+	c := uiClient(t, ts)
+	if _, body := get(t, c, ts.URL+"/login"); !strings.Contains(body, "<title>Sign in - Secret Manager</title>") {
+		t.Fatalf("login title:\n%s", body)
+	}
+	postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL)
+	postForm(t, c, ts, "/secrets", url.Values{"path": {"/app"}, "confirm": {"yes"}}, ts.URL)
+	for page, want := range map[string]string{
+		"/":                       "Summary - Secret Manager",
+		"/secrets":                "Secrets - Secret Manager",
+		"/secrets/path?path=/app": "/app - Secret Manager",
+		"/integrations":           "Integrations - Secret Manager",
+		"/audit":                  "Audit log - Secret Manager",
+	} {
+		if _, body := get(t, c, ts.URL+page); !strings.Contains(body, "<title>"+want+"</title>") {
+			t.Errorf("%s: want title %q", page, want)
+		}
 	}
 }
 
