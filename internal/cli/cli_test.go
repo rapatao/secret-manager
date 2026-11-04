@@ -853,3 +853,25 @@ func TestDeviceLogin(t *testing.T) {
 		t.Fatalf("stored token %q, %v", stored, err)
 	}
 }
+
+func TestUIOpensRemoteServer(t *testing.T) {
+	h := newHarness(t)
+	h.envURL, h.envToken = "", ""
+	var opened string
+	h.browser = func(u string) error {
+		opened = u
+		return nil
+	}
+	out := h.mustRun("ui", "--server", "https://secrets.example.com")
+	if opened != "https://secrets.example.com/" || !strings.Contains(out, "https://secrets.example.com/") {
+		t.Fatalf("opened %q, stdout %q", opened, out)
+	}
+	opened = ""
+	h.mustRun("ui", "--server", "https://secrets.example.com", "--no-browser")
+	if opened != "" {
+		t.Fatalf("--no-browser opened %q", opened)
+	}
+	if code := h.run("ui", "--server", "https://secrets.example.com", "--addr", "127.0.0.1:0"); code != 2 {
+		t.Fatalf("--addr with a remote server: exit %d", code)
+	}
+}

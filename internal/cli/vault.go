@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -64,15 +65,18 @@ func (c *CLI) ui(ctx context.Context, args []string) error {
 	f := c.flags("ui", false, false)
 	addr := f.fs.String("addr", "127.0.0.1:0", "loopback listen address")
 	noBrowser := f.fs.Bool("no-browser", false, "print the sign-in link without opening a browser")
-	token, err := f.parseToken(args)
-	if err != nil {
+	if err := f.parseFlags(args); err != nil {
 		return err
 	}
 	if f.fs.NArg() > 0 {
 		return fmt.Errorf("%w: ui takes no arguments", errUsage)
 	}
 	if _, ok := local.Path(f.server); !ok {
-		return fmt.Errorf("%w: ui serves a local vault, give --server %s/path/to/vault.json", errUsage, local.Scheme)
+		return c.remoteUI(f, *noBrowser)
+	}
+	token, err := f.token()
+	if err != nil {
+		return err
 	}
 	v, err := f.vault(token)
 	if err != nil {
@@ -109,6 +113,23 @@ func (c *CLI) ui(ctx context.Context, args []string) error {
 	}()
 	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		return err
+	}
+	return nil
+}
+
+// remoteUI opens the Web UI of the remote server f.server, which signs in
+// with its admin token.
+func (c *CLI) remoteUI(f *flags, noBrowser bool) error {
+	addrSet := false
+	f.fs.Visit(func(fl *flag.Flag) { addrSet = addrSet || fl.Name == "addr" })
+	if addrSet {
+		return fmt.Errorf("%w: --addr only applies to a local vault", errUsage)
+	}
+	fmt.Fprintf(c.Stdout, "Web UI of %s, sign in with its admin token: %s/\n", f.server, f.server)
+	if !noBrowser && c.OpenBrowser != nil {
+		if err := c.OpenBrowser(f.server + "/"); err != nil {
+			fmt.Fprintln(c.Stderr, "warning: cannot open a browser:", err)
+		}
 	}
 	return nil
 }

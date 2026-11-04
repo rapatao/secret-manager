@@ -261,7 +261,7 @@ secret-manager ui --server file://$HOME/.secrets/vault.json --addr 127.0.0.1:809
 
 Every command works on a vault, run in-process: values are encrypted with AES-256-GCM as with [encryption](#encryption), the last 10 versions of each path are kept as [history](#history), and [backups](#backup) work the same. Integration tokens and audit events are not kept in the vault: every command and `ui` run uses its own read-write integration, and the Integrations and Audit log pages only show those of the current `ui` run. The [offline cache](#offline-cache) is not used.
 
-`ui` serves the Web UI of the vault on a loopback address (`--addr`, default `127.0.0.1` on a random port) until Ctrl-C, and opens a sign-in link in the browser. The link works once, within a minute; `--no-browser` only prints it. Run `ui` again to sign in from another browser.
+`ui` serves the Web UI of the vault on a loopback address (`--addr`, default `127.0.0.1` on a random port) until Ctrl-C, and opens a sign-in link in the browser. The link works once, within a minute; `--no-browser` only prints it. Run `ui` again to sign in from another browser. For a remote server, `ui` opens its Web UI, which signs in with the admin token, without needing a login.
 
 A vault can be used by several commands at once, including while `ui` runs: each request takes a lock on `<file>.lock` next to the vault and reads the file again. Local vaults need macOS, Linux or another Unix system. To use a vault without a stored login, set `SECRET_MANAGER_URL` to its `file://` URL and `SECRET_MANAGER_TOKEN` to the base64 vault key.
 

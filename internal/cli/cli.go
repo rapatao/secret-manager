@@ -80,7 +80,8 @@ const Usage = `Client commands:
   run     --path P [--recursive] -- CMD [ARGS...]
                                                run CMD with secrets as env vars
   ui      [--addr 127.0.0.1:0] [--no-browser]  serve the Web UI of a local vault on
-                                               loopback and open a one-time sign-in link
+                                               loopback and open a one-time sign-in link;
+                                               for a remote server, open its Web UI
   version                                      print the client version and, when a
                                                server is set, its version and capabilities
 
@@ -268,6 +269,11 @@ func (f *flags) parseToken(args []string) (string, error) {
 	if err := f.parseFlags(args); err != nil {
 		return "", err
 	}
+	return f.token()
+}
+
+// token returns the token of the parsed server.
+func (f *flags) token() (string, error) {
 	if f.envToken != "" && f.envURL == "" {
 		return "", fmt.Errorf("%w: %s is set but %s is not; set both, or unset %s to use stored logins",
 			errUsage, EnvToken, EnvURL, EnvToken)
