@@ -2,10 +2,12 @@ package client
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestInfoAndRequire(t *testing.T) {
@@ -44,5 +46,25 @@ func TestInfoFromServerWithoutInfo(t *testing.T) {
 	}
 	if err := c.Require(context.Background(), "backup"); err == nil || !strings.Contains(err.Error(), "(unknown version)") {
 		t.Fatalf("require on old server: %v", err)
+	}
+}
+
+func TestReadKeyFromServerWithoutSecretsKey(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/secrets", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"A":"1","B":"2"},"cacheMaxAge":60}`))
+	})
+	mux.HandleFunc("DELETE /api/v1/secrets/{key}", func(http.ResponseWriter, *http.Request) {})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	c := New(ts.URL, "t")
+	data, maxAge, err := c.Read(context.Background(), "/app", "A", false)
+	if err != nil || len(data) != 1 || data["A"] != "1" || maxAge == nil || *maxAge != time.Minute {
+		t.Fatalf("fallback read: %v %v %v", data, maxAge, err)
+	}
+	_, _, err = c.Read(context.Background(), "/app", "C", false)
+	if apiErr := (*Error)(nil); !errors.As(err, &apiErr) || apiErr.Status != http.StatusNotFound {
+		t.Fatalf("fallback missing key: %v", err)
 	}
 }

@@ -45,6 +45,9 @@ type cacheEntry struct {
 	// MaxAge is the max age in force when the entry was saved. Entries saved
 	// before servers sent one have none.
 	MaxAge time.Duration `json:"maxAge,omitzero"`
+	// Partial marks an entry holding only the keys read one by one, which
+	// does not stand in for the whole path.
+	Partial bool `json:"partial,omitzero"`
 }
 
 func (c *CLI) cache() (cache, error) {
@@ -100,10 +103,10 @@ func cacheAEAD(create bool) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-// save stores data for up to serverMaxAge, or the client max age when it is
+// save stores e for up to serverMaxAge, or the client max age when it is
 // lower or the server sent none. A max age of 0 removes the entry. A missing
 // keychain is not an error: nothing is cached.
-func (ch cache) save(server, path string, recursive bool, data map[string]string, serverMaxAge *time.Duration) error {
+func (ch cache) save(server, path string, recursive bool, e cacheEntry, serverMaxAge *time.Duration) error {
 	if ch.maxAge == 0 {
 		return nil
 	}
@@ -122,7 +125,8 @@ func (ch cache) save(server, path string, recursive bool, data map[string]string
 	if err != nil {
 		return nil //nolint:nilerr // no usable keychain disables the cache
 	}
-	plain, err := json.Marshal(cacheEntry{Time: time.Now(), Data: data, MaxAge: maxAge})
+	e.MaxAge = maxAge
+	plain, err := json.Marshal(e)
 	if err != nil {
 		return err
 	}
@@ -185,16 +189,25 @@ func unreachable(ctx context.Context, err error) bool {
 	return true
 }
 
-// getSecrets reads the secrets of f.path from the server and caches them.
-// When the server is unreachable it falls back to the cache with a warning.
-func (c *CLI) getSecrets(ctx context.Context, f *flags, api *client.Client) (map[string]string, error) {
+// getSecrets reads the secrets of f.path, or only key when it is not empty,
+// from the server and caches them. A key is merged into the cached path,
+// which keeps its read time so older values expire on schedule. When the
+// server is unreachable it falls back to the cache with a warning.
+func (c *CLI) getSecrets(ctx context.Context, f *flags, api *client.Client, key string) (map[string]string, error) {
 	ch, err := c.cache()
 	if err != nil {
 		return nil, err
 	}
-	data, serverMaxAge, err := api.Read(ctx, f.path, f.recursive)
+	data, serverMaxAge, err := api.Read(ctx, f.path, key, f.recursive)
 	if err == nil {
-		if err := ch.save(f.server, f.path, f.recursive, data, serverMaxAge); err != nil {
+		entry := cacheEntry{Time: time.Now(), Data: data, Partial: key != ""}
+		if key != "" {
+			if e, ok := ch.load(f.server, f.path, f.recursive); ok && e.Data != nil {
+				e.Data[key] = data[key]
+				entry = e
+			}
+		}
+		if err := ch.save(f.server, f.path, f.recursive, entry, serverMaxAge); err != nil {
 			fmt.Fprintln(c.Stderr, "warning: offline cache not updated:", err)
 		}
 		return data, nil
@@ -203,7 +216,7 @@ func (c *CLI) getSecrets(ctx context.Context, f *flags, api *client.Client) (map
 		return nil, err
 	}
 	e, ok := ch.load(f.server, f.path, f.recursive)
-	if !ok {
+	if _, has := e.Data[key]; !ok || (key == "" && e.Partial) || (key != "" && !has) {
 		return nil, err
 	}
 	fmt.Fprintf(c.Stderr, "warning: %s unreachable (%v); using secrets cached at %s\n",

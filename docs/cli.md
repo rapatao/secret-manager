@@ -16,7 +16,7 @@ secret-manager set --path /db --generate PASSWORD      # 32 random letters and d
 secret-manager set --path /db --generate PIN:6         # 6 random letters and digits
 secret-manager keys --path /tools                      # key names, no values
 secret-manager keys --path /tools --recursive          # PATH KEY for every nested path
-secret-manager get --path /tools GITHUB_TOKEN
+secret-manager get --path /tools GITHUB_TOKEN          # only this key leaves the server
 secret-manager get --path /tools --recursive           # dotenv output
 secret-manager export --path /tools --format json
 secret-manager delete --path /tools OTHER
@@ -83,7 +83,7 @@ No command accepts the token as a flag.
 
 ## Offline cache
 
-`get`, `export` and `run` keep the last secrets they read from each server, path and `--recursive` setting. When the server is unreachable (connection error, or a `502`, `503` or `504` from the Ingress), they use the cached secrets and print a warning with the time they were read. Any other answer, such as `401` or `404`, is reported as an error and the cache is not used. Writes do not update the cache; the next successful read does.
+`get`, `export` and `run` keep the last secrets they read from each server, path and `--recursive` setting. `get KEY` reads only that key and merges it into the cached path, keeping the time the path was cached so older values still expire on time. A path cached only from `get KEY` serves those keys, not `get`, `export` or `run` of the whole path. When the server is unreachable (connection error, or a `502`, `503` or `504` from the Ingress), they use the cached secrets and print a warning with the time they were read. Any other answer, such as `401` or `404`, is reported as an error and the cache is not used. Writes do not update the cache; the next successful read does.
 
 The server decides how long cached secrets may be used: the integration's offline cache setting, or the server's `--cache-max-age` (default 7 days). Each read returns that max age and the CLI stores it with the entry. A max age of `0` disables the cache for that integration: nothing is written, and the entry of the path read is removed. Servers that send no max age are treated as allowing 7 days.
 

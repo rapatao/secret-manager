@@ -141,6 +141,18 @@ func TestAPIRoundTrip(t *testing.T) {
 		t.Fatalf("recursive get: %s", body)
 	}
 
+	_, body = do(t, ts, "GET", "/api/v1/secrets/A?path=/app", apiToken, "")
+	if strings.TrimSpace(body) != `{"cacheMaxAge":604800,"data":{"A":"1"}}` {
+		t.Fatalf("get key: %s", body)
+	}
+	_, body = do(t, ts, "GET", "/api/v1/secrets/B?path=/app&recursive=true", apiToken, "")
+	if strings.TrimSpace(body) != `{"cacheMaxAge":604800,"data":{"B":"db"}}` {
+		t.Fatalf("recursive get key: %s", body)
+	}
+	if code, body := do(t, ts, "GET", "/api/v1/secrets/C?path=/app", apiToken, ""); code != http.StatusNotFound || !strings.Contains(body, "key C not found in /app") {
+		t.Fatalf("get missing key: %d %s", code, body)
+	}
+
 	if code, _ := do(t, ts, "DELETE", "/api/v1/secrets/A?path=/app", apiToken, ""); code != http.StatusNoContent {
 		t.Fatalf("delete key: %d", code)
 	}
@@ -835,7 +847,7 @@ func TestAPIInfo(t *testing.T) {
 		t.Fatalf("info without token: %d", code)
 	}
 	code, body := do(t, ts, "GET", "/api/v1/info", apiToken, "")
-	if code != http.StatusOK || strings.TrimSpace(body) != `{"capabilities":["backup","history","history-delete","integrations","paths","paths-copy","secrets"],"version":"v9.9.9-test"}` {
+	if code != http.StatusOK || strings.TrimSpace(body) != `{"capabilities":["backup","history","history-delete","integrations","paths","paths-copy","secrets","secrets-key"],"version":"v9.9.9-test"}` {
 		t.Fatalf("info: %d %s", code, body)
 	}
 }

@@ -439,7 +439,7 @@ func TestServersListAndUse(t *testing.T) {
 
 func TestVersion(t *testing.T) {
 	h := newHarness(t)
-	want := "client: 1.5.0\nserver: 1.4.0 (" + h.url + ")\ncapabilities: backup, history, history-delete, integrations, paths, paths-copy, secrets\n"
+	want := "client: 1.5.0\nserver: 1.4.0 (" + h.url + ")\ncapabilities: backup, history, history-delete, integrations, paths, paths-copy, secrets, secrets-key\n"
 	if got := h.mustRun("version"); got != want {
 		t.Fatalf("version: %q", got)
 	}
@@ -632,6 +632,38 @@ func TestOfflineCache(t *testing.T) {
 	h.env[EnvCacheMaxAge] = "soon"
 	if code := h.run("get", "--path", "/tools", "A"); code != 2 {
 		t.Fatalf("invalid max age: exit %d", code)
+	}
+}
+
+func TestOfflineCacheKeys(t *testing.T) {
+	keyring.MockInit()
+	h := newHarness(t)
+	h.mustRun("set", "--path", "/tools", "A=1", "B=2")
+	h.mustRun("set", "--path", "/partial", "A=1", "B=2")
+	h.mustRun("get", "--path", "/tools")
+	h.mustRun("set", "--path", "/tools", "B=3")
+	h.mustRun("get", "--path", "/tools", "B")
+	h.mustRun("get", "--path", "/partial", "A")
+
+	if entries, _ := filepath.Glob(filepath.Join(h.dir, "cache", "*", "*")); len(entries) != 2 {
+		t.Fatalf("cache entries %v", entries)
+	}
+
+	h.ts.Close()
+	if got := h.mustRun("get", "--path", "/tools", "A"); got != "1\n" {
+		t.Fatalf("offline key from path read: %q", got)
+	}
+	if got := h.mustRun("get", "--path", "/tools"); got != "A=\"1\"\nB=\"3\"\n" {
+		t.Fatalf("offline path with merged key: %q", got)
+	}
+	if got := h.mustRun("get", "--path", "/partial", "A"); got != "1\n" {
+		t.Fatalf("offline key from key read: %q", got)
+	}
+	if code := h.run("get", "--path", "/partial", "B"); code != 1 {
+		t.Fatalf("uncached key offline: exit %d", code)
+	}
+	if code := h.run("get", "--path", "/partial"); code != 1 {
+		t.Fatalf("partial entry used for whole path: exit %d", code)
 	}
 }
 

@@ -573,14 +573,14 @@ func (c *CLI) get(ctx context.Context, args []string) error {
 	if f.fs.NArg() > 1 {
 		return fmt.Errorf("%w: get takes at most one KEY", errUsage)
 	}
-	data, err := c.getSecrets(ctx, f, api)
+	key := f.fs.Arg(0)
+	data, err := c.getSecrets(ctx, f, api, key)
 	if err != nil {
 		return err
 	}
-	if f.fs.NArg() == 0 {
+	if key == "" {
 		return formatDotenv(c.Stdout, data)
 	}
-	key := f.fs.Arg(0)
 	v, ok := data[key]
 	if !ok {
 		return fmt.Errorf("key %s not found in %s", key, f.path)
@@ -698,7 +698,7 @@ func (c *CLI) export(ctx context.Context, args []string) error {
 	if *format != "dotenv" && *format != "json" {
 		return fmt.Errorf("%w: unknown format %q", errUsage, *format)
 	}
-	data, err := c.getSecrets(ctx, f, api)
+	data, err := c.getSecrets(ctx, f, api, "")
 	if err != nil {
 		return err
 	}
@@ -1005,7 +1005,7 @@ func (c *CLI) run(ctx context.Context, args []string) error {
 	if f.fs.NArg() == 0 {
 		return fmt.Errorf("%w: missing command", errUsage)
 	}
-	data, err := c.getSecrets(ctx, f, api)
+	data, err := c.getSecrets(ctx, f, api, "")
 	if err != nil {
 		return err
 	}

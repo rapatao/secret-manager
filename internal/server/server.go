@@ -39,7 +39,7 @@ const BackupFormat = 1
 // GET /api/v1/info. Clients check them before using a feature added after
 // the first release. A shipped capability never changes meaning and is never
 // removed; changed behavior gets a new name.
-var Capabilities = []string{"backup", "history", "history-delete", "integrations", "paths", "paths-copy", "secrets"}
+var Capabilities = []string{"backup", "history", "history-delete", "integrations", "paths", "paths-copy", "secrets", "secrets-key"}
 
 // DefaultCacheMaxAge is the CacheMaxAge of a new Server.
 const DefaultCacheMaxAge = 7 * 24 * time.Hour
@@ -128,6 +128,7 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /api/v1/paths/copy", s.bearer(readPath, s.apiCopyPath(false)))
 	s.mux.Handle("POST /api/v1/paths/move", s.bearer(writePath, s.apiCopyPath(true)))
 	s.mux.Handle("GET /api/v1/secrets", s.bearer(readPath, s.apiGet))
+	s.mux.Handle("GET /api/v1/secrets/{key}", s.bearer(readPath, s.apiGet))
 	s.mux.Handle("PUT /api/v1/secrets", s.bearer(writePath, s.apiSet))
 	s.mux.Handle("DELETE /api/v1/secrets/{key}", s.bearer(writePath, s.apiDeleteKey))
 	s.mux.Handle("GET /api/v1/backup", s.bearer(readAll, s.apiBackup))
@@ -296,6 +297,13 @@ func (s *Server) auditRead(r *http.Request, source, op, path string, data map[st
 func (s *Server) apiGet(w http.ResponseWriter, r *http.Request) {
 	path, recursive := r.URL.Query().Get("path"), r.URL.Query().Get("recursive") == "true"
 	data, err := s.secrets.Get(r.Context(), path, recursive)
+	if key := r.PathValue("key"); key != "" && err == nil {
+		if v, ok := data[key]; ok {
+			data = map[string]string{key: v}
+		} else {
+			data, err = nil, keyNotFoundError{key, path}
+		}
+	}
 	if recursive {
 		s.auditRead(r, "api", "read", path, data, err, "recursive", true)
 	} else {
@@ -311,6 +319,12 @@ func (s *Server) apiGet(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": data, "cacheMaxAge": int(maxAge.Seconds())})
 }
+
+type keyNotFoundError struct{ key, path string }
+
+func (e keyNotFoundError) Error() string { return fmt.Sprintf("key %s not found in %s", e.key, e.path) }
+
+func (keyNotFoundError) Is(target error) bool { return target == secrets.ErrNotFound }
 
 func (s *Server) apiSet(w http.ResponseWriter, r *http.Request) {
 	var values map[string]string
