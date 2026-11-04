@@ -39,7 +39,7 @@ const BackupFormat = 1
 // GET /api/v1/info. Clients check them before using a feature added after
 // the first release. A shipped capability never changes meaning and is never
 // removed; changed behavior gets a new name.
-var Capabilities = []string{"backup", "history", "history-delete", "integrations", "paths", "paths-copy", "secrets", "secrets-key"}
+var Capabilities = []string{"backup", "history", "history-delete", "integrations", "paths", "paths-copy", "paths-deleted", "secrets", "secrets-key"}
 
 // DefaultCacheMaxAge is the CacheMaxAge of a new Server.
 const DefaultCacheMaxAge = 7 * 24 * time.Hour
@@ -149,11 +149,13 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /secrets", s.ui(s.session(s.uiSecrets)))
 	s.mux.Handle("POST /secrets", s.ui(s.session(s.uiCreatePath)))
 	s.mux.Handle("GET /secrets/path", s.ui(s.session(s.uiPath)))
+	s.mux.Handle("GET /secrets/export", s.ui(s.session(s.uiExport)))
 	s.mux.Handle("POST /secrets/keys", s.ui(s.session(s.uiSetKey)))
 	s.mux.Handle("POST /secrets/delete", s.ui(s.session(s.uiDeletePath)))
 	s.mux.Handle("POST /secrets/copy", s.ui(s.session(s.uiCopyPath)))
 	s.mux.Handle("POST /secrets/rollback", s.ui(s.session(s.uiRollback)))
 	s.mux.Handle("POST /secrets/versions/delete", s.ui(s.session(s.uiDeleteVersion)))
+	s.mux.Handle("GET /backup", s.ui(s.session(s.uiBackup)))
 	s.mux.Handle("GET /audit", s.ui(s.session(s.uiAudit)))
 	s.mux.Handle("GET /integrations", s.ui(s.session(s.uiIntegrations)))
 	s.mux.Handle("POST /integrations", s.ui(s.session(s.uiCreateIntegration)))
@@ -273,9 +275,15 @@ func (s *Server) apiInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"version": s.Version, "capabilities": Capabilities})
 }
 
+// apiListPaths lists the paths under the token's path, or with ?deleted=true
+// the deleted paths that still have versions.
 func (s *Server) apiListPaths(w http.ResponseWriter, r *http.Request) {
-	paths, err := s.secrets.ListPaths(r.Context())
-	s.auditAt(s.Events.Lists, r, "api", "list_paths", "", nil, err)
+	list, op := s.secrets.ListPaths, "list_paths"
+	if r.URL.Query().Get("deleted") == "true" {
+		list, op = s.secrets.DeletedPaths, "list_deleted_paths"
+	}
+	paths, err := list(r.Context())
+	s.auditAt(s.Events.Lists, r, "api", op, "", nil, err)
 	if err != nil {
 		s.serviceError(w, r, err)
 		return

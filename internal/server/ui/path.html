@@ -18,7 +18,7 @@
 <details><summary><span class="masked mono" aria-hidden="true">&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;</span> <span class="when-closed">Show</span><span class="when-open">Hide</span> <span class="badge edited-badge">edited</span></summary>
 <input type="hidden" name="key" value="{{.Key}}" form="edit-keys">
 <textarea name="value" rows="3" form="edit-keys">{{.Value}}</textarea>
-<div class="value-actions"><button type="button" class="small generate">Generate</button></div>
+<div class="value-actions"><input type="number" class="gen-length" value="32" min="1" required max="4096" aria-label="Generated length"><button type="button" class="small generate">Generate</button></div>
 </details>
 </td>
 <td class="muted" data-label="Changed">{{if .Changed.IsZero}}-{{else}}{{time .Changed}}{{end}}</td>
@@ -37,11 +37,42 @@
 <input type="hidden" name="path" value="{{$path}}">
 <div class="new-keys stack"></div>
 <div class="dialog-actions">
+<button type="button" commandfor="export-keys" command="show-modal">Download</button>
+<button type="button" commandfor="import-env" command="show-modal">Import</button>
 <button type="button" class="add-key">Add key</button>
 <button type="submit" class="primary" disabled>Save changes</button>
 </div>
 </form>
 </div>
+<dialog id="export-keys">
+<form method="get" action="/secrets/export" class="stack export-keys">
+<input type="hidden" name="path" value="{{$path}}">
+<h3>Download keys</h3>
+<p>Download the saved keys of <code>{{$path}}</code> with their values. Unsaved changes are not included.</p>
+<label>Format
+<select name="format">
+<option value="dotenv">.env</option>
+<option value="json">JSON</option>
+</select></label>
+<div class="dialog-actions">
+<button type="submit" formmethod="dialog" formnovalidate>Cancel</button>
+<button type="submit" class="primary">Download</button>
+</div>
+</form>
+</dialog>
+<dialog id="import-env">
+<form method="dialog" class="stack">
+<h3>Import keys</h3>
+<p>Paste <code>KEY=VALUE</code> lines or a JSON object of string values, or choose a file. New keys are added and existing keys changed; nothing is saved until Save changes.</p>
+<input type="file" class="import-file" accept=".env,.json,application/json,text/plain" aria-label="File to import">
+<textarea class="import-text" rows="8" placeholder="KEY=value or {&#34;KEY&#34;: &#34;value&#34;}" aria-label="Keys to import"></textarea>
+<p class="error import-error" role="alert" hidden></p>
+<div class="dialog-actions">
+<button value="cancel" formnovalidate>Cancel</button>
+<button value="import" class="primary">Import</button>
+</div>
+</form>
+</dialog>
 <template id="new-key">
 <div class="stack new-key">
 <div class="dialog-actions">
@@ -49,7 +80,7 @@
 <button type="button" class="small remove-key">Remove</button>
 </div>
 <textarea name="new-value" rows="3" placeholder="value" aria-label="Value"></textarea>
-<div class="value-actions"><button type="button" class="small generate">Generate</button></div>
+<div class="value-actions"><input type="number" class="gen-length" value="32" min="1" required max="4096" aria-label="Generated length"><button type="button" class="small generate">Generate</button></div>
 </div>
 </template>
 <dialog id="review-save">
@@ -72,22 +103,12 @@
 {{with .History}}
 <div class="card">
 <h2>History</h2>
-<form class="body row compare" method="get" action="/secrets/path">
-<input type="hidden" name="path" value="{{$path}}">
-<label class="inline">Compare
-<select name="from" aria-label="From">
-{{range .}}<option value="{{.Number}}"{{if eq (print .Number) $.From}} selected{{end}}>v{{.Number}}</option>
-{{end}}</select></label>
-<label class="inline">with
-<select name="to" aria-label="To">
-{{if not $.Deleted}}<option value="current"{{if eq $.To "current"}} selected{{end}}>current</option>{{end}}
-{{range .}}<option value="{{.Number}}"{{if eq (print .Number) $.To}} selected{{end}}>v{{.Number}}</option>
-{{end}}</select></label>
-<button type="submit" class="small">Compare</button>
-</form>
 {{with $.Compare}}
-<div class="body compare-result">
+<div class="body compare-result" id="compare">
+<div class="row">
 <h3>{{if eq .From "current"}}current{{else}}v{{.From}}{{end}} compared with {{if eq .To "current"}}current{{else}}v{{.To}}{{end}}</h3>
+<a class="button small" href="/secrets/path?path={{$path | urlquery}}">Close</a>
+</div>
 {{if .Changes}}
 <div class="diff-scroll">
 <table class="diff">
@@ -110,13 +131,32 @@
 <td class="muted" data-label="Written">{{time $v.Time}}</td>
 <td class="mono" data-label="Changes">{{range $v.Changes}}<span class="change {{template "op" .Op}}">{{.Op}}{{.Key}}</span> {{else}}<span class="muted">-</span>{{end}}</td>
 <td class="actions">
-{{if $v.Current}}<span class="badge">current</span>{{else if $v.Same}}<span class="muted">same as current</span>{{else}}
+{{if $v.Current}}<span class="badge">current</span>{{else if $v.Same}}<span class="muted">same as current</span>{{end}}
+{{if not (or $v.Current $v.Same)}}
 <button type="button" class="small" commandfor="diff-{{$v.Number}}" command="show-modal">Diff</button>
 <dialog id="diff-{{$v.Number}}">
-<form method="dialog">
-<h3>v{{$v.Number}} compared with the current data</h3>
+<form class="stack compare-with" method="get" action="/secrets/path#compare">
+<input type="hidden" name="path" value="{{$path}}">
+<div class="compare-pick">
+<label class="inline">Compare
+<select name="from" aria-label="Source">
+{{if $.Deleted}}<option value="" selected disabled>pick a version</option>{{else}}<option value="current" selected>current</option>{{end}}
+{{range $.History}}<option value="{{.Number}}">v{{.Number}}</option>
+{{end}}</select></label>
+<label class="inline">with
+<select name="to" aria-label="Target">
+{{if not $.Deleted}}<option value="current">current</option>{{end}}
+{{range $.History}}<option value="{{.Number}}"{{if eq .Number $v.Number}} selected{{end}}>v{{.Number}}</option>
+{{end}}</select></label>
+<noscript><button type="submit" class="small">Compare</button></noscript>
+</div>
+<div class="compare-view">
+<h3>{{if $.Deleted}}v{{$v.Number}}{{else}}current compared with v{{$v.Number}}{{end}}</h3>
 {{template "diff" $v}}
-<div class="dialog-actions"><button>Close</button></div>
+</div>
+<div class="dialog-actions">
+<button type="submit" formmethod="dialog" formnovalidate>Close</button>
+</div>
 </form>
 </dialog>
 <button type="button" class="small" commandfor="restore-{{$v.Number}}" command="show-modal">Restore</button>

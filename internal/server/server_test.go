@@ -26,6 +26,7 @@ import (
 
 	"github.com/rapatao/secret-manager/internal/secrets"
 	"github.com/rapatao/secret-manager/internal/storage"
+	"github.com/rapatao/secret-manager/internal/storage/encrypted"
 	k8sstorage "github.com/rapatao/secret-manager/internal/storage/kubernetes"
 	"github.com/rapatao/secret-manager/internal/tokens"
 )
@@ -606,12 +607,20 @@ func TestUICompareVersions(t *testing.T) {
 	postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL)
 
 	_, body := get(t, c, ts.URL+"/secrets/path?path=/app")
-	if !strings.Contains(body, `<option value="2" selected>v2</option>`) || !strings.Contains(body, `<option value="current" selected>current</option>`) || strings.Contains(body, `class="body compare-result"`) {
-		t.Fatalf("compare form defaults:\n%s", body)
+	_, dialog, _ := strings.Cut(body, `<dialog id="diff-2">`)
+	dialog, _, _ = strings.Cut(dialog, "</dialog>")
+	from, to, _ := strings.Cut(dialog, `name="to"`)
+	if !strings.Contains(from, `<option value="current" selected>current</option>`) || !strings.Contains(from, `<option value="2">v2</option>`) ||
+		!strings.Contains(to, `<option value="2" selected>v2</option>`) || !strings.Contains(to, `<option value="current">current</option>`) ||
+		!strings.Contains(dialog, "current compared with v2") || strings.Contains(body, `class="body compare-result"`) {
+		t.Fatalf("compare defaults:\n%s", dialog)
+	}
+	if strings.Contains(body, `<dialog id="diff-3">`) {
+		t.Fatalf("current version offers a diff:\n%s", body)
 	}
 	_, body = get(t, c, ts.URL+"/secrets/path?path=/app&from=1&to=3")
 	if !strings.Contains(body, "v1 compared with v3") || !strings.Contains(body, `<tr class="add"><td class="mono">&#43;</td><td><code>C</code>`) ||
-		!strings.Contains(body, `<td><code>1</code></td><td><code>2</code></td>`) || !strings.Contains(body, `<option value="1" selected>v1</option>`) {
+		!strings.Contains(body, `<td><code>1</code></td><td><code>2</code></td>`) || !strings.Contains(body, `href="/secrets/path?path=%2Fapp">Close</a>`) {
 		t.Fatalf("v1 compared with v3:\n%s", body)
 	}
 	_, body = get(t, c, ts.URL+"/secrets/path?path=/app&from=3&to=current")
@@ -847,7 +856,7 @@ func TestAPIInfo(t *testing.T) {
 		t.Fatalf("info without token: %d", code)
 	}
 	code, body := do(t, ts, "GET", "/api/v1/info", apiToken, "")
-	if code != http.StatusOK || strings.TrimSpace(body) != `{"capabilities":["backup","history","history-delete","integrations","paths","paths-copy","secrets","secrets-key"],"version":"v9.9.9-test"}` {
+	if code != http.StatusOK || strings.TrimSpace(body) != `{"capabilities":["backup","history","history-delete","integrations","paths","paths-copy","paths-deleted","secrets","secrets-key"],"version":"v9.9.9-test"}` {
 		t.Fatalf("info: %d %s", code, body)
 	}
 }
@@ -1111,6 +1120,15 @@ func TestScopedTokens(t *testing.T) {
 	if _, body := do(t, ts, "GET", "/api/v1/paths", ro, ""); strings.TrimSpace(body) != `{"paths":["/app","/app/db","/app/db/moved","/app/db/new"]}` {
 		t.Fatalf("scoped paths: %s", body)
 	}
+	do(t, ts, "PUT", "/api/v1/secrets?path=/outside", apiToken, `{"A":"1"}`)
+	do(t, ts, "DELETE", "/api/v1/paths?path=/outside", apiToken, "")
+	do(t, ts, "DELETE", "/api/v1/paths?path=/app/db/new", rw, "")
+	if _, body := do(t, ts, "GET", "/api/v1/paths?deleted=true", ro, ""); strings.TrimSpace(body) != `{"paths":["/app/db/new"]}` {
+		t.Fatalf("scoped deleted paths: %s", body)
+	}
+	if _, body := do(t, ts, "GET", "/api/v1/paths?deleted=true", apiToken, ""); strings.TrimSpace(body) != `{"paths":["/app/db/new","/outside"]}` {
+		t.Fatalf("deleted paths: %s", body)
+	}
 	if !strings.Contains(logs.String(), `"op":"set","remote"`) || !strings.Contains(logs.String(), `"token":"dev"`) {
 		t.Fatalf("scoped write not audited with token name: %s", logs)
 	}
@@ -1208,6 +1226,87 @@ func TestIntegrationExpiry(t *testing.T) {
 	} {
 		if code, body := postForm(t, c, ts, "/integrations", form, ts.URL); code != http.StatusOK || !strings.Contains(body, `class="error"`) {
 			t.Errorf("create %v: %d, want an error", form, code)
+		}
+	}
+}
+
+func TestUIExport(t *testing.T) {
+	ts, logs := newLoggedServer(t, func(s *Server) { s.Events.Reads = LevelAudit })
+	c := uiClient(t, ts)
+	postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/app/db", apiToken, `{"B":"x y","A":"1"}`)
+
+	if _, body := get(t, c, ts.URL+"/secrets/path?path=/app/db"); !strings.Contains(body, `<form method="get" action="/secrets/export" class="stack export-keys">`) || !strings.Contains(body, `<option value="json">JSON</option>`) ||
+		!strings.Contains(body, `<dialog id="import-env">`) || strings.Count(body, `class="gen-length"`) != 3 {
+		t.Fatalf("path page lacks export, import or generate length:\n%s", body)
+	}
+	for _, tc := range []struct{ format, file, body string }{
+		{"dotenv", "app-db.env", "A=\"1\"\nB=\"x y\"\n"},
+		{"json", "app-db.json", "{\n  \"A\": \"1\",\n  \"B\": \"x y\"\n}\n"},
+	} {
+		res, err := c.Get(ts.URL + "/secrets/export?path=/app/db&format=" + tc.format)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != http.StatusOK || string(b) != tc.body ||
+			res.Header.Get("Content-Disposition") != `attachment; filename="`+tc.file+`"` || res.Header.Get("Cache-Control") != "no-store" {
+			t.Fatalf("export %s: %d %v %q", tc.format, res.StatusCode, res.Header, b)
+		}
+	}
+	if !strings.Contains(logs.String(), `"source":"ui","op":"export"`) {
+		t.Fatalf("export not audited: %s", logs)
+	}
+	if code, _ := get(t, c, ts.URL+"/secrets/export?path=/app/db&format=yaml"); code != http.StatusBadRequest {
+		t.Fatalf("unknown format: %d", code)
+	}
+	if code, _ := get(t, c, ts.URL+"/secrets/export?path=/missing&format=json"); code != http.StatusNotFound {
+		t.Fatalf("missing path: %d", code)
+	}
+	if code, body := get(t, uiClient(t, ts), ts.URL+"/secrets/export?path=/app/db&format=json"); code != http.StatusOK || strings.Contains(body, "x y") {
+		t.Fatalf("export without session: %d %s", code, body)
+	}
+}
+
+func TestUIBackup(t *testing.T) {
+	key := bytes.Repeat([]byte{7}, encrypted.KeySize)
+	for _, sealed := range []bool{false, true} {
+		ts, logs := newLoggedServer(t, func(s *Server) {
+			if sealed {
+				s.Settings.Backups.Key = key
+			}
+		})
+		c := uiClient(t, ts)
+		postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL)
+		do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"A":"1"}`)
+		do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"A":"2"}`)
+
+		if _, body := get(t, c, ts.URL+"/"); !strings.Contains(body, `action="/backup"`) {
+			t.Fatalf("summary lacks backup download:\n%s", body)
+		}
+		res, err := c.Get(ts.URL + "/backup?history=true")
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != http.StatusOK || !strings.HasPrefix(res.Header.Get("Content-Disposition"), `attachment; filename="backup-`) {
+			t.Fatalf("backup: %d %v", res.StatusCode, res.Header)
+		}
+		if sealed {
+			if bytes.Contains(raw, []byte(`"A"`)) {
+				t.Fatalf("backup not encrypted: %s", raw)
+			}
+			if raw, err = encrypted.OpenBackup(key, raw); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if strings.Count(string(raw), `{"version":`) != 2 || !strings.Contains(string(raw), `"data":{"A":"2"}`) {
+			t.Fatalf("backup with history: %s", raw)
+		}
+		if !strings.Contains(logs.String(), `"source":"ui","op":"backup"`) {
+			t.Fatalf("backup not audited: %s", logs)
 		}
 	}
 }

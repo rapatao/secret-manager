@@ -1,4 +1,5 @@
-package cli
+// Package dotenv reads and writes KEY=VALUE files.
+package dotenv
 
 import (
 	"bufio"
@@ -9,10 +10,10 @@ import (
 	"strings"
 )
 
-// parseDotenv reads KEY=VALUE lines. Blank lines, # comments and an optional
+// Parse reads KEY=VALUE lines. Blank lines, # comments and an optional
 // "export " prefix are accepted. Values may be bare, 'single quoted' (literal)
 // or "double quoted" with \\ \" \n \r \t \$ escapes.
-func parseDotenv(r io.Reader) (map[string]string, error) {
+func Parse(r io.Reader) (map[string]string, error) {
 	out := map[string]string{}
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
@@ -72,8 +73,8 @@ func unquote(s string) (string, error) {
 
 var dotenvEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\r", `\r`, "$", `\$`)
 
-// formatDotenv writes sorted KEY="VALUE" lines that parseDotenv reads back.
-func formatDotenv(w io.Writer, data map[string]string) error {
+// Format writes sorted KEY="VALUE" lines that Parse reads back.
+func Format(w io.Writer, data map[string]string) error {
 	for _, k := range slices.Sorted(maps.Keys(data)) {
 		if _, err := fmt.Fprintf(w, "%s=\"%s\"\n", k, dotenvEscaper.Replace(data[k])); err != nil {
 			return err

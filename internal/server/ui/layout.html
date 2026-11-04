@@ -60,7 +60,7 @@ td table td { padding: .25rem .5rem; }
 code { background: var(--code-bg); padding: .1rem .35rem; border-radius: 4px; }
 form.inline { display: inline; }
 header .row { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; }
-form.row { display: flex; gap: .5rem; flex-wrap: wrap; }
+form.row { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
 form.row input { flex: 1; min-width: 12rem; }
 form.stack { display: grid; gap: .6rem; }
 label { display: grid; gap: .3rem; font-weight: 500; }
@@ -77,14 +77,14 @@ button.primary:hover { filter: brightness(1.08); }
 button.danger { color: var(--danger); }
 button.danger:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
 button.small, a.button.small { padding: .2rem .6rem; font-size: .85rem; }
-a.button { display: inline-block; color: var(--fg); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; font-weight: 500; white-space: nowrap; }
+a.button { display: inline-block; padding: .4rem .9rem; color: var(--fg); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; font-weight: 500; white-space: nowrap; }
 a.button:hover { background: var(--bg); text-decoration: none; }
 summary { cursor: pointer; color: var(--muted); user-select: none; }
 summary:hover { color: var(--accent); }
 details[open] summary { margin-bottom: .5rem; }
 dialog { max-width: min(40rem, calc(100vw - 2rem)); padding: 1.25rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--fg); text-align: left; white-space: normal; }
 dialog::backdrop { background: rgba(0, 0, 0, .45); }
-dialog p { margin: 0 0 1rem; word-break: break-all; }
+dialog p { margin: 0 0 1rem; overflow-wrap: anywhere; }
 .diff-scroll { max-height: 60vh; overflow: auto; margin: 0 0 1rem; border: 1px solid var(--border); border-radius: 6px; }
 table.diff th { position: sticky; top: 0; background: var(--surface); }
 table.diff td { padding: .3rem .5rem; word-break: break-all; }
@@ -107,7 +107,7 @@ tr.staged-delete td:not(.actions) { opacity: .5; text-decoration: line-through; 
 .user-code { font-size: 1.6rem; letter-spacing: .1em; text-align: center; margin: 0 0 1rem; }
 fieldset { border: 0; padding: 0; margin: 0; display: grid; gap: .6rem; }
 label.check { display: flex; align-items: center; gap: .5rem; font-weight: 400; }
-label.check input { width: auto; }
+label.check input { width: auto; min-width: 0; flex: none; }
 table.summary { margin: 0 0 1rem; border: 1px solid var(--border); border-radius: 6px; border-collapse: separate; border-spacing: 0; }
 table.summary td, table.summary th { padding: .4rem .75rem; word-break: break-all; }
 table.summary td:first-child { color: var(--muted); }
@@ -118,10 +118,12 @@ td.value summary { display: flex; flex-wrap: wrap; align-items: center; gap: .5r
 .masked { letter-spacing: .1em; color: var(--muted); }
 details[open] .masked, details[open] .when-closed, details:not([open]) .when-open, .edited-badge { display: none; }
 tr.edited .edited-badge { display: inline-block; }
-form.compare { align-items: center; border-bottom: 1px solid var(--border); }
 label.inline { display: flex; align-items: center; gap: .5rem; font-weight: 400; }
 .compare-result { border-bottom: 1px solid var(--border); }
-.value-actions { display: flex; justify-content: flex-end; margin-top: .25rem; }
+.compare-pick { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1rem; }
+.compare-result > .row { display: flex; justify-content: space-between; align-items: center; gap: .5rem; }
+.value-actions { display: flex; justify-content: flex-end; align-items: center; gap: .5rem; margin-top: .25rem; }
+.value-actions .gen-length { width: 6rem; padding: .2rem .5rem; }
 .when-closed, .when-open { color: var(--accent); font-size: .85rem; }
 @media (max-width: 40rem) {
   header .bar { padding: .5rem .75rem; }
@@ -146,7 +148,9 @@ label.inline { display: flex; align-items: center; gap: .5rem; font-weight: 400;
 }
 .custom-date { display: none; }
 fieldset:has(select[name="expires"] option[value="custom"]:checked) .custom-date { display: grid; }
-select { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: .45rem .65rem; }
+select { appearance: none; font: inherit; color: inherit; cursor: pointer; background: var(--bg) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%23888' stroke-width='1.5'/%3E%3C/svg%3E") no-repeat right .65rem center / .7rem; border: 1px solid var(--border); border-radius: 6px; padding: .45rem 2rem .45rem .65rem; }
+select:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
+.compare-pick select { padding-top: .25rem; padding-bottom: .25rem; }
 </style>
 </head>
 <body>

@@ -99,6 +99,13 @@ func (c *Client) Paths(ctx context.Context) ([]string, error) {
 	return out.Paths, err
 }
 
+// DeletedPaths lists the deleted paths that still have versions.
+func (c *Client) DeletedPaths(ctx context.Context) ([]string, error) {
+	var out struct{ Paths []string }
+	err := c.do(ctx, http.MethodGet, "/api/v1/paths", url.Values{"deleted": {"true"}}, nil, &out)
+	return out.Paths, err
+}
+
 // Get returns the secrets at path, merging nested paths when recursive.
 func (c *Client) Get(ctx context.Context, path string, recursive bool) (map[string]string, error) {
 	data, _, err := c.Read(ctx, path, "", recursive)
