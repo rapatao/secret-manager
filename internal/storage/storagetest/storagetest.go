@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"net/netip"
 	"slices"
 	"testing"
 	"time"
@@ -225,7 +226,7 @@ func Run(t *testing.T, newBackend func() storage.Backend) {
 		}
 		want := []storage.Token{
 			{Name: "ci", Hash: "aa", Path: "/app", ReadOnly: true, Created: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
-			{Name: "dev", Hash: "bb", Path: "/"},
+			{Name: "dev", Hash: "bb", Path: "/", AllowedFrom: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}},
 		}
 		for range 2 {
 			if err := b.PutTokens(ctx, want); err != nil {
@@ -233,7 +234,7 @@ func Run(t *testing.T, newBackend func() storage.Backend) {
 			}
 		}
 		got, err := b.Tokens(ctx)
-		if err != nil || len(got) != 2 || got[0].Name != "ci" || !got[0].ReadOnly || !got[0].Created.Equal(want[0].Created) || got[1].Hash != "bb" {
+		if err != nil || len(got) != 2 || got[0].Name != "ci" || !got[0].ReadOnly || !got[0].Created.Equal(want[0].Created) || got[1].Hash != "bb" || !slices.Equal(got[1].AllowedFrom, want[1].AllowedFrom) {
 			t.Fatalf("Tokens = %+v, %v", got, err)
 		}
 		if paths, _ := b.List(ctx, "/"); len(paths) != 0 {

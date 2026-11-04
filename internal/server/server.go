@@ -65,6 +65,8 @@ type Server struct {
 	// TrustedProxies are the addresses whose X-Forwarded-For header names
 	// the client, see clientAddr.
 	TrustedProxies []netip.Prefix
+	// AuditReads also audits reads of secret values.
+	AuditReads bool
 
 	secrets    *secrets.Service
 	tokens     *tokens.Store
@@ -210,6 +212,11 @@ func (s *Server) bearer(n need, next http.HandlerFunc) http.Handler {
 			return
 		}
 		r = r.WithContext(context.WithValue(r.Context(), tokenKey{}, t))
+		if err := s.allowedFrom(t, r); err != nil {
+			s.audit(r, "api", "auth", r.URL.Query().Get("path"), nil, err)
+			writeError(w, http.StatusForbidden, err.Error())
+			return
+		}
 		if err := allowed(t, n, r.URL.Query().Get("path")); err != nil {
 			s.audit(r, "api", "auth", r.URL.Query().Get("path"), nil, err)
 			writeError(w, http.StatusForbidden, err.Error())
@@ -217,6 +224,18 @@ func (s *Server) bearer(n need, next http.HandlerFunc) http.Handler {
 		}
 		next(w, r)
 	})
+}
+
+// allowedFrom rejects a token used from an address outside its allowlist.
+func (s *Server) allowedFrom(t tokens.Token, r *http.Request) error {
+	if len(t.AllowedFrom) == 0 {
+		return nil
+	}
+	client := s.clientAddr(r)
+	if addr, err := netip.ParseAddr(client); err == nil && containsAddr(t.AllowedFrom, addr) {
+		return nil
+	}
+	return fmt.Errorf("token %s is not allowed from %s", t.Name, client)
 }
 
 func allowed(t tokens.Token, n need, path string) error {
@@ -257,8 +276,22 @@ func (s *Server) apiListPaths(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string][]string{"paths": paths})
 }
 
+// auditRead audits a read of the values of keys at path when AuditReads is
+// set.
+func (s *Server) auditRead(r *http.Request, source, op, path string, data map[string]string, err error, extra ...any) {
+	if s.AuditReads {
+		s.audit(r, source, op, path, slices.Sorted(maps.Keys(data)), err, extra...)
+	}
+}
+
 func (s *Server) apiGet(w http.ResponseWriter, r *http.Request) {
-	data, err := s.secrets.Get(r.Context(), r.URL.Query().Get("path"), r.URL.Query().Get("recursive") == "true")
+	path, recursive := r.URL.Query().Get("path"), r.URL.Query().Get("recursive") == "true"
+	data, err := s.secrets.Get(r.Context(), path, recursive)
+	if recursive {
+		s.auditRead(r, "api", "read", path, data, err, "recursive", true)
+	} else {
+		s.auditRead(r, "api", "read", path, data, err)
+	}
 	if err != nil {
 		s.serviceError(w, r, err)
 		return
@@ -432,6 +465,7 @@ func (s *Server) apiVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v, err := s.secrets.Version(r.Context(), r.URL.Query().Get("path"), n)
+	s.auditRead(r, "api", "read_version", r.URL.Query().Get("path"), v.Data, err, "version", n)
 	if err != nil {
 		s.serviceError(w, r, err)
 		return

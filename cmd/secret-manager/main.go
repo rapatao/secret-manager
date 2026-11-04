@@ -48,7 +48,7 @@ Server:
   server [--addr :8080] [--metrics-addr :8081] [--storage kubernetes|file]
          [--namespace NS] [--file secret-manager.json] [--controller=true]
          [--history-limit 10] [--last-used-flush 30m] [--log-level info]
-         [--trusted-proxies CIDR,...]
+         [--trusted-proxies CIDR,...] [--audit-reads]
          [--backup-dir DIR [--backup-interval 24h] [--backup-keep 7]
           [--backup-history]]
                                                run controller, API and Web UI
@@ -96,6 +96,7 @@ func runServer(args []string) error {
 	runController := fs.Bool("controller", true, "run the SecretSync controller")
 	historyLimit := fs.Int("history-limit", 10, "versions kept per path, current included, 0 to disable history")
 	cacheMaxAge := fs.Duration("cache-max-age", server.DefaultCacheMaxAge, "default time clients may use cached secrets while the server is unreachable, 0 to disable their cache; integrations may override it")
+	auditReads := fs.Bool("audit-reads", false, "also audit reads of secret values: API reads and Web UI path views")
 	trustedProxies := fs.String("trusted-proxies", "", "comma-separated CIDRs of proxies whose X-Forwarded-For names the client, for sign-in limits and the audit log")
 	lastUsedFlush := fs.Duration("last-used-flush", 30*time.Minute, "time between saves of the last use of every integration")
 	var sched server.BackupSchedule
@@ -112,7 +113,7 @@ func runServer(args []string) error {
 	if *historyLimit < 0 {
 		return errors.New("--history-limit must not be negative")
 	}
-	proxies, err := server.ParseTrustedProxies(*trustedProxies)
+	proxies, err := server.ParsePrefixes(*trustedProxies)
 	if err != nil {
 		return fmt.Errorf("--trusted-proxies: %w", err)
 	}
@@ -222,6 +223,7 @@ func runServer(args []string) error {
 	}
 	handler.CacheMaxAge = *cacheMaxAge
 	handler.TrustedProxies = proxies
+	handler.AuditReads = *auditReads
 	if err := handler.LoadAudit(context.Background(), backend); err != nil {
 		return fmt.Errorf("load audit events: %w", err)
 	}

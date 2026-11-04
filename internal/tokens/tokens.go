@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"regexp"
 	"slices"
 	"strings"
@@ -80,8 +81,9 @@ func (s *Store) List(ctx context.Context) ([]Token, error) {
 
 // Create stores a new token named name for the paths under path, expiring at
 // expires unless it is zero, and returns it with its secret value, which is
-// not stored. A nil cacheMaxAge uses the server default.
-func (s *Store) Create(ctx context.Context, name, path string, readOnly bool, expires time.Time, cacheMaxAge *time.Duration) (Token, string, error) {
+// not stored. A nil cacheMaxAge uses the server default. An empty
+// allowedFrom accepts the token from any address.
+func (s *Store) Create(ctx context.Context, name, path string, readOnly bool, expires time.Time, cacheMaxAge *time.Duration, allowedFrom []netip.Prefix) (Token, string, error) {
 	if !nameRe.MatchString(name) {
 		return Token{}, "", fmt.Errorf("%w: token name %q must match [a-z0-9-]{1,63}", secrets.ErrInvalid, name)
 	}
@@ -106,7 +108,7 @@ func (s *Store) Create(ctx context.Context, name, path string, readOnly bool, ex
 		return Token{}, "", fmt.Errorf("%w: token %s already exists", secrets.ErrInvalid, name)
 	}
 	secret := Prefix + rand.Text()
-	t := Token{Name: name, Hash: hash(secret), Path: path, ReadOnly: readOnly, Created: now, CacheMaxAge: cacheMaxAge}
+	t := Token{Name: name, Hash: hash(secret), Path: path, ReadOnly: readOnly, Created: now, CacheMaxAge: cacheMaxAge, AllowedFrom: allowedFrom}
 	if !expires.IsZero() {
 		t.Expires = expires.UTC().Truncate(time.Second)
 	}
@@ -118,10 +120,10 @@ func (s *Store) Create(ctx context.Context, name, path string, readOnly bool, ex
 	return t, secret, nil
 }
 
-// Update changes the path, access, expiry and cache max age of the token
-// named name. Its secret value stays the same. expires must be in the future,
-// zero or the current expiry.
-func (s *Store) Update(ctx context.Context, name, path string, readOnly bool, expires time.Time, cacheMaxAge *time.Duration) (Token, error) {
+// Update changes the path, access, expiry, cache max age and allowed
+// addresses of the token named name. Its secret value stays the same. expires
+// must be in the future, zero or the current expiry.
+func (s *Store) Update(ctx context.Context, name, path string, readOnly bool, expires time.Time, cacheMaxAge *time.Duration, allowedFrom []netip.Prefix) (Token, error) {
 	path, err := secrets.NormalizePath(path)
 	if err != nil {
 		return Token{}, err
@@ -146,6 +148,7 @@ func (s *Store) Update(ctx context.Context, name, path string, readOnly bool, ex
 	}
 	tokens := slices.Clone(s.tokens)
 	tokens[i].Path, tokens[i].ReadOnly, tokens[i].Expires, tokens[i].CacheMaxAge = path, readOnly, expires, cacheMaxAge
+	tokens[i].AllowedFrom = allowedFrom
 	if err := s.backend.PutTokens(ctx, tokens); err != nil {
 		return Token{}, err
 	}

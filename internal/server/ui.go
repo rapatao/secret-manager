@@ -204,6 +204,11 @@ func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 	}
 	data, err := s.secrets.Get(r.Context(), path, false)
 	deleted := errors.Is(err, secrets.ErrNotFound) && len(versions) > 0
+	if deleted {
+		s.auditRead(r, "ui", "read", path, versions[0].Data, nil)
+	} else {
+		s.auditRead(r, "ui", "read", path, data, err)
+	}
 	if err != nil && !deleted {
 		s.uiError(w, r, err)
 		return

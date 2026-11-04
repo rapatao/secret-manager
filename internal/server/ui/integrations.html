@@ -21,7 +21,7 @@
 {{range .Integrations}}{{$t := .Token}}
 <tr>
 <td data-label="Name"><code>{{$t.Name}}</code></td>
-<td data-label="Access"><code>{{$t.Path}}</code> <span class="badge">{{if $t.ReadOnly}}read-only{{else}}read-write{{end}}</span></td>
+<td data-label="Access"><code>{{$t.Path}}</code> <span class="badge">{{if $t.ReadOnly}}read-only{{else}}read-write{{end}}</span>{{with .AllowedFrom}}<br><span class="muted">from</span> <code>{{.}}</code>{{end}}</td>
 <td class="muted" data-label="Created">{{time $t.Created}}</td>
 <td class="muted" data-label="Expires">{{if .Expired}}<span class="badge">expired</span> {{end}}{{if $t.Expires.IsZero}}never{{else}}{{time $t.Expires}}{{end}}</td>
 <td class="muted" data-label="Offline cache">{{.CacheLabel}}</td>
@@ -29,7 +29,7 @@
 <td class="actions">
 <button type="button" class="small" commandfor="edit-{{$t.Name}}" command="show-modal">Edit</button>
 <dialog id="edit-{{$t.Name}}">
-<form class="stack edit-integration" method="post" action="/integrations/update" data-name="{{$t.Name}}" data-path="{{$t.Path}}" data-access="{{if $t.ReadOnly}}read-only{{else}}read-write{{end}}" data-cache="{{.CacheLabel}}">
+<form class="stack edit-integration" method="post" action="/integrations/update" data-name="{{$t.Name}}" data-path="{{$t.Path}}" data-access="{{if $t.ReadOnly}}read-only{{else}}read-write{{end}}" data-cache="{{.CacheLabel}}" data-allowed="{{or .AllowedFrom "any"}}">
 <h3>Edit integration <code>{{$t.Name}}</code></h3>
 <p class="muted">The token stays the same; clients using it get the new access on their next request.</p>
 {{template "grant-fields" .}}

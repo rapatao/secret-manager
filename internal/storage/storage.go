@@ -4,6 +4,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"strings"
 	"time"
 )
@@ -70,7 +71,8 @@ type AuditEvent struct {
 // Token is an access token limited to the paths under Path. Hash is the hex
 // SHA-256 of the token; the token itself is never stored. A zero Expires
 // never expires. A nil CacheMaxAge uses the server default for how long
-// clients may use cached secrets while the server is unreachable.
+// clients may use cached secrets while the server is unreachable. A token
+// with AllowedFrom is only accepted from client addresses in those ranges.
 type Token struct {
 	Name     string    `json:"name"`
 	Hash     string    `json:"hash"`
@@ -81,6 +83,7 @@ type Token struct {
 	LastUsed time.Time `json:"lastUsed,omitzero"`
 
 	CacheMaxAge *time.Duration `json:"cacheMaxAge,omitempty"`
+	AllowedFrom []netip.Prefix `json:"allowedFrom,omitempty"`
 }
 
 // Version is a snapshot of the data stored at a path.
