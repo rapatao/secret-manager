@@ -117,6 +117,7 @@ The chart sets these; set them yourself when running `secret-manager server` out
 | `--history-limit` | `10` | Versions kept per path, current included, `0` disables history |
 | `--cache-max-age` | `168h` | How long clients may use the secrets they read while the server is unreachable, `0` disables their [offline cache](#offline-cache). Integrations may override it |
 | `--trusted-proxies` | | Comma-separated CIDRs or addresses of the proxies in front of the server, see [Client address](#client-address) |
+| `--audit-reads` | `false` | Also audit reads of secret values, see [Audit log](#audit-log) |
 | `--last-used-flush` | `30m` | Time between saves of the last use of every [integration](#integrations), also saved on shutdown |
 | `--backup-dir` | | Directory receiving [scheduled backups](#scheduled-backups), empty disables them |
 | `--backup-interval` | `24h` | Time between scheduled backups |
@@ -309,6 +310,7 @@ An integration is a token (`smt_...`) for API clients: the CLI, CI jobs, other m
 | Read-only | Reads only, or reads and writes |
 | Expires | 7, 30 or 90 days, 1 year, the end of a chosen day (UTC), or never |
 | Offline cache | Server default (`--cache-max-age`), disabled, 1 hour, 1, 7 or 30 days: how long the CLI may use the secrets it read while the server is unreachable |
+| Allowed addresses | Optional, comma-separated addresses or CIDRs (`10.0.0.0/8, 192.168.1.5`). Empty accepts the token from any address |
 
 What an integration can do:
 
@@ -322,12 +324,12 @@ What an integration can do:
 | Backup | no | yes |
 | Restore (not read-only) | no | yes |
 
-A request outside the integration's scope gets `403`; an unknown, revoked or expired token gets `401`. Managing integrations and approving logins happen only in the Web UI.
+A request outside the integration's scope, or from a [client address](#client-address) outside its allowed addresses, gets `403` (`token ci is not allowed from 192.0.2.1`); an unknown, revoked or expired token gets `401`. Managing integrations and approving logins happen only in the Web UI.
 
 ### Creating integrations
 
 - `servers login` creates one after approval in the browser, see [Servers and login](#servers-and-login).
-- The Integrations page of the Web UI creates one after a confirmation dialog that shows its name, path, access, expiry and offline cache. The token is shown once. Use it with `SECRET_MANAGER_URL` and `SECRET_MANAGER_TOKEN`, or `servers login --token-stdin`.
+- The Integrations page of the Web UI creates one after a confirmation dialog that shows its name, path, access, expiry, offline cache and allowed addresses. The token is shown once. Use it with `SECRET_MANAGER_URL` and `SECRET_MANAGER_TOKEN`, or `servers login --token-stdin`.
 
 The server keeps only the SHA-256 hash of each token, in the storage backend (a Secret named `sm-tokens` with the `kubernetes` backend). Integrations are loaded once and kept in memory, so changes made directly on the stored tokens need a server restart.
 
@@ -335,7 +337,7 @@ The server keeps only the SHA-256 hash of each token, in the storage backend (a 
 
 The Integrations page lists every integration with its path, access, creation time, expiry, offline cache and last use. Expired integrations stay listed, marked expired, until revoked.
 
-- Edit changes the path, read-only access, expiry and offline cache, keeping the token. The expiry can stay as it is or take any of the values above. Save opens a confirmation dialog listing the current and new values; clients get the new access on their next request. Save without changes closes the dialog. Cancel with unsaved changes asks whether to discard them or keep editing, and Cancel in the confirmation dialog discards the edit.
+- Edit changes the path, read-only access, expiry, offline cache and allowed addresses, keeping the token. The expiry can stay as it is or take any of the values above. Save opens a confirmation dialog listing the current and new values; clients get the new access on their next request. Save without changes closes the dialog. Cancel with unsaved changes asks whether to discard them or keep editing, and Cancel in the confirmation dialog discards the edit.
 - Revoke deletes the integration after a confirmation dialog.
 
 The last use is tracked in memory and saved every `--last-used-flush` (default `30m`) and on shutdown. It can lag behind, and a crash loses the uses since the last save.
@@ -389,7 +391,7 @@ Sessions last 12 hours and survive server restarts; changing the admin token sig
 
 By default the server identifies a client by the address of the connection, because `X-Forwarded-For` is written by whoever sends the request. Behind an Ingress, that is the Ingress pod for every client. With `--trusted-proxies` (chart value `trustedProxies`, a list), a request whose connection comes from one of those ranges is attributed to the rightmost `X-Forwarded-For` address outside them, after joining every `X-Forwarded-For` header line in order. Proxies such as HAProxy (`option forwardfor`), nginx (`$proxy_add_x_forwarded_for`) and cloud load balancers append the address they saw, so entries the client wrote stay on the left and are never used. A malformed entry stops the search at the last valid one.
 
-The client address is used for sign-in limits, and is logged as `client` in the [audit log](#audit-log) when it differs from the connection address. For it to be the real client, every hop has to see it:
+The client address is used for sign-in limits and [integration allowed addresses](#integrations), and is logged as `client` in the [audit log](#audit-log) when it differs from the connection address. For it to be the real client, every hop has to see it:
 
 - List only the proxies, for example the Ingress controller pods (k3s: `10.42.0.0/16`) and any load balancer in front of them. A range that covers clients lets them pick their own address.
 - A LoadBalancer Service with `externalTrafficPolicy: Cluster` replaces the client address with a node address before the Ingress controller sees it. Use `Local` to keep it. In MetalLB, Services sharing an IP (`metallb.io/allow-shared-ip`) must all use the same policy, and with `Local` also the same pod selector, so an Ingress controller sharing its IP with other Services needs its own IP first.
@@ -472,7 +474,7 @@ Every change made through the API or the Web UI, every backup, every Web UI logi
 {"level":"WARN","msg":"audit","source":"ui","op":"login","remote":"10.42.0.7:51240","error":"invalid token"}
 ```
 
-`op` is one of `set`, `delete_key`, `delete_path`, `create_path`, `copy_path` and `move_path` (with the target in `to`), `rollback`, `delete_version` (with the `version`), `backup`, `restore`, `create_token`, `update_token`, `revoke_token` (with the integration `name`), `authorize` (a CLI login approved or denied in the Web UI), `login` and `auth` (API bearer token, including expired tokens and requests an integration is not allowed to make). Requests made with an integration token carry its name in `token`. `client` is the [client address](#client-address) when trusted proxies resolve one that differs from `remote`. Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Other reads are not logged. The newest events are also shown on the Web UI [Audit](#web-ui) page.
+`op` is one of `read` and `read_version` (only with `--audit-reads`), `set`, `delete_key`, `delete_path`, `create_path`, `copy_path` and `move_path` (with the target in `to`), `rollback`, `delete_version` (with the `version`), `backup`, `restore`, `create_token`, `update_token`, `revoke_token` (with the integration `name`), `authorize` (a CLI login approved or denied in the Web UI), `login` and `auth` (API bearer token, including expired tokens and requests an integration is not allowed to make). Requests made with an integration token carry its name in `token`. `client` is the [client address](#client-address) when trusted proxies resolve one that differs from `remote`. Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Reads are not logged unless the server runs with `--audit-reads` (chart value `auditReads`): then every `GET /api/v1/secrets` is logged as `read` with the key names returned (and `recursive`), every `GET /api/v1/history/{version}` as `read_version` with the `version`, and every Web UI path page view as `read` with source `ui`. `get`, `export` and `run` served from the [offline cache](#offline-cache) do not reach the server and are not logged. Reads can far outnumber changes, so the Audit page, which keeps the newest 500 events, may then show only recent reads. The newest events are also shown on the Web UI [Audit](#web-ui) page.
 
 ## Security notes
 
@@ -483,7 +485,7 @@ Every change made through the API or the Web UI, every backup, every Web UI logi
 - With the `file` backend, restrict access to the file and its directory. Without an encryption key, values are stored in plain text in it.
 - With the controller enabled, the server can manage Secrets in every namespace, where `SecretSync` targets live. With `controller.enabled=false` it can only manage Secrets in its own namespace.
 - The metrics port has no authentication. It exposes no secret values, but restrict it with a NetworkPolicy if other workloads should not read it.
-- The admin token signs in to the Web UI, which can read every value and create integrations. Keep it long and random, and rotate it by updating its Secret and restarting the server. Give every client its own [integration](#integrations), as narrow and short-lived as it allows, and revoke it when it is no longer used.
+- The admin token signs in to the Web UI, which can read every value and create integrations. Keep it long and random, and rotate it by updating its Secret and restarting the server. Give every client its own [integration](#integrations), as narrow and short-lived as it allows, restricted to the addresses it runs from when they are known, and revoke it when it is no longer used.
 - Failed Web UI sign-ins are slowed down per [client address](#client-address). Without `--trusted-proxies`, every client behind an Ingress shares one limit; limit sign-in attempts at the Ingress too if the Web UI is reachable from the internet. Never list client ranges in `--trusted-proxies`.
 - Approve a CLI login only if you started it. For a device login, check that the code on the approval page matches the one in your terminal.
 

@@ -35,6 +35,11 @@ encryption:
 # e.g. a LoadBalancer Service with externalTrafficPolicy: Local.
 trustedProxies: []
 
+# Also audit reads of secret values (API reads and Web UI path views), with
+# key names only. Reads can outnumber changes in the Audit page, which keeps
+# the newest 500 events.
+auditReads: false
+
 service:
   type: ClusterIP
   port: 80

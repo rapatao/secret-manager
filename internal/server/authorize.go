@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
@@ -91,6 +92,8 @@ type grant struct {
 	keep bool
 	// cacheMaxAge is nil for the server default.
 	cacheMaxAge *time.Duration
+	// allowedFrom is empty to accept the token from any address.
+	allowedFrom []netip.Prefix
 }
 
 // login is a CLI login waiting for approval in the Web UI, then for the CLI
@@ -176,11 +179,16 @@ func loopbackRedirect(redirect string) (*url.URL, error) {
 }
 
 // parseGrant reads the integration fields of a form: name, path, read-only,
-// expiry and offline cache. Only an edit may keep the current expiry.
+// expiry, offline cache and allowed addresses. Only an edit may keep the
+// current expiry.
 func parseGrant(r *http.Request, now time.Time, edit bool) (grant, error) {
 	g := grant{name: r.PostFormValue("name"), path: r.PostFormValue("path"), readOnly: r.PostFormValue("read-only") == "on"}
 	if g.path == "" {
 		g.path = "/"
+	}
+	var err error
+	if g.allowedFrom, err = ParsePrefixes(r.PostFormValue("allowed-from")); err != nil {
+		return grant{}, fmt.Errorf("%w: allowed addresses: %w", secrets.ErrInvalid, err)
 	}
 	if v := r.PostFormValue("cache-max-age"); v != "" && v != "default" {
 		d, err := time.ParseDuration(v)
@@ -213,7 +221,7 @@ func parseGrant(r *http.Request, now time.Time, edit bool) (grant, error) {
 }
 
 func (s *Server) createToken(r *http.Request, source string, g grant) (tokens.Token, string, error) {
-	t, secret, err := s.tokens.Create(r.Context(), g.name, g.path, g.readOnly, g.expires, g.cacheMaxAge)
+	t, secret, err := s.tokens.Create(r.Context(), g.name, g.path, g.readOnly, g.expires, g.cacheMaxAge, g.allowedFrom)
 	s.audit(r, source, "create_token", g.path, nil, err, "name", g.name)
 	return t, secret, err
 }
@@ -255,8 +263,9 @@ func (s *Server) renderIntegrations(w http.ResponseWriter, r *http.Request, stat
 			"Presets":      presets,
 			"CacheOptions": cacheOptions,
 			"CacheLabel":   s.cacheLabelOf(t.CacheMaxAge),
+			"AllowedFrom":  formatPrefixes(t.AllowedFrom),
 			"Grant": map[string]any{"Name": t.Name, "Path": t.Path, "ReadOnly": t.ReadOnly, "Expires": "keep",
-				"Cache": cacheValue(t.CacheMaxAge), "Edit": true},
+				"Cache": cacheValue(t.CacheMaxAge), "AllowedFrom": formatPrefixes(t.AllowedFrom), "Edit": true},
 		})
 	}
 	s.render(w, status, "integrations", map[string]any{
@@ -264,7 +273,7 @@ func (s *Server) renderIntegrations(w http.ResponseWriter, r *http.Request, stat
 		"Created":      created,
 		"Presets":      expiryPresets,
 		"CacheOptions": cacheOptions,
-		"Grant":        map[string]any{"Path": "/", "Expires": "90d", "Cache": "default"},
+		"Grant":        map[string]any{"Path": "/", "Expires": "90d", "Cache": "default", "AllowedFrom": ""},
 		"Error":        r.URL.Query().Get("error"),
 	})
 }
@@ -297,7 +306,7 @@ func (s *Server) uiUpdateIntegration(w http.ResponseWriter, r *http.Request) {
 		g.expires, err = s.currentExpiry(r, g.name)
 	}
 	if err == nil {
-		_, err = s.tokens.Update(r.Context(), g.name, g.path, g.readOnly, g.expires, g.cacheMaxAge)
+		_, err = s.tokens.Update(r.Context(), g.name, g.path, g.readOnly, g.expires, g.cacheMaxAge, g.allowedFrom)
 	}
 	s.audit(r, "ui", "update_token", g.path, nil, err, "name", g.name)
 	if err != nil {
@@ -341,7 +350,7 @@ func (s *Server) uiAuthorizeForm(w http.ResponseWriter, r *http.Request) {
 	data := map[string]any{
 		"Presets":      expiryPresets,
 		"CacheOptions": s.cacheOptions(),
-		"Grant":        map[string]any{"Name": q.Get("name"), "Path": "/", "Expires": "90d", "Cache": "default"},
+		"Grant":        map[string]any{"Name": q.Get("name"), "Path": "/", "Expires": "90d", "Cache": "default", "AllowedFrom": ""},
 		"Error":        q.Get("error"),
 	}
 	if code := strings.ToUpper(q.Get("user_code")); code != "" {

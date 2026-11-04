@@ -21,7 +21,7 @@ func TestStore(t *testing.T) {
 	}
 	s := New(backend)
 
-	tok, secret, err := s.Create(ctx, "ci", "/app/", true, time.Time{}, nil)
+	tok, secret, err := s.Create(ctx, "ci", "/app/", true, time.Time{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestStore(t *testing.T) {
 		t.Fatalf("Create = %+v, %q", tok, secret)
 	}
 	for _, bad := range [][2]string{{"ci", "/app"}, {"Bad Name", "/app"}, {"ok", "app"}} {
-		if _, _, err := s.Create(ctx, bad[0], bad[1], false, time.Time{}, nil); !errors.Is(err, secrets.ErrInvalid) {
+		if _, _, err := s.Create(ctx, bad[0], bad[1], false, time.Time{}, nil, nil); !errors.Is(err, secrets.ErrInvalid) {
 			t.Errorf("Create(%q, %q) = %v, want ErrInvalid", bad[0], bad[1], err)
 		}
 	}
@@ -44,7 +44,7 @@ func TestStore(t *testing.T) {
 		}
 	}
 
-	if _, _, err := s.Create(ctx, "past", "/", false, time.Now().Add(-time.Hour), nil); !errors.Is(err, secrets.ErrInvalid) {
+	if _, _, err := s.Create(ctx, "past", "/", false, time.Now().Add(-time.Hour), nil, nil); !errors.Is(err, secrets.ErrInvalid) {
 		t.Errorf("Create with past expiry = %v, want ErrInvalid", err)
 	}
 
@@ -61,16 +61,16 @@ func TestStore(t *testing.T) {
 	}
 
 	in := time.Now().Add(time.Hour)
-	if got, err := s.Update(ctx, "ci", "/other/", false, in, nil); err != nil || got.Path != "/other" || got.ReadOnly || !got.Expires.Equal(in.UTC().Truncate(time.Second)) {
+	if got, err := s.Update(ctx, "ci", "/other/", false, in, nil, nil); err != nil || got.Path != "/other" || got.ReadOnly || !got.Expires.Equal(in.UTC().Truncate(time.Second)) {
 		t.Fatalf("Update = %+v, %v", got, err)
 	}
 	if got, ok, _ := s.Lookup(ctx, secret); !ok || got.Path != "/other" {
 		t.Fatalf("Lookup after Update = %+v, %v", got, ok)
 	}
-	if _, err := s.Update(ctx, "ci", "/", false, time.Now().Add(-time.Hour), nil); !errors.Is(err, secrets.ErrInvalid) {
+	if _, err := s.Update(ctx, "ci", "/", false, time.Now().Add(-time.Hour), nil, nil); !errors.Is(err, secrets.ErrInvalid) {
 		t.Errorf("Update with past expiry = %v, want ErrInvalid", err)
 	}
-	if _, err := s.Update(ctx, "missing", "/", false, time.Time{}, nil); !errors.Is(err, secrets.ErrNotFound) {
+	if _, err := s.Update(ctx, "missing", "/", false, time.Time{}, nil, nil); !errors.Is(err, secrets.ErrNotFound) {
 		t.Errorf("Update missing = %v, want ErrNotFound", err)
 	}
 

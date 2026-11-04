@@ -6,7 +6,7 @@ import (
 )
 
 func TestClientAddr(t *testing.T) {
-	proxies, err := ParseTrustedProxies("10.42.0.0/16, 192.168.1.5")
+	proxies, err := ParsePrefixes("10.42.0.0/16, 192.168.1.5")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,8 +38,8 @@ func TestClientAddr(t *testing.T) {
 		t.Errorf("without trusted proxies: got %s", got)
 	}
 	for _, bad := range []string{"10.42.0.0/99", "not-an-ip"} {
-		if _, err := ParseTrustedProxies(bad); err == nil {
-			t.Errorf("ParseTrustedProxies(%q) accepted", bad)
+		if _, err := ParsePrefixes(bad); err == nil {
+			t.Errorf("ParsePrefixes(%q) accepted", bad)
 		}
 	}
 }

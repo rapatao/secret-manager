@@ -179,5 +179,7 @@ select { font: inherit; color: inherit; background: var(--bg); border: 1px solid
 <span class="muted">The integration works through the end of that day, UTC.</span></label>
 <label>Offline cache <select name="cache-max-age">{{$cache := .Grant.Cache}}{{range .CacheOptions}}<option value="{{.Value}}"{{if eq .Value $cache}} selected{{end}}>{{.Label}}</option>{{end}}</select>
 <span class="muted">How long the CLI may use the secrets it read while the server is unreachable.</span></label>
+<label>Allowed addresses <input name="allowed-from" value="{{.Grant.AllowedFrom}}" class="mono" placeholder="any" autocomplete="off">
+<span class="muted">Optional. Comma-separated addresses or CIDRs, e.g. <code>10.0.0.0/8, 192.168.1.5</code>. Empty accepts the token from any address.</span></label>
 </fieldset>
 {{end}}

@@ -57,7 +57,7 @@ func newTestServer(t *testing.T) *httptest.Server {
 	return ts
 }
 
-func newLoggedServer(t *testing.T) (*httptest.Server, *syncBuffer) {
+func newLoggedServer(t *testing.T, configure ...func(*Server)) (*httptest.Server, *syncBuffer) {
 	t.Helper()
 	backend := k8sstorage.New(fake.NewClientBuilder().Build(), "sm")
 	svc := secrets.New(backend, nil)
@@ -73,6 +73,9 @@ func newLoggedServer(t *testing.T) (*httptest.Server, *syncBuffer) {
 	s.Version = "v9.9.9-test"
 	logs := &syncBuffer{}
 	s.log = slog.New(slog.NewJSONHandler(logs, nil))
+	for _, f := range configure {
+		f(s)
+	}
 	ts := httptest.NewTLSServer(s)
 	t.Cleanup(ts.Close)
 	return ts, logs
@@ -631,7 +634,7 @@ func TestUILoginRateLimitBehindProxy(t *testing.T) {
 	}
 	logs := &syncBuffer{}
 	s.log = slog.New(slog.NewJSONHandler(logs, nil))
-	if s.TrustedProxies, err = ParseTrustedProxies("127.0.0.1,::1"); err != nil {
+	if s.TrustedProxies, err = ParsePrefixes("127.0.0.1,::1"); err != nil {
 		t.Fatal(err)
 	}
 	ts := httptest.NewTLSServer(s)
@@ -896,6 +899,81 @@ func createToken(t *testing.T, ts *httptest.Server, form url.Values) string {
 		t.Fatalf("create integration %v: %d\n%s", form, code, body)
 	}
 	return m[1]
+}
+
+func doFrom(t *testing.T, ts *httptest.Server, path, auth, forwarded string) int {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+path, nil)
+	req.Header.Set("Authorization", "Bearer "+auth)
+	req.Header.Set("X-Forwarded-For", forwarded)
+	res, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	return res.StatusCode
+}
+
+func TestIntegrationAllowedFrom(t *testing.T) {
+	ts, logs := newLoggedServer(t, func(s *Server) { s.TrustedProxies, _ = ParsePrefixes("127.0.0.1, ::1") })
+	do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"A":"1"}`)
+	ci := createToken(t, ts, url.Values{"name": {"ci"}, "path": {"/app"}, "allowed-from": {"198.51.100.0/24, 203.0.113.9"}})
+	if code := doFrom(t, ts, "/api/v1/secrets?path=/app", ci, "198.51.100.7"); code != http.StatusOK {
+		t.Fatalf("allowed range: %d", code)
+	}
+	if code := doFrom(t, ts, "/api/v1/secrets?path=/app", ci, "203.0.113.9"); code != http.StatusOK {
+		t.Fatalf("allowed address: %d", code)
+	}
+	if code := doFrom(t, ts, "/api/v1/secrets?path=/app", ci, "198.51.100.7, 192.0.2.1"); code != http.StatusForbidden {
+		t.Fatalf("client entry on the left must not pass: %d", code)
+	}
+	if !strings.Contains(logs.String(), `"error":"token ci is not allowed from 192.0.2.1"`) {
+		t.Fatalf("rejection not audited:\n%s", logs)
+	}
+	if code := doFrom(t, ts, "/api/v1/info", apiToken, "192.0.2.1"); code != http.StatusOK {
+		t.Fatalf("token without allowlist: %d", code)
+	}
+
+	c := uiClient(t, ts)
+	postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL)
+	_, body := get(t, c, ts.URL+"/integrations")
+	if !strings.Contains(body, `<code>198.51.100.0/24, 203.0.113.9</code>`) || !strings.Contains(body, `name="allowed-from" value="198.51.100.0/24, 203.0.113.9"`) {
+		t.Fatalf("allowlist not shown:\n%s", body)
+	}
+	edit := url.Values{"name": {"ci"}, "path": {"/app"}, "expires": {"keep"}, "allowed-from": {""}, "confirm": {"yes"}}
+	postForm(t, c, ts, "/integrations/update", edit, ts.URL)
+	if code := doFrom(t, ts, "/api/v1/secrets?path=/app", ci, "192.0.2.1"); code != http.StatusOK {
+		t.Fatalf("after clearing the allowlist: %d", code)
+	}
+	edit.Set("allowed-from", "not-an-address")
+	_, body = postForm(t, c, ts, "/integrations/update", edit, ts.URL)
+	if !strings.Contains(body, "allowed addresses") {
+		t.Fatalf("invalid allowlist accepted:\n%s", body)
+	}
+}
+
+func TestAuditReads(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		ts, logs := newLoggedServer(t, func(s *Server) { s.AuditReads = on })
+		do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"PASS":"hunter2"}`)
+		do(t, ts, "GET", "/api/v1/secrets?path=/app", apiToken, "")
+		do(t, ts, "GET", "/api/v1/history/1?path=/app", apiToken, "")
+		c := uiClient(t, ts)
+		postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL)
+		get(t, c, ts.URL+"/secrets/path?path=/app")
+
+		out := logs.String()
+		reads := strings.Count(out, `"op":"read"`) + strings.Count(out, `"op":"read_version"`)
+		if want := map[bool]int{false: 0, true: 3}[on]; reads != want {
+			t.Fatalf("audit reads %v: %d read events, want %d\n%s", on, reads, want, out)
+		}
+		if on && (!strings.Contains(out, `"source":"ui","op":"read"`) || !strings.Contains(out, `"keys":["PASS"],"version":1`)) {
+			t.Fatalf("read events:\n%s", out)
+		}
+		if strings.Contains(out, "hunter2") {
+			t.Fatal("secret value logged")
+		}
+	}
 }
 
 func TestScopedTokens(t *testing.T) {
