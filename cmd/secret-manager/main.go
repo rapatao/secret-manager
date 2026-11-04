@@ -48,6 +48,7 @@ Server:
   server [--addr :8080] [--metrics-addr :8081] [--storage kubernetes|file]
          [--namespace NS] [--file secret-manager.json] [--controller=true]
          [--history-limit 10] [--last-used-flush 30m] [--log-level info]
+         [--trusted-proxies CIDR,...]
          [--backup-dir DIR [--backup-interval 24h] [--backup-keep 7]
           [--backup-history]]
                                                run controller, API and Web UI
@@ -95,6 +96,7 @@ func runServer(args []string) error {
 	runController := fs.Bool("controller", true, "run the SecretSync controller")
 	historyLimit := fs.Int("history-limit", 10, "versions kept per path, current included, 0 to disable history")
 	cacheMaxAge := fs.Duration("cache-max-age", server.DefaultCacheMaxAge, "default time clients may use cached secrets while the server is unreachable, 0 to disable their cache; integrations may override it")
+	trustedProxies := fs.String("trusted-proxies", "", "comma-separated CIDRs of proxies whose X-Forwarded-For names the client, for sign-in limits and the audit log")
 	lastUsedFlush := fs.Duration("last-used-flush", 30*time.Minute, "time between saves of the last use of every integration")
 	var sched server.BackupSchedule
 	fs.StringVar(&sched.Dir, "backup-dir", "", "directory receiving scheduled backups, empty to disable them")
@@ -109,6 +111,10 @@ func runServer(args []string) error {
 
 	if *historyLimit < 0 {
 		return errors.New("--history-limit must not be negative")
+	}
+	proxies, err := server.ParseTrustedProxies(*trustedProxies)
+	if err != nil {
+		return fmt.Errorf("--trusted-proxies: %w", err)
 	}
 	if *lastUsedFlush <= 0 {
 		return errors.New("--last-used-flush must be positive")
@@ -140,7 +146,15 @@ func runServer(args []string) error {
 	var backend storage.Backend
 	switch *storageName {
 	case "kubernetes":
-		backend = k8sstorage.New(mgr.GetClient(), *namespace)
+		k8s := k8sstorage.New(mgr.GetClient(), *namespace)
+		labeled, err := k8s.LabelVersions(context.Background())
+		if err != nil {
+			return fmt.Errorf("label stored versions: %w", err)
+		}
+		if labeled > 0 {
+			slog.Info("labeled stored versions with their path hash", "versions", labeled)
+		}
+		backend = k8s
 	case "file":
 		var err error
 		if backend, err = filestorage.New(*filePath); err != nil {
@@ -207,6 +221,10 @@ func runServer(args []string) error {
 		return errors.New("--cache-max-age must not be negative")
 	}
 	handler.CacheMaxAge = *cacheMaxAge
+	handler.TrustedProxies = proxies
+	if err := handler.LoadAudit(context.Background(), backend); err != nil {
+		return fmt.Errorf("load audit events: %w", err)
+	}
 	handler.Settings = server.Settings{Storage: *storageName, Encryption: key != nil, Controller: *runController, Backups: sched}
 	httpServer := &http.Server{Addr: *addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 
@@ -216,13 +234,18 @@ func runServer(args []string) error {
 	if sched.Dir != "" {
 		go handler.RunBackups(ctx, sched)
 	}
-	flushed := make(chan struct{})
+	flushed := make(chan struct{}, 2)
 	go func() {
 		integrations.RunFlush(ctx, *lastUsedFlush)
-		close(flushed)
+		flushed <- struct{}{}
+	}()
+	go func() {
+		handler.RunAuditFlush(ctx, server.AuditFlushInterval)
+		flushed <- struct{}{}
 	}()
 	defer func() {
 		cancel()
+		<-flushed
 		<-flushed
 	}()
 	if mgr != nil {

@@ -18,6 +18,7 @@ type memBackend struct {
 	data     map[string]map[string]string
 	versions map[string][]storage.Version
 	tokens   []storage.Token
+	audit    []storage.AuditEvent
 	failPut  bool
 }
 
@@ -71,6 +72,19 @@ func (m *memBackend) PutTokens(_ context.Context, tokens []storage.Token) error 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.tokens = slices.Clone(tokens)
+	return nil
+}
+
+func (m *memBackend) AuditEvents(_ context.Context) ([]storage.AuditEvent, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.audit), nil
+}
+
+func (m *memBackend) PutAuditEvents(_ context.Context, events []storage.AuditEvent) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.audit = slices.Clone(events)
 	return nil
 }
 

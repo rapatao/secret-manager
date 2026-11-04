@@ -44,3 +44,26 @@ func TestIgnoresUnmanagedSecret(t *testing.T) {
 		t.Fatal("Put over unmanaged secret: want error")
 	}
 }
+
+func TestLabelVersions(t *testing.T) {
+	old := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Namespace:   "ns",
+		Name:        VersionName("/app", 1),
+		Labels:      map[string]string{HistoryLabel: "true"},
+		Annotations: map[string]string{PathAnnotation: "/app", VersionAnnotation: "1", TimeAnnotation: "2026-01-02T03:04:05Z"},
+	}}
+	b := New(fake.NewClientBuilder().WithObjects(old).Build(), "ns")
+	ctx := context.Background()
+	if vs, _ := b.Versions(ctx, "/app"); len(vs) != 0 {
+		t.Fatalf("unlabeled version found: %v", vs)
+	}
+	if n, err := b.LabelVersions(ctx); err != nil || n != 1 {
+		t.Fatalf("LabelVersions = %d, %v", n, err)
+	}
+	if vs, err := b.Versions(ctx, "/app"); err != nil || len(vs) != 1 || vs[0].Number != 1 {
+		t.Fatalf("Versions after labeling = %v, %v", vs, err)
+	}
+	if n, _ := b.LabelVersions(ctx); n != 0 {
+		t.Fatalf("second LabelVersions labeled %d", n)
+	}
+}

@@ -137,11 +137,21 @@ func localPath(next string) string {
 }
 
 func (s *Server) uiLogin(w http.ResponseWriter, r *http.Request) {
+	addr, now := s.clientAddr(r), time.Now()
+	if wait := s.logins.wait(addr, now); wait > 0 {
+		err := fmt.Errorf("too many failed sign-ins, try again in %s", wait.Round(time.Second))
+		s.audit(r, "ui", "login", "", nil, err)
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Round(time.Second).Seconds())))
+		s.render(w, http.StatusTooManyRequests, "login", map[string]any{"Error": err.Error(), "Next": r.PostFormValue("next")})
+		return
+	}
 	if !s.validToken(r.PostFormValue("token")) {
+		s.logins.fail(addr, now)
 		s.audit(r, "ui", "login", "", nil, errInvalidToken)
 		s.render(w, http.StatusUnauthorized, "login", map[string]any{"Error": "invalid token", "Next": r.PostFormValue("next")})
 		return
 	}
+	s.logins.succeed(addr)
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    s.sessions.create(),
@@ -222,7 +232,70 @@ func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 	for _, k := range slices.Sorted(maps.Keys(data)) {
 		entries = append(entries, entry{k, data[k], changed[k]})
 	}
-	s.render(w, http.StatusOK, "path", map[string]any{"Path": path, "Deleted": deleted, "Entries": entries, "History": history, "Error": r.URL.Query().Get("error")})
+	cmp, err := compareVersions(r.URL.Query(), deleted, data, versions)
+	if err != nil {
+		s.uiError(w, r, err)
+		return
+	}
+	from, to := "", "current"
+	if deleted {
+		to = ""
+	}
+	if len(versions) > 0 {
+		from = strconv.Itoa(versions[min(1, len(versions)-1)].Number)
+		if deleted {
+			to = strconv.Itoa(versions[0].Number)
+		}
+	}
+	if cmp != nil {
+		from, to = cmp.From, cmp.To
+	}
+	s.render(w, http.StatusOK, "path", map[string]any{
+		"Path": path, "Deleted": deleted, "Entries": entries, "History": history,
+		"Compare": cmp, "From": from, "To": to, "Error": r.URL.Query().Get("error"),
+	})
+}
+
+// comparison is the difference between two snapshots of a path, From and To
+// being "current" or a version number.
+type comparison struct {
+	From, To string
+	Changes  []uiChange
+}
+
+// compareVersions compares the snapshots named by the from and to query
+// parameters, nil when they are absent.
+func compareVersions(q url.Values, deleted bool, current map[string]string, versions []secrets.Version) (*comparison, error) {
+	if q.Get("from") == "" && q.Get("to") == "" {
+		return nil, nil
+	}
+	snapshot := func(name string) (map[string]string, error) {
+		if name == "current" && !deleted {
+			return current, nil
+		}
+		n, err := strconv.Atoi(name)
+		if err == nil {
+			for _, v := range versions {
+				if v.Number == n {
+					return v.Data, nil
+				}
+			}
+		}
+		return nil, fmt.Errorf("%w: no version %q to compare", secrets.ErrInvalid, name)
+	}
+	c := &comparison{From: q.Get("from"), To: q.Get("to")}
+	from, err := snapshot(c.From)
+	if err != nil {
+		return nil, err
+	}
+	to, err := snapshot(c.To)
+	if err != nil {
+		return nil, err
+	}
+	for _, ch := range secrets.Diff(from, to) {
+		c.Changes = append(c.Changes, uiChange{ch, from[ch.Key], to[ch.Key]})
+	}
+	return c, nil
 }
 
 type uiVersion struct {
@@ -274,6 +347,21 @@ func (s *Server) uiDeleteVersion(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	http.Redirect(w, r, pathURL(path), http.StatusSeeOther)
+}
+
+func (s *Server) uiCopyPath(w http.ResponseWriter, r *http.Request) {
+	path, to := r.PostFormValue("path"), r.PostFormValue("to")
+	op := r.PostFormValue("confirm")
+	if op != "copy" && op != "move" {
+		s.redirectWithError(w, r, pathURL(path)+"&", errUnconfirmed)
+		return
+	}
+	if err := s.copyPath(r, "ui", path, to, op == "move"); err != nil {
+		s.redirectWithError(w, r, pathURL(path)+"&", err)
+		return
+	}
+	normalized, _ := secrets.NormalizePath(to)
+	http.Redirect(w, r, pathURL(normalized), http.StatusSeeOther)
 }
 
 func (s *Server) uiCreatePath(w http.ResponseWriter, r *http.Request) {

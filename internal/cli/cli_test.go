@@ -439,7 +439,7 @@ func TestServersListAndUse(t *testing.T) {
 
 func TestVersion(t *testing.T) {
 	h := newHarness(t)
-	want := "client: 1.5.0\nserver: 1.4.0 (" + h.url + ")\ncapabilities: backup, history, history-delete, integrations, paths, secrets\n"
+	want := "client: 1.5.0\nserver: 1.4.0 (" + h.url + ")\ncapabilities: backup, history, history-delete, integrations, paths, paths-copy, secrets\n"
 	if got := h.mustRun("version"); got != want {
 		t.Fatalf("version: %q", got)
 	}
@@ -557,6 +557,25 @@ func TestHistoryDelete(t *testing.T) {
 	}
 	if got := h.mustRun("get", "--path", "/tools", "A"); got != "3\n" {
 		t.Fatalf("current data after delete: %q", got)
+	}
+}
+
+func TestCopyAndMove(t *testing.T) {
+	h := newHarness(t)
+	h.mustRun("set", "--path", "/a", "K=1")
+	h.mustRun("copy", "--path", "/a", "--to", "/b")
+	h.mustRun("move", "--path", "/a", "--to", "/c")
+	if got := h.mustRun("list"); got != "/b\n/c\n" {
+		t.Fatalf("list after copy and move: %q", got)
+	}
+	if got := h.mustRun("get", "--path", "/c", "K"); got != "1\n" {
+		t.Fatalf("moved value: %q", got)
+	}
+	if code := h.run("copy", "--path", "/b"); code != 2 {
+		t.Fatalf("copy without --to: exit %d", code)
+	}
+	if code := h.run("copy", "--path", "/b", "--to", "/c"); code != 1 || !strings.Contains(h.stderr.String(), "already exists") {
+		t.Fatalf("copy onto an existing path: exit %d %s", code, h.stderr.String())
 	}
 }
 

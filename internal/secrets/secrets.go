@@ -209,6 +209,66 @@ func (s *Service) DeletePath(ctx context.Context, path string) error {
 	return nil
 }
 
+// CopyPath copies the data and versions of from to the new path to. With
+// move, from and its versions are deleted afterwards. Nested paths are not
+// copied. to must have neither data nor versions. A failure part way leaves
+// what was already written.
+func (s *Service) CopyPath(ctx context.Context, from, to string, move bool) error {
+	from, err := NormalizePath(from)
+	if err != nil {
+		return err
+	}
+	if to, err = NormalizePath(to); err != nil {
+		return err
+	}
+	if from == to {
+		return fmt.Errorf("%w: %s is both source and target", ErrInvalid, from)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	data, err := s.backend.Get(ctx, from)
+	if err != nil {
+		return err
+	}
+	versions, err := s.backend.Versions(ctx, from)
+	if err != nil {
+		return err
+	}
+	if _, err := s.backend.Get(ctx, to); err == nil {
+		return fmt.Errorf("%w: %s already exists", ErrInvalid, to)
+	} else if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	if existing, err := s.backend.Versions(ctx, to); err != nil {
+		return err
+	} else if len(existing) > 0 {
+		return fmt.Errorf("%w: %s still has versions of a deleted path; delete them first", ErrInvalid, to)
+	}
+
+	if err := s.backend.Put(ctx, to, data); err != nil {
+		return err
+	}
+	s.onChange(to)
+	if len(versions) > 0 {
+		if err := s.backend.ReplaceVersions(ctx, to, versions); err != nil {
+			return fmt.Errorf("copy versions to %s: %w", to, err)
+		}
+	}
+	if !move {
+		return nil
+	}
+	if err := s.backend.Delete(ctx, from); err != nil {
+		return fmt.Errorf("delete %s after copying it: %w", from, err)
+	}
+	s.onChange(from)
+	if err := s.backend.ReplaceVersions(ctx, from, nil); err != nil {
+		return fmt.Errorf("delete versions of %s after copying them: %w", from, err)
+	}
+	return nil
+}
+
 // DeletedPaths returns, sorted, every path that no longer exists but still
 // has stored versions.
 func (s *Service) DeletedPaths(ctx context.Context) ([]string, error) {

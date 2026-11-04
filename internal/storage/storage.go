@@ -42,6 +42,29 @@ type Backend interface {
 	Tokens(ctx context.Context) ([]Token, error)
 	// PutTokens replaces every stored access token.
 	PutTokens(ctx context.Context, tokens []Token) error
+
+	// AuditEvents returns the stored audit events, oldest first, or none.
+	AuditEvents(ctx context.Context) ([]AuditEvent, error)
+	// PutAuditEvents replaces every stored audit event.
+	PutAuditEvents(ctx context.Context, events []AuditEvent) error
+}
+
+// AuditEvent is one audit log entry: a change, a login or a failed
+// authentication. It holds key names, never values. Token is the integration
+// that made the request; Name is the integration an integration operation
+// acted on.
+type AuditEvent struct {
+	Time      time.Time `json:"time"`
+	Source    string    `json:"source"`
+	Op        string    `json:"op"`
+	Remote    string    `json:"remote,omitempty"`
+	Client    string    `json:"client,omitempty"`
+	Forwarded string    `json:"forwardedFor,omitempty"`
+	Token     string    `json:"token,omitempty"`
+	Path      string    `json:"path,omitempty"`
+	Name      string    `json:"name,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	Keys      []string  `json:"keys,omitempty"`
 }
 
 // Token is an access token limited to the paths under Path. Hash is the hex

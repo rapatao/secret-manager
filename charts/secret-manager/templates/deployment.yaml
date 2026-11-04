@@ -33,6 +33,7 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: [server, --addr=:8080, --metrics-addr=:8081, --log-level={{ .Values.logLevel }}, --history-limit={{ .Values.historyLimit }}, --last-used-flush={{ .Values.lastUsedFlush }}, --cache-max-age={{ .Values.cacheMaxAge }}, --controller={{ .Values.controller.enabled }}
+            {{- with .Values.trustedProxies }}, --trusted-proxies={{ join "," . }}{{ end }}
             {{- if .Values.backup.enabled }}, --backup-dir=/backups, --backup-interval={{ .Values.backup.interval }}, --backup-keep={{ .Values.backup.keep }}, --backup-history={{ .Values.backup.history }}{{ end }}]
           env:
             - name: POD_NAMESPACE
