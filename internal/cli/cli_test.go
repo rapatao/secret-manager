@@ -206,8 +206,33 @@ func TestRunInjectsEnvAndForwardsExitCode(t *testing.T) {
 	if code != 3 {
 		t.Fatalf("exit %d, stderr %s", code, h.stderr.String())
 	}
-	if got := h.stdout.String(); got != "1 new t0k" {
+	if got := h.stdout.String(); got != "1 *** ***" {
 		t.Fatalf("stdout %q", got)
+	}
+
+	h.stdout.Reset()
+	h.mustRun("run", "--path", "/tools", "--no-mask", "--", "sh", "-c", `printf '%s %s' "$OVERRIDE" "$TOKEN" >&2; printf '%s' "$TOKEN"`)
+	if got := h.stdout.String() + "|" + h.stderr.String(); got != "t0k|new t0k" {
+		t.Fatalf("unmasked output %q", got)
+	}
+}
+
+func TestMaskWriterSplitWrites(t *testing.T) {
+	var out strings.Builder
+	m := newMaskWriter(&out, map[string]string{"A": "abc", "B": "abcd", "C": "bcx", "D": ""})
+	for _, p := range []string{"Pass: ", "ab", "c", "d ab", "cx a", "bc b"} {
+		if _, err := m.Write([]byte(p)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := out.String(); got != "Pass: *** ***x *** " {
+		t.Fatalf("before flush %q", got)
+	}
+	if err := m.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); got != "Pass: *** ***x *** b" {
+		t.Fatalf("after flush %q", got)
 	}
 }
 
@@ -618,7 +643,7 @@ func TestOfflineCache(t *testing.T) {
 	if got := h.mustRun("get", "--path", "/tools", "A"); got != "1\n" || !strings.Contains(h.stderr.String(), "unreachable") {
 		t.Fatalf("offline get: %q, stderr %q", got, h.stderr.String())
 	}
-	if got := h.mustRun("run", "--path", "/tools", "--recursive", "--", "sh", "-c", "echo $A"); got != "1\n" {
+	if got := h.mustRun("run", "--path", "/tools", "--recursive", "--no-mask", "--", "sh", "-c", "echo $A"); got != "1\n" {
 		t.Fatalf("offline run: %q", got)
 	}
 	if code := h.run("get", "--path", "/other"); code != 1 {

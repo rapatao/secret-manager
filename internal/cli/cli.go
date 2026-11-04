@@ -77,8 +77,10 @@ const Usage = `Client commands:
                                                is set
   restore FILE|-                               replace the paths held in a backup,
                                                decrypting it with $` + EnvBackupKey + `
-  run     --path P [--recursive] -- CMD [ARGS...]
-                                               run CMD with secrets as env vars
+  run     --path P [--recursive] [--no-mask] -- CMD [ARGS...]
+                                               run CMD with secrets as env vars; secret
+                                               values in its output print as ***
+                                               unless --no-mask
   ui      [--addr 127.0.0.1:0] [--no-browser]  serve the Web UI of a local vault on
                                                loopback and open a one-time sign-in link;
                                                for a remote server, open its Web UI
@@ -998,6 +1000,7 @@ func parseVersion(s string) (int, error) {
 
 func (c *CLI) run(ctx context.Context, args []string) error {
 	f := c.flags("run", true, true)
+	noMask := f.fs.Bool("no-mask", false, "print secret values in the command's output instead of "+maskText)
 	api, err := f.parse(args)
 	if err != nil {
 		return err
@@ -1012,6 +1015,12 @@ func (c *CLI) run(ctx context.Context, args []string) error {
 
 	cmd := exec.Command(f.fs.Arg(0), f.fs.Args()[1:]...) //nolint:gosec // running the user-given command is the purpose of run
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = c.Stdin, c.Stdout, c.Stderr
+	if !*noMask {
+		stdout, stderr := newMaskWriter(c.Stdout, data), newMaskWriter(c.Stderr, data)
+		defer stdout.Flush() //nolint:errcheck // nothing left to report a failed terminal write to
+		defer stderr.Flush() //nolint:errcheck // nothing left to report a failed terminal write to
+		cmd.Stdout, cmd.Stderr = stdout, stderr
+	}
 	cmd.Env = mergeEnv(c.Environ(), data)
 	if err := cmd.Start(); err != nil {
 		return err
