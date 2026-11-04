@@ -6,6 +6,9 @@ image:
 
 imagePullSecrets: []
 
+# Old ReplicaSets kept for rollback with kubectl rollout undo.
+revisionHistoryLimit: 10
+
 # Secret holding the admin token (at least 32 characters) that signs in to the
 # Web UI. Create it before installing, e.g.:
 #   kubectl create secret generic secret-manager-token \
