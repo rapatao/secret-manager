@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"slices"
 	"time"
+
+	"github.com/rapatao/secret-manager/internal/storage/encrypted"
 )
 
 type backupRun struct {
@@ -23,6 +25,8 @@ type BackupSchedule struct {
 	// Keep is the number of newest backup files kept in Dir.
 	Keep    int
 	History bool
+	// Key, when set, encrypts every backup file; see encrypted.SealBackup.
+	Key []byte
 }
 
 // RunBackups writes a backup to sched.Dir every sched.Interval until ctx is
@@ -41,11 +45,13 @@ func (s *Server) RunBackups(ctx context.Context, sched BackupSchedule) {
 				run.Err = err.Error()
 			}
 			s.lastBackup.Store(run)
+			e := auditEvent{Source: "schedule", Op: "backup"}
 			if err != nil {
-				s.log.Warn("audit", "source", "schedule", "op", "backup", "error", err.Error())
+				e.Error = err.Error()
+				s.record(e)
 				continue
 			}
-			s.log.Info("audit", "source", "schedule", "op", "backup", "file", file)
+			s.record(e, "file", file)
 		}
 	}
 }
@@ -60,6 +66,11 @@ func (s *Server) BackupToDir(ctx context.Context, sched BackupSchedule) (string,
 	raw, err := json.Marshal(doc)
 	if err != nil {
 		return "", err
+	}
+	if sched.Key != nil {
+		if raw, err = encrypted.SealBackup(sched.Key, raw); err != nil {
+			return "", err
+		}
 	}
 	name := filepath.Join(sched.Dir, "backup-"+doc.Time.Format("20060102T150405Z")+".json")
 	if err := writeFileAtomic(name, raw); err != nil {

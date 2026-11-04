@@ -250,6 +250,35 @@ func (s *Service) Version(ctx context.Context, path string, n int) (Version, err
 	return Version{}, fmt.Errorf("%w: version %d of %s", ErrNotFound, n, path)
 }
 
+// DeleteVersions removes versions ns of path, to purge values that must not
+// stay readable. Every version must exist. The data at path is kept. Once the
+// newest version is deleted, its number is given to the next one written.
+func (s *Service) DeleteVersions(ctx context.Context, path string, ns ...int) error {
+	path, err := NormalizePath(path)
+	if err != nil {
+		return err
+	}
+	if len(ns) == 0 {
+		return fmt.Errorf("%w: no version to delete", ErrInvalid)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	versions, err := s.backend.Versions(ctx, path)
+	if err != nil {
+		return err
+	}
+	for _, n := range ns {
+		if !slices.ContainsFunc(versions, func(v Version) bool { return v.Number == n }) {
+			return fmt.Errorf("%w: version %d of %s", ErrNotFound, n, path)
+		}
+	}
+	return s.backend.ReplaceVersions(ctx, path, slices.DeleteFunc(versions, func(v Version) bool {
+		return slices.Contains(ns, v.Number)
+	}))
+}
+
 // Rollback replaces the data at path with version n, recreating a deleted
 // path. The restored data is recorded as a new version.
 func (s *Service) Rollback(ctx context.Context, path string, n int) error {

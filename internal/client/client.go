@@ -158,6 +158,11 @@ func (c *Client) Version(ctx context.Context, path string, n int) (Version, erro
 	return out, err
 }
 
+// DeleteVersion deletes version n of path.
+func (c *Client) DeleteVersion(ctx context.Context, path string, n int) error {
+	return c.do(ctx, http.MethodDelete, "/api/v1/history/"+strconv.Itoa(n), url.Values{"path": {path}}, nil, nil)
+}
+
 // Rollback replaces the data at path with version n.
 func (c *Client) Rollback(ctx context.Context, path string, n int) error {
 	return c.do(ctx, http.MethodPost, "/api/v1/history/"+strconv.Itoa(n)+"/rollback", url.Values{"path": {path}}, nil, nil)

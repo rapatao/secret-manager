@@ -50,7 +50,7 @@
 <tr><td>History limit</td><td>{{if .HistoryLimit}}{{.HistoryLimit}} versions per path{{else}}disabled{{end}}</td></tr>
 <tr><td>Offline cache default</td><td>{{.CacheMaxAge}}</td></tr>
 {{with .Settings.Backups}}
-<tr><td>Scheduled backups</td><td>{{if .Dir}}every {{$.BackupEvery}}, keeps {{.Keep}}{{if .History}}, with history{{end}}{{else}}disabled{{end}}</td></tr>
+<tr><td>Scheduled backups</td><td>{{if .Dir}}every {{$.BackupEvery}}, keeps {{.Keep}}{{if .History}}, with history{{end}}{{if .Key}}, encrypted{{end}}{{else}}disabled{{end}}</td></tr>
 {{end}}
 {{with .LastBackup}}
 <tr><td>Last backup</td><td>{{time .Time}} {{if .Err}}<span class="badge">failed</span> {{.Err}}{{else}}<span class="muted mono">{{.File}}</span>{{end}}</td></tr>

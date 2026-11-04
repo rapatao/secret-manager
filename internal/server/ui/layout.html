@@ -118,6 +118,7 @@ td.value summary { display: flex; flex-wrap: wrap; align-items: center; gap: .5r
 .masked { letter-spacing: .1em; color: var(--muted); }
 details[open] .masked, details[open] .when-closed, details:not([open]) .when-open, .edited-badge { display: none; }
 tr.edited .edited-badge { display: inline-block; }
+.value-actions { display: flex; justify-content: flex-end; margin-top: .25rem; }
 .when-closed, .when-open { color: var(--accent); font-size: .85rem; }
 @media (max-width: 40rem) {
   header .bar { padding: .5rem .75rem; }
@@ -151,6 +152,7 @@ select { font: inherit; color: inherit; background: var(--bg); border: 1px solid
 <div class="row"><a class="brand" href="/"><span class="logo" aria-hidden="true">&#128273;</span>Secret-Manager</a>{{with .Version}}<span class="muted mono">({{.}})</span>{{end}}</div>
 <nav class="row"><a class="button small" href="/secrets">Secrets</a>
 <a class="button small" href="/integrations">Integrations</a>
+<a class="button small" href="/audit">Audit</a>
 <form class="inline" method="post" action="/logout"><button type="submit" class="small">Sign out</button></form></nav>
 </div></header>
 {{end}}

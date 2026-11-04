@@ -49,7 +49,7 @@ var pageFuncs = template.FuncMap{
 }
 
 func init() {
-	for _, name := range []string{"login", "summary", "secrets", "path", "integrations", "authorize"} {
+	for _, name := range []string{"login", "summary", "secrets", "path", "integrations", "authorize", "audit"} {
 		pages[name] = template.Must(template.New(name).Funcs(pageFuncs).ParseFS(uiFS, "ui/layout.html", "ui/"+name+".html"))
 	}
 }
@@ -251,6 +251,27 @@ func (s *Server) uiRollback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.redirectWithError(w, r, pathURL(path)+"&", err)
 		return
+	}
+	http.Redirect(w, r, pathURL(path), http.StatusSeeOther)
+}
+
+func (s *Server) uiDeleteVersion(w http.ResponseWriter, r *http.Request) {
+	path := r.PostFormValue("path")
+	version := r.PostFormValue("version")
+	if r.PostFormValue("confirm") != version {
+		s.redirectWithError(w, r, pathURL(path)+"&", errUnconfirmed)
+		return
+	}
+	if err := s.deleteVersion(r, path, version); err != nil {
+		s.redirectWithError(w, r, pathURL(path)+"&", err)
+		return
+	}
+	versions, err := s.secrets.History(r.Context(), path)
+	if err == nil && len(versions) == 0 {
+		if _, err = s.secrets.Get(r.Context(), path, false); errors.Is(err, secrets.ErrNotFound) {
+			http.Redirect(w, r, "/secrets", http.StatusSeeOther)
+			return
+		}
 	}
 	http.Redirect(w, r, pathURL(path), http.StatusSeeOther)
 }

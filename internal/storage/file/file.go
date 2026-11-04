@@ -176,6 +176,23 @@ func (b *Backend) VersionedPaths(_ context.Context) ([]string, error) {
 	return out, nil
 }
 
+// ReplaceVersions implements storage.Backend.
+func (b *Backend) ReplaceVersions(_ context.Context, path string, versions []storage.Version) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(versions) == 0 {
+		delete(b.state.Versions, path)
+		return b.commit()
+	}
+	vs := make([]storage.Version, len(versions))
+	for i, v := range versions {
+		v.Data = maps.Clone(v.Data)
+		vs[i] = v
+	}
+	b.state.Versions[path] = vs
+	return b.commit()
+}
+
 // Versions implements storage.Backend.
 func (b *Backend) Versions(_ context.Context, path string) ([]storage.Version, error) {
 	b.mu.Lock()

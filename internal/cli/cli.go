@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"cmp"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -26,6 +27,7 @@ import (
 	"github.com/rapatao/secret-manager/internal/client"
 	"github.com/rapatao/secret-manager/internal/secrets"
 	"github.com/rapatao/secret-manager/internal/storage"
+	"github.com/rapatao/secret-manager/internal/storage/encrypted"
 )
 
 const (
@@ -33,6 +35,8 @@ const (
 	EnvURL = "SECRET_MANAGER_URL"
 	// EnvToken holds an integration token.
 	EnvToken = "SECRET_MANAGER_TOKEN"
+	// EnvBackupKey holds the base64 AES-256 key encrypting backups.
+	EnvBackupKey = "SECRET_MANAGER_BACKUP_KEY"
 )
 
 // Usage lists the client commands.
@@ -49,16 +53,23 @@ const Usage = `Client commands:
                                                --recursive, as PATH KEY for every
                                                nested path
   get     --path P [--recursive] [KEY]         print one value, or all as dotenv
-  set     --path P [--env-file F|-] [K=V...]   merge keys into a path
+  set     --path P [--env-file F|-] [--generate KEY[:LEN]...] [K=V...]
+                                               merge keys into a path; --generate sets
+                                               KEY to LEN (default 32) random letters
+                                               and digits
   delete  --path P (KEY... | --all)            delete keys, or the whole path
   export  --path P [--recursive] [--format dotenv|json]
   history --path P [VERSION]                   list versions, or print one as dotenv
   history --path P --diff VERSION [VERSION2]   list keys added (+), removed (-) or
                                                changed (~) since VERSION, up to
                                                VERSION2 or the current data
+  history --path P --delete VERSION...         delete versions, keeping the current data
   rollback --path P VERSION                    restore a version
-  backup  [--history] [--output F]             print or write (0600) every path as JSON
-  restore FILE|-                               replace the paths held in a backup
+  backup  [--history] [--output F]             print or write (0600) every path as JSON,
+                                               encrypted when $` + EnvBackupKey + `
+                                               is set
+  restore FILE|-                               replace the paths held in a backup,
+                                               decrypting it with $` + EnvBackupKey + `
   run     --path P [--recursive] -- CMD [ARGS...]
                                                run CMD with secrets as env vars
   version                                      print the client version and, when a
@@ -513,6 +524,15 @@ func (c *CLI) get(ctx context.Context, args []string) error {
 func (c *CLI) set(ctx context.Context, args []string) error {
 	f := c.flags("set", true, false)
 	envFile := f.fs.String("env-file", "", "dotenv file to import, - for stdin")
+	generated := map[string]string{}
+	f.fs.Func("generate", "set KEY[:LENGTH] to random letters and digits, LENGTH 32 by default", func(v string) error {
+		key, length, err := parseGenerate(v)
+		if err != nil {
+			return err
+		}
+		generated[key] = randomValue(length)
+		return nil
+	})
 	api, err := f.parse(args)
 	if err != nil {
 		return err
@@ -539,6 +559,12 @@ func (c *CLI) set(ctx context.Context, args []string) error {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok {
 			return fmt.Errorf("%w: %q is not KEY=VALUE", errUsage, kv)
+		}
+		values[k] = v
+	}
+	for k, v := range generated {
+		if _, ok := values[k]; ok {
+			return fmt.Errorf("%w: %s is both given and generated", errUsage, k)
 		}
 		values[k] = v
 	}
@@ -597,12 +623,19 @@ func (c *CLI) export(ctx context.Context, args []string) error {
 func (c *CLI) history(ctx context.Context, args []string) error {
 	f := c.flags("history", true, false)
 	diff := f.fs.Bool("diff", false, "list the keys changed from VERSION to VERSION2 or the current data")
+	del := f.fs.Bool("delete", false, "delete the given versions")
 	api, err := f.parse(args)
 	if err != nil {
 		return err
 	}
+	if *diff && *del {
+		return fmt.Errorf("%w: --diff and --delete cannot be combined", errUsage)
+	}
 	if *diff {
 		return c.historyDiff(ctx, f, api)
+	}
+	if *del {
+		return c.historyDelete(ctx, f, api)
 	}
 	switch f.fs.NArg() {
 	case 0:
@@ -661,6 +694,30 @@ func (c *CLI) historyDiff(ctx context.Context, f *flags, api *client.Client) err
 	return nil
 }
 
+func (c *CLI) historyDelete(ctx context.Context, f *flags, api *client.Client) error {
+	if f.fs.NArg() == 0 {
+		return fmt.Errorf("%w: history --delete takes at least one VERSION", errUsage)
+	}
+	var ns []int
+	for _, arg := range f.fs.Args() {
+		n, err := parseVersion(arg)
+		if err != nil {
+			return err
+		}
+		ns = append(ns, n)
+	}
+	if err := api.Require(ctx, "history-delete"); err != nil {
+		return err
+	}
+	for _, n := range ns {
+		if err := api.DeleteVersion(ctx, f.path, n); err != nil {
+			return fmt.Errorf("version %d: %w", n, err)
+		}
+		fmt.Fprintf(c.Stdout, "Deleted version %d of %s\n", n, f.path)
+	}
+	return nil
+}
+
 func (c *CLI) rollback(ctx context.Context, args []string) error {
 	f := c.flags("rollback", true, false)
 	api, err := f.parse(args)
@@ -714,9 +771,18 @@ func (c *CLI) backup(ctx context.Context, args []string) error {
 	if err := api.Require(ctx, "backup"); err != nil {
 		return err
 	}
+	key, err := c.backupKey()
+	if err != nil {
+		return err
+	}
 	data, err := api.Backup(ctx, *withHistory)
 	if err != nil {
 		return err
+	}
+	if key != nil {
+		if data, err = encrypted.SealBackup(key, data); err != nil {
+			return err
+		}
 	}
 	data = append(data, '\n')
 	if *output == "" {
@@ -759,6 +825,18 @@ func (c *CLI) restore(ctx context.Context, args []string) error {
 	if !json.Valid(data) {
 		return fmt.Errorf("%s is not a JSON backup", name)
 	}
+	if encrypted.IsEncryptedBackup(data) {
+		key, err := c.backupKey()
+		if err != nil {
+			return err
+		}
+		if key == nil {
+			return fmt.Errorf("%s is encrypted; set %s to its backup key", name, EnvBackupKey)
+		}
+		if data, err = encrypted.OpenBackup(key, data); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+	}
 	if err := api.Require(ctx, "backup"); err != nil {
 		return err
 	}
@@ -768,6 +846,56 @@ func (c *CLI) restore(ctx context.Context, args []string) error {
 	}
 	fmt.Fprintf(c.Stdout, "Restored %d paths\n", n)
 	return nil
+}
+
+// backupKey returns the key in $SECRET_MANAGER_BACKUP_KEY, nil when unset.
+func (c *CLI) backupKey() ([]byte, error) {
+	v := c.Getenv(EnvBackupKey)
+	if v == "" {
+		return nil, nil
+	}
+	key, err := encrypted.ParseKey(v)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", EnvBackupKey, err)
+	}
+	return key, nil
+}
+
+const (
+	generateAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	generateLength   = 32
+	maxGenerate      = 4096
+)
+
+func parseGenerate(v string) (string, int, error) {
+	key, length, ok := strings.Cut(v, ":")
+	if err := secrets.ValidateKey(key); err != nil {
+		return "", 0, err
+	}
+	if !ok {
+		return key, generateLength, nil
+	}
+	n, err := strconv.Atoi(length)
+	if err != nil || n < 1 || n > maxGenerate {
+		return "", 0, fmt.Errorf("length %q must be between 1 and %d", length, maxGenerate)
+	}
+	return key, n, nil
+}
+
+// randomValue returns n uniformly random letters and digits.
+func randomValue(n int) string {
+	out := make([]byte, 0, n)
+	buf := make([]byte, n)
+	for len(out) < n {
+		_, _ = rand.Read(buf)
+		for _, b := range buf {
+			// 248 is the largest multiple of len(generateAlphabet) below 256.
+			if b < 248 && len(out) < n {
+				out = append(out, generateAlphabet[int(b)%len(generateAlphabet)])
+			}
+		}
+	}
+	return string(out)
 }
 
 func parseVersion(s string) (int, error) {

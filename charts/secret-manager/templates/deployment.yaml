@@ -50,6 +50,20 @@ spec:
                 secretKeyRef:
                   name: {{ . }}
                   key: {{ $.Values.encryption.key }}
+            {{- with $.Values.encryption.previousKey }}
+            - name: SECRET_MANAGER_PREVIOUS_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.encryption.existingSecret }}
+                  key: {{ . }}
+            {{- end }}
+            {{- end }}
+            {{- if and .Values.backup.enabled .Values.backup.encryption.existingSecret }}
+            - name: SECRET_MANAGER_BACKUP_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.backup.encryption.existingSecret }}
+                  key: {{ .Values.backup.encryption.key }}
             {{- end }}
           ports:
             - name: http

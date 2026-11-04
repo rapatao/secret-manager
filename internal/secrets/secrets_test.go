@@ -225,6 +225,39 @@ func TestHistoryAndRollback(t *testing.T) {
 	}
 }
 
+func TestDeleteVersions(t *testing.T) {
+	ctx := context.Background()
+	s := New(newMem(), nil)
+	s.KeepVersions = 10
+	for _, v := range []string{"1", "leaked", "3"} {
+		if err := s.SetKeys(ctx, "/app", map[string]string{"A": v}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.DeleteVersions(ctx, "/app", 2, 9); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete with a missing version: want ErrNotFound, got %v", err)
+	}
+	if err := s.DeleteVersions(ctx, "/app"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("delete without versions: want ErrInvalid, got %v", err)
+	}
+	if err := s.DeleteVersions(ctx, "/app", 2); err != nil {
+		t.Fatal(err)
+	}
+	versions, _ := s.History(ctx, "/app")
+	if len(versions) != 2 || versions[0].Number != 3 || versions[1].Number != 1 {
+		t.Fatalf("versions after delete: %+v", versions)
+	}
+	if got, _ := s.Get(ctx, "/app", false); got["A"] != "3" {
+		t.Fatalf("data changed by version delete: %v", got)
+	}
+	if err := s.DeleteVersions(ctx, "/app", 1, 3); err != nil {
+		t.Fatal(err)
+	}
+	if paths, _ := s.backend.VersionedPaths(ctx); len(paths) != 0 {
+		t.Fatalf("versioned paths after deleting all: %v", paths)
+	}
+}
+
 func TestHistoryDisabled(t *testing.T) {
 	ctx := context.Background()
 	s := New(newMem(), nil)

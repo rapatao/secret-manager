@@ -28,7 +28,7 @@ func newFile(t *testing.T) *file.Backend {
 
 func wrap(t *testing.T, inner storage.Backend, key []byte) *Backend {
 	t.Helper()
-	b, err := New(inner, key)
+	b, err := New(inner, key, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestStoresCiphertext(t *testing.T) {
 	}
 }
 
-func TestEncryptPlaintext(t *testing.T) {
+func TestMigratePlaintext(t *testing.T) {
 	ctx := context.Background()
 	inner := newFile(t)
 	plain := wrap(t, inner, nil)
@@ -85,6 +85,9 @@ func TestEncryptPlaintext(t *testing.T) {
 		if err := plain.Put(ctx, p, map[string]string{"K": p}); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := plain.AddVersion(ctx, "/a", time.Now(), map[string]string{"K": "old"}, 5); err != nil {
+		t.Fatal(err)
 	}
 	b := wrap(t, inner, key)
 	if got, _ := b.Get(ctx, "/a"); got["K"] != "/a" {
@@ -94,16 +97,78 @@ func TestEncryptPlaintext(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	done, err := b.EncryptPlaintext(ctx)
-	if err != nil || !slices.Equal(done, []string{"/a"}) {
-		t.Fatalf("EncryptPlaintext = %v, %v", done, err)
+	done, unreadable, err := b.Migrate(ctx)
+	if err != nil || !slices.Equal(done, []string{"/a", "/a version 1"}) || len(unreadable) != 0 {
+		t.Fatalf("Migrate = %v, %v, %v", done, unreadable, err)
 	}
 	raw, _ := inner.Get(ctx, "/a")
-	if !strings.HasPrefix(raw["K"], prefix) {
-		t.Fatalf("still plaintext: %v", raw)
+	versions, _ := inner.Versions(ctx, "/a")
+	if !strings.HasPrefix(raw["K"], prefix) || !strings.HasPrefix(versions[0].Data["K"], prefix) {
+		t.Fatalf("still plaintext: %v, %v", raw, versions[0].Data)
 	}
 	if got, _ := b.Get(ctx, "/a"); got["K"] != "/a" {
 		t.Fatalf("after encryption = %v", got)
+	}
+	if done, _, _ := b.Migrate(ctx); len(done) != 0 {
+		t.Fatalf("second Migrate rewrote %v", done)
+	}
+}
+
+func TestMigratePreviousKey(t *testing.T) {
+	ctx := context.Background()
+	inner := newFile(t)
+	old := wrap(t, inner, key)
+	if err := old.Put(ctx, "/a", map[string]string{"K": "v"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.AddVersion(ctx, "/a", time.Now(), map[string]string{"K": "v"}, 5); err != nil {
+		t.Fatal(err)
+	}
+	other := wrap(t, inner, bytes.Repeat([]byte{9}, KeySize))
+	if err := other.Put(ctx, "/lost", map[string]string{"K": "v"}); err != nil {
+		t.Fatal(err)
+	}
+
+	newKey := bytes.Repeat([]byte{8}, KeySize)
+	b, err := New(inner, newKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := b.Get(ctx, "/a"); err != nil || got["K"] != "v" {
+		t.Fatalf("read with previous key = %v, %v", got, err)
+	}
+	done, unreadable, err := b.Migrate(ctx)
+	if err != nil || !slices.Equal(done, []string{"/a", "/a version 1"}) || !slices.Equal(unreadable, []string{"/lost"}) {
+		t.Fatalf("Migrate = %v, %v, %v", done, unreadable, err)
+	}
+	rotated := wrap(t, inner, newKey)
+	if got, err := rotated.Get(ctx, "/a"); err != nil || got["K"] != "v" {
+		t.Fatalf("read with new key only = %v, %v", got, err)
+	}
+	if vs, err := rotated.Versions(ctx, "/a"); err != nil || vs[0].Data["K"] != "v" {
+		t.Fatalf("versions with new key only = %v, %v", vs, err)
+	}
+
+	if _, err := New(inner, nil, key); err == nil {
+		t.Fatal("previous key without key accepted")
+	}
+}
+
+func TestBackupEnvelope(t *testing.T) {
+	doc := []byte(`{"format":1,"paths":[]}`)
+	sealed, err := SealBackup(key, doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !IsEncryptedBackup(sealed) || IsEncryptedBackup(doc) || bytes.Contains(sealed, []byte("paths")) {
+		t.Fatalf("envelope %s", sealed)
+	}
+	got, err := OpenBackup(key, sealed)
+	if err != nil || !bytes.Equal(got, doc) {
+		t.Fatalf("OpenBackup = %s, %v", got, err)
+	}
+	if _, err := OpenBackup(bytes.Repeat([]byte{8}, KeySize), sealed); !errors.Is(err, ErrBackupKey) {
+		t.Fatalf("OpenBackup with wrong key: %v", err)
 	}
 }
 

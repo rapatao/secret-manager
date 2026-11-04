@@ -1,0 +1,35 @@
+{{define "content"}}
+<h1>Audit log</h1>
+<div class="card">
+<div class="body">
+<form class="row" method="get" action="/audit">
+<select name="integration" aria-label="Integration">
+<option value="">All events</option>
+{{range .Integrations}}<option value="{{.}}"{{if eq . $.Filter}} selected{{end}}>{{.}}</option>
+{{end}}
+</select>
+<button type="submit">Filter</button>
+</form>
+</div>
+<table class="stack-narrow">
+<thead><tr><th>Time</th><th>Source</th><th>Operation</th><th>Integration</th><th>Path</th><th>Keys</th><th>Remote</th><th>Result</th></tr></thead>
+<tbody>
+{{range .Events}}
+<tr>
+<td class="muted" data-label="Time">{{time .Time}}</td>
+<td data-label="Source">{{.Source}}</td>
+<td data-label="Operation"><code>{{.Op}}</code></td>
+<td data-label="Integration">{{with .Token}}<code>{{.}}</code>{{end}}{{with .Name}} <span class="muted">on</span> <code>{{.}}</code>{{end}}</td>
+<td data-label="Path">{{with .Path}}<code>{{.}}</code>{{end}}</td>
+<td class="mono" data-label="Keys">{{range .Keys}}{{.}} {{end}}</td>
+<td class="muted mono" data-label="Remote">{{.Remote}}{{with .Forwarded}} ({{.}}){{end}}</td>
+<td data-label="Result">{{if .Error}}<span class="change del">failed</span> {{.Error}}{{else}}<span class="muted">ok</span>{{end}}</td>
+</tr>
+{{else}}
+<tr><td colspan="8" class="empty">No events{{if .Filter}} for {{.Filter}}{{end}} since the server started.</td></tr>
+{{end}}
+</tbody>
+</table>
+<p class="body muted">Shows the newest {{.Kept}} events since the server started. The JSON log on stderr holds every event.</p>
+</div>
+{{end}}

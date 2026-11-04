@@ -41,6 +41,18 @@ function refreshSave() {
   form.querySelector('button[type="submit"]').disabled = pendingChanges().length === 0 || !form.checkValidity();
 }
 
+const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+function randomValue(length = 32) {
+  let out = "";
+  while (out.length < length) {
+    for (const b of crypto.getRandomValues(new Uint8Array(length))) {
+      if (b < 248 && out.length < length) out += alphabet[b % alphabet.length];
+    }
+  }
+  return out;
+}
+
 const opClass = { "+": "add", "-": "del", "~": "mod" };
 
 function cell(row, text) {
@@ -106,6 +118,13 @@ document.addEventListener("click", async (e) => {
     row.classList.toggle("staged-delete", !staged.disabled);
     del.textContent = staged.disabled ? "Delete" : "Undo";
     refreshSave();
+    return;
+  }
+  const generate = e.target.closest("button.generate");
+  if (generate) {
+    const value = generate.closest("td, .new-key").querySelector("textarea");
+    value.value = randomValue();
+    value.dispatchEvent(new Event("input", { bubbles: true }));
     return;
   }
   const copy = e.target.closest("button.copy");

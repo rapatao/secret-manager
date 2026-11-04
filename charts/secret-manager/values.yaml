@@ -22,6 +22,10 @@ auth:
 encryption:
   existingSecret: ""
   key: key
+  # Key in existingSecret holding the key being replaced while rotating, e.g.
+  # "previous". On start the server rewrites every value still encrypted with
+  # it; remove it once the server has started with both keys.
+  previousKey: ""
 
 service:
   type: ClusterIP
@@ -53,13 +57,20 @@ lastUsedFlush: 30m
 cacheMaxAge: 168h
 
 # Writes a backup of every path to a PersistentVolume every interval and keeps
-# the newest files. Backups hold secret values in plain JSON.
+# the newest files. Backups hold secret values in plain JSON unless
+# encryption.existingSecret is set.
 backup:
   enabled: false
   interval: 24h
   keep: 7
   # Include the versions of every path.
   history: false
+  # Secret holding a base64 AES-256 key that encrypts backup files. Keep a copy
+  # outside the cluster: restoring an encrypted backup needs it in
+  # SECRET_MANAGER_BACKUP_KEY.
+  encryption:
+    existingSecret: ""
+    key: key
   persistence:
     # Use an existing PersistentVolumeClaim instead of creating one.
     existingClaim: ""

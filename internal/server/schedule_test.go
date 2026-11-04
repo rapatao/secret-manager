@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/rapatao/secret-manager/internal/secrets"
+	"github.com/rapatao/secret-manager/internal/storage/encrypted"
 	k8sstorage "github.com/rapatao/secret-manager/internal/storage/kubernetes"
 	"github.com/rapatao/secret-manager/internal/tokens"
 )
@@ -47,6 +49,19 @@ func TestBackupToDir(t *testing.T) {
 	raw, _ := os.ReadFile(file)
 	if err := json.Unmarshal(raw, &doc); err != nil || len(doc.Paths) != 1 || len(doc.Paths[0].Versions) != 1 {
 		t.Fatalf("backup document %s: %v", raw, err)
+	}
+
+	key := bytes.Repeat([]byte{7}, encrypted.KeySize)
+	sealed, err := s.BackupToDir(ctx, BackupSchedule{Dir: t.TempDir(), Interval: time.Hour, Keep: 1, Key: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = os.ReadFile(sealed)
+	if !encrypted.IsEncryptedBackup(raw) {
+		t.Fatalf("backup with a key not encrypted: %s", raw)
+	}
+	if plain, err := encrypted.OpenBackup(key, raw); err != nil || json.Unmarshal(plain, &doc) != nil || len(doc.Paths) != 1 {
+		t.Fatalf("encrypted backup %s: %v", plain, err)
 	}
 
 	entries, _ := os.ReadDir(dir)

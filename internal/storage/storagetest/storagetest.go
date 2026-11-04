@@ -172,6 +172,50 @@ func Run(t *testing.T, newBackend func() storage.Backend) {
 		}
 	})
 
+	t.Run("replace versions", func(t *testing.T) {
+		b := newBackend()
+		at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+		for i := range 3 {
+			if err := b.AddVersion(ctx, "/a", at.Add(time.Duration(i)*time.Minute), map[string]string{"K": string(rune('1' + i))}, 10); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := b.AddVersion(ctx, "/b", at, map[string]string{"X": "1"}, 10); err != nil {
+			t.Fatal(err)
+		}
+		want := []storage.Version{
+			{Number: 3, Time: at.Add(2 * time.Minute), Data: map[string]string{"K": "new"}},
+			{Number: 1, Time: at, Data: map[string]string{"K": "1"}},
+		}
+		if err := b.ReplaceVersions(ctx, "/a", want); err != nil {
+			t.Fatal(err)
+		}
+		got, err := b.Versions(ctx, "/a")
+		if err != nil || len(got) != 2 {
+			t.Fatalf("Versions = %v, %v; want 2", got, err)
+		}
+		for i := range want {
+			if got[i].Number != want[i].Number || !got[i].Time.Equal(want[i].Time) || !maps.Equal(got[i].Data, want[i].Data) {
+				t.Fatalf("version %d = %+v, want %+v", i, got[i], want[i])
+			}
+		}
+		if err := b.AddVersion(ctx, "/a", at.Add(time.Hour), map[string]string{"K": "4"}, 10); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := b.Versions(ctx, "/a"); got[0].Number != 4 {
+			t.Fatalf("next version after replace = %d, want 4", got[0].Number)
+		}
+		if err := b.ReplaceVersions(ctx, "/a", nil); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := b.Versions(ctx, "/a"); err != nil || len(got) != 0 {
+			t.Fatalf("Versions after removing all = %v, %v", got, err)
+		}
+		if paths, _ := b.VersionedPaths(ctx); !slices.Equal(paths, []string{"/b"}) {
+			t.Fatalf("VersionedPaths = %v, want [/b]", paths)
+		}
+	})
+
 	t.Run("tokens", func(t *testing.T) {
 		b := newBackend()
 		if got, err := b.Tokens(ctx); err != nil || len(got) != 0 {
