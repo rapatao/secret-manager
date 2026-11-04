@@ -5,7 +5,7 @@ All endpoints except `/healthz`, `/readyz` and the two login endpoints require `
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/v1/info` | `{"version": "v1.4.0", "capabilities": [...]}`, see [Compatibility](#compatibility) |
-| `GET` | `/api/v1/paths` | `{"paths": [...]}` |
+| `GET` | `/api/v1/paths?deleted=true` | `{"paths": [...]}`; with `deleted=true`, the deleted paths that still have versions |
 | `GET` | `/api/v1/secrets?path=P&recursive=true` | `{"data": {"KEY": "value"}, "cacheMaxAge": 604800}`, `cacheMaxAge` in seconds, see [Offline cache](cli.md#offline-cache) |
 | `GET` | `/api/v1/secrets/{key}?path=P&recursive=true` | Same, with only that key in `data`; `404` when P or the key does not exist |
 | `PUT` | `/api/v1/secrets?path=P` | Merge a JSON object of string values into P |
@@ -32,7 +32,7 @@ A loopback login starts in the browser at `/authorize?redirect_uri=http://127.0.
 
 Clients and servers of different versions work together, as long as the server has the features a command uses.
 
-`GET /api/v1/info` lists those features as capabilities: `paths`, `secrets`, `history`, `history-delete`, `backup`, `integrations`, `paths-copy` and `secrets-key`. A command that needs a feature checks its capability first and fails with `server v1.2.0 at URL does not support X; upgrade the server`. `get KEY` against a server without `secrets-key` reads the whole path and keeps only that key on the client. Servers without `/api/v1/info` are treated as having `paths`, `secrets` and `history`, and their version is shown as unknown. A capability never changes meaning; changed behavior gets a new capability.
+`GET /api/v1/info` lists those features as capabilities: `paths`, `secrets`, `history`, `history-delete`, `backup`, `integrations`, `paths-copy`, `paths-deleted` and `secrets-key`. A command that needs a feature checks its capability first and fails with `server v1.2.0 at URL does not support X; upgrade the server`. `get KEY` against a server without `secrets-key` reads the whole path and keeps only that key on the client. Servers without `/api/v1/info` are treated as having `paths`, `secrets` and `history`, and their version is shown as unknown. A capability never changes meaning; changed behavior gets a new capability.
 
 Authentication depends on the `integrations` capability:
 
@@ -48,5 +48,5 @@ A CLI without browser login works against a server with `integrations` using an 
 ```
 client: v1.5.0
 server: v1.4.0 (https://secrets.example.com)
-capabilities: backup, history, history-delete, integrations, paths, paths-copy, secrets, secrets-key
+capabilities: backup, history, history-delete, integrations, paths, paths-copy, paths-deleted, secrets, secrets-key
 ```

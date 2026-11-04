@@ -126,6 +126,9 @@ func TestSetGetListDelete(t *testing.T) {
 	if got := h.mustRun("list"); got != "/tools/nested\n" {
 		t.Fatalf("after delete --all: %q", got)
 	}
+	if got := h.mustRun("list", "--deleted"); got != "/tools\n" {
+		t.Fatalf("list --deleted: %q", got)
+	}
 }
 
 func TestKeys(t *testing.T) {
@@ -196,6 +199,23 @@ func TestSetFromEnvFileAndExport(t *testing.T) {
 	if got := h.mustRun("export", "--path", "/app"); got != "MULTI=\"a\\nb \\$x\"\nUSER=\"bob\"\n" {
 		t.Fatalf("dotenv export: %q", got)
 	}
+
+	want := h.stdout.String()
+	h.stdin = h.mustRun("export", "--path", "/app", "--format", "json")
+	h.mustRun("set", "--path", "/copy", "--json-file", "-")
+	if got := h.mustRun("export", "--path", "/copy"); got != want {
+		t.Fatalf("json import: %q, want %q", got, want)
+	}
+	h.stdin = `{"N":1}`
+	if code := h.run("set", "--path", "/copy", "--json-file", "-"); code != 1 || !strings.Contains(h.stderr.String(), "key N: value must be a string") {
+		t.Fatalf("non-string json value: exit %d, %q", code, h.stderr.String())
+	}
+	if code := h.run("set", "--path", "/copy", "--env-file", "-"); code != 1 || !strings.Contains(h.stderr.String(), "missing '='") {
+		t.Fatalf("json read by --env-file: exit %d, %q", code, h.stderr.String())
+	}
+	if code := h.run("set", "--path", "/copy", "--env-file", "a", "--json-file", "b"); code != 2 || !strings.Contains(h.stderr.String(), "cannot be combined") {
+		t.Fatalf("both files: exit %d, %q", code, h.stderr.String())
+	}
 }
 
 func TestRunInjectsEnvAndForwardsExitCode(t *testing.T) {
@@ -261,29 +281,6 @@ func TestServerErrorsAreReported(t *testing.T) {
 	h := newHarness(t)
 	if code := h.run("get", "--path", "/missing"); code != 1 || !strings.Contains(h.stderr.String(), "404") {
 		t.Fatalf("exit %d, stderr %q", code, h.stderr.String())
-	}
-}
-
-func TestDotenvRoundTrip(t *testing.T) {
-	in := map[string]string{"A": `quote " back \ dollar $HOME`, "B": "line1\nline2\r\n", "C": ""}
-	var buf bytes.Buffer
-	if err := formatDotenv(&buf, in); err != nil {
-		t.Fatal(err)
-	}
-	out, err := parseDotenv(&buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !maps.Equal(in, out) {
-		t.Fatalf("round trip: got %q, want %q", out, in)
-	}
-}
-
-func TestParseDotenvErrors(t *testing.T) {
-	for _, in := range []string{"NOEQUALS", `A="trailing\"`} {
-		if _, err := parseDotenv(strings.NewReader(in)); err == nil {
-			t.Errorf("%q: want error", in)
-		}
 	}
 }
 
@@ -464,7 +461,7 @@ func TestServersListAndUse(t *testing.T) {
 
 func TestVersion(t *testing.T) {
 	h := newHarness(t)
-	want := "client: 1.5.0\nserver: 1.4.0 (" + h.url + ")\ncapabilities: backup, history, history-delete, integrations, paths, paths-copy, secrets, secrets-key\n"
+	want := "client: 1.5.0\nserver: 1.4.0 (" + h.url + ")\ncapabilities: backup, history, history-delete, integrations, paths, paths-copy, paths-deleted, secrets, secrets-key\n"
 	if got := h.mustRun("version"); got != want {
 		t.Fatalf("version: %q", got)
 	}

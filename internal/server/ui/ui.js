@@ -53,6 +53,137 @@ function randomValue(length = 32) {
   return out;
 }
 
+function addKeyRow() {
+  const row = document.getElementById("new-key").content.firstElementChild.cloneNode(true);
+  editForm().querySelector(".new-keys").append(row);
+  return row;
+}
+
+function toggleDelete(row) {
+  const staged = row.querySelector('input[name="delete"]');
+  staged.disabled = !staged.disabled;
+  row.classList.toggle("staged-delete", !staged.disabled);
+  row.querySelector("button.delete-key").textContent = staged.disabled ? "Delete" : "Undo";
+}
+
+const dotenvEscapes = { n: "\n", r: "\r", t: "\t" };
+
+function dotenvValue(s, line) {
+  if (s.length < 2) return s;
+  if (s[0] === "'" && s.endsWith("'")) return s.slice(1, -1);
+  if (s[0] !== '"' || !s.endsWith('"')) return s;
+  const inner = s.slice(1, -1);
+  let out = "";
+  for (let i = 0; i < inner.length; i++) {
+    if (inner[i] !== "\\") {
+      out += inner[i];
+      continue;
+    }
+    if (++i === inner.length) throw new Error(`line ${line}: trailing backslash in ${s}`);
+    out += dotenvEscapes[inner[i]] ?? inner[i];
+  }
+  return out;
+}
+
+// parseDotenv follows the rules of internal/dotenv.Parse.
+function parseDotenv(text) {
+  const out = new Map();
+  text.split(/\r?\n/).forEach((raw, i) => {
+    let line = raw.trim();
+    if (line === "" || line.startsWith("#")) return;
+    if (line.startsWith("export ")) line = line.slice("export ".length);
+    const eq = line.indexOf("=");
+    if (eq < 0) throw new Error(`line ${i + 1}: missing '='`);
+    out.set(line.slice(0, eq).trim(), dotenvValue(line.slice(eq + 1).trim(), i + 1));
+  });
+  return out;
+}
+
+function parseImport(text) {
+  if (!text.trimStart().startsWith("{")) return parseDotenv(text);
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`invalid JSON: ${err.message}`);
+  }
+  if (doc === null || Array.isArray(doc)) throw new Error("JSON must be an object of string values");
+  for (const [key, value] of Object.entries(doc)) {
+    if (typeof value !== "string") throw new Error(`key ${key}: value must be a string`);
+  }
+  return new Map(Object.entries(doc));
+}
+
+function importKeys(entries) {
+  const rows = new Map([...document.querySelectorAll("tr[data-key]")].map((row) => [row.dataset.key, row]));
+  const added = new Map([...editForm().querySelectorAll(".new-key")].map((row) => [row.querySelector('input[name="new-key"]').value, row]));
+  for (const [key, value] of entries) {
+    const row = rows.get(key);
+    if (row) {
+      if (!row.querySelector('input[name="delete"]').disabled) toggleDelete(row);
+      row.querySelector("textarea").value = value;
+      continue;
+    }
+    const newRow = added.get(key) ?? addKeyRow();
+    newRow.querySelector('input[name="new-key"]').value = key;
+    newRow.querySelector("textarea").value = value;
+  }
+  refreshSave();
+}
+
+document.addEventListener("submit", (e) => {
+  const form = e.target;
+  if (form.matches("form.export-keys") && e.submitter?.getAttribute("formmethod") !== "dialog") setTimeout(() => form.closest("dialog").close());
+});
+
+document.addEventListener("change", async (e) => {
+  if (!e.target.matches(".import-file")) return;
+  const file = e.target.files[0];
+  if (file) e.target.form.querySelector(".import-text").value = await file.text();
+});
+
+document.addEventListener("submit", (e) => {
+  const dialog = e.target.closest("#import-env");
+  if (!dialog) return;
+  const form = e.target;
+  const error = form.querySelector(".import-error");
+  error.hidden = true;
+  if (e.submitter?.value !== "import") return;
+  try {
+    importKeys(parseImport(form.querySelector(".import-text").value));
+  } catch (err) {
+    e.preventDefault();
+    error.textContent = err.message;
+    error.hidden = false;
+    return;
+  }
+  form.reset();
+});
+
+for (const form of document.querySelectorAll("form.compare-with")) {
+  const view = form.querySelector(".compare-view");
+  const initial = [...view.childNodes].map((node) => node.cloneNode(true));
+  form.closest("dialog").addEventListener("close", () => {
+    form.reset();
+    view.replaceChildren(...initial.map((node) => node.cloneNode(true)));
+  });
+}
+
+document.addEventListener("change", async (e) => {
+  const form = e.target.closest("form.compare-with");
+  if (!form || !["from", "to"].includes(e.target.name) || !form.elements.from.value) return;
+  const view = form.querySelector(".compare-view");
+  const res = await fetch("/secrets/path?" + new URLSearchParams(new FormData(form)));
+  const text = await res.text();
+  const result = res.ok && new DOMParser().parseFromString(text, "text/html").getElementById("compare");
+  if (!result) {
+    view.replaceChildren(Object.assign(document.createElement("p"), { className: "error", textContent: res.ok ? "Comparison not available." : text }));
+    return;
+  }
+  result.querySelector(".row > a")?.remove();
+  view.replaceChildren(...result.childNodes);
+});
+
 const opClass = { "+": "add", "-": "del", "~": "mod" };
 
 function cell(row, text) {
@@ -98,9 +229,7 @@ document.addEventListener("click", async (e) => {
     return;
   }
   if (e.target.closest("button.add-key")) {
-    const row = document.getElementById("new-key").content.firstElementChild.cloneNode(true);
-    editForm().querySelector(".new-keys").append(row);
-    row.querySelector("input").focus();
+    addKeyRow().querySelector("input").focus();
     refreshSave();
     return;
   }
@@ -112,18 +241,16 @@ document.addEventListener("click", async (e) => {
   }
   const del = e.target.closest("button.delete-key");
   if (del) {
-    const row = del.closest("tr");
-    const staged = row.querySelector('input[name="delete"]');
-    staged.disabled = !staged.disabled;
-    row.classList.toggle("staged-delete", !staged.disabled);
-    del.textContent = staged.disabled ? "Delete" : "Undo";
+    toggleDelete(del.closest("tr"));
     refreshSave();
     return;
   }
   const generate = e.target.closest("button.generate");
   if (generate) {
+    const length = generate.closest(".value-actions").querySelector(".gen-length");
+    if (!length.reportValidity()) return;
     const value = generate.closest("td, .new-key").querySelector("textarea");
-    value.value = randomValue();
+    value.value = randomValue(length.valueAsNumber);
     value.dispatchEvent(new Event("input", { bubbles: true }));
     return;
   }

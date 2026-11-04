@@ -8,6 +8,7 @@ Summary
 - It lists the 10 latest versions across every path, deleted paths included, with the keys each one added (`+`), changed (`~`) or deleted (`-`).
 - It shows the server settings: version, storage backend, encryption, SecretSync controller, history limit, offline cache default, scheduled backups and the result of the last scheduled backup since the server started.
 - It reads every path and its history on each view.
+- Download backup saves a [backup](backup.md) of every path, with its versions when With history is checked, as `secret-manager backup` does. It is encrypted when the server has `SECRET_MANAGER_BACKUP_KEY`, and the page says whether it is. Restoring a backup needs `secret-manager restore`.
 
 Secrets
 - The Secrets page lists every path; each one opens at `/secrets/path?path=<path>`.
@@ -21,12 +22,14 @@ Keys
 - Changed shows when each key was last added or changed, from the versions kept in history.
 - Adding keys, editing values and deleting keys are staged on the page: a deleted key is struck through until saved, and Undo brings it back.
 - A new key cannot reuse the name of an existing key or of another new key; existing keys change in their own row.
-- Generate, under a value being added or edited, replaces it with 32 random letters and digits made in the browser.
+- Generate, under a value being added or edited, replaces it with random letters and digits made in the browser, as many as the length next to it (default 32, up to 4096).
+- Import opens a dialog taking pasted text or a file, read as `set --json-file` reads it, a JSON object of string values, when it starts with `{`, otherwise as `set --env-file` reads `KEY=VALUE` lines. Each key becomes a staged addition, or a staged change of an existing key, including one staged for deletion. A line that cannot be read is reported with its number and nothing is staged.
+- Download asks for a format, `.env` or JSON, and saves the keys of the path as `secret-manager export` prints them, in a file named after the path (`/app/db` gives `app-db.env` or `app-db.json`). Unsaved changes are not included.
 - Save changes is enabled once something is staged. It opens a confirmation dialog listing the keys added (`+`), changed (`~`) and deleted (`-`) with their current and new values, and writes every staged change as one version.
 
 History
 - Each version can be compared with the current data and restored after a confirmation dialog, see [History](history.md).
-- Compare picks any two versions, or a version and the current data, and shows the keys added, changed and deleted between them with their values. It opens with the version before the newest and the current data selected, and the chosen pair stays in the URL (`&from=2&to=current`).
+- Diff, on every version except the current one and those holding the same data, opens a dialog comparing the current data with that version, values included. Its Compare and with selectors at the top pick any source and target, the current data or a version, and changing either runs the comparison in the dialog: the keys added, changed and deleted between the two with their values. Unsaved key edits on the page are kept, and closing the dialog resets it. Without JavaScript, a Compare button reloads the page with the result above the version list and the pair in the URL (`&from=2&to=current`).
 - Each version can be deleted after a confirmation dialog.
 
 Integrations and logins

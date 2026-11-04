@@ -32,10 +32,10 @@ Requests made with an integration token carry its name in `token`. `client` is t
 
 | Category | Levels | Default | `op` |
 |----------|--------|---------|------|
-| `reads` | `none`, `log`, `audit` | `none` | `read`: every `GET /api/v1/secrets` and `GET /api/v1/secrets/{key}` with the key names returned (and `recursive`), and every Web UI path page view with source `ui`; `read_version`: every `GET /api/v1/history/{version}` with the `version` |
-| `lists` | `none`, `log`, `audit` | `none` | `info` (`GET /api/v1/info`), `list_paths` (`GET /api/v1/paths`), `list_history` (`GET /api/v1/history`, with the `path`) |
+| `reads` | `none`, `log`, `audit` | `none` | `read`: every `GET /api/v1/secrets` and `GET /api/v1/secrets/{key}` with the key names returned (and `recursive`), and every Web UI path page view with source `ui`; `export`: every Web UI download of a path, with source `ui`; `read_version`: every `GET /api/v1/history/{version}` with the `version` |
+| `lists` | `none`, `log`, `audit` | `none` | `info` (`GET /api/v1/info`), `list_paths` (`GET /api/v1/paths`), `list_deleted_paths` (`GET /api/v1/paths?deleted=true`), `list_history` (`GET /api/v1/history`, with the `path`) |
 | `logins` | `log`, `audit` | `audit` | `login` (Web UI sign-in), `authorize` (a CLI login approved or denied in the Web UI), `authorize_start` (a CLI device login started, with the requested `name`), `authorize_token` (a CLI login code that is invalid, expired or denied) |
-| `backups` | `log`, `audit` | `audit` | `backup` (API or, with source `schedule`, scheduled), `restore` |
+| `backups` | `log`, `audit` | `audit` | `backup` (API, Web UI download with source `ui`, or scheduled with source `schedule`), `restore` |
 
 Every other event is always audited: `set`, `delete_key`, `delete_path`, `create_path`, `copy_path` and `move_path` (with the target in `to`), `rollback`, `delete_version` (with the `version`), `create_token`, `update_token`, `revoke_token` (with the integration `name`) and `auth` (API bearer token rejected, including expired tokens and requests an integration is not allowed to make).
 

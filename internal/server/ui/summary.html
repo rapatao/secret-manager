@@ -58,5 +58,10 @@
 {{end}}
 </tbody>
 </table>
+<form class="body row" method="get" action="/backup">
+<label class="check"><input type="checkbox" name="history" value="true"> With history</label>
+<button type="submit">Download backup</button>
+<span class="muted">{{if .Settings.Backups.Key}}Encrypted with the server's backup key.{{else}}Every value in plain text.{{end}}</span>
+</form>
 </div>
 {{end}}

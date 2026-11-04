@@ -28,7 +28,8 @@ func (l Level) String() string { return levelNames[l] }
 type Events struct {
 	// Reads are reads of secret values: read and read_version.
 	Reads Level
-	// Lists are reads without values: info, list_paths and list_history.
+	// Lists are reads without values: info, list_paths, list_deleted_paths
+	// and list_history.
 	Lists Level
 	// Logins are Web UI sign-ins and CLI logins: login, authorize,
 	// authorize_start and authorize_token.

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/rapatao/secret-manager/internal/client"
+	"github.com/rapatao/secret-manager/internal/dotenv"
 	"github.com/rapatao/secret-manager/internal/local"
 	"github.com/rapatao/secret-manager/internal/secrets"
 	"github.com/rapatao/secret-manager/internal/storage"
@@ -53,13 +54,16 @@ const Usage = `Client commands:
                                                prompted for, or read from stdin
   servers logout [--server URL]                remove the stored token
   servers use URL                              make a logged-in server the default
-  list                                         list paths
+  list    [--deleted]                          list paths, or deleted paths that still
+                                               have versions
   keys    --path P [--recursive]               list key names, without values; with
                                                --recursive, as PATH KEY for every
                                                nested path
   get     --path P [--recursive] [KEY]         print one value, or all as dotenv
-  set     --path P [--env-file F|-] [--generate KEY[:LEN]...] [K=V...]
-                                               merge keys into a path; --generate sets
+  set     --path P [--env-file F|- | --json-file F|-] [--generate KEY[:LEN]...] [K=V...]
+                                               merge keys into a path; --env-file reads
+                                               KEY=VALUE lines, --json-file a JSON
+                                               object of string values; --generate sets
                                                KEY to LEN (default 32) random letters
                                                and digits
   delete  --path P (KEY... | --all)            delete keys, or the whole path
@@ -497,6 +501,7 @@ func (c *CLI) serversLogout(args []string) error {
 
 func (c *CLI) list(ctx context.Context, args []string) error {
 	f := c.flags("list", false, false)
+	deleted := f.fs.Bool("deleted", false, "list deleted paths that still have versions")
 	api, err := f.parse(args)
 	if err != nil {
 		return err
@@ -504,7 +509,14 @@ func (c *CLI) list(ctx context.Context, args []string) error {
 	if f.fs.NArg() > 0 {
 		return fmt.Errorf("%w: list takes no arguments", errUsage)
 	}
-	paths, err := api.Paths(ctx)
+	list := api.Paths
+	if *deleted {
+		if err := api.Require(ctx, "paths-deleted"); err != nil {
+			return err
+		}
+		list = api.DeletedPaths
+	}
+	paths, err := list(ctx)
 	if err != nil {
 		return err
 	}
@@ -581,7 +593,7 @@ func (c *CLI) get(ctx context.Context, args []string) error {
 		return err
 	}
 	if key == "" {
-		return formatDotenv(c.Stdout, data)
+		return dotenv.Format(c.Stdout, data)
 	}
 	v, ok := data[key]
 	if !ok {
@@ -594,6 +606,7 @@ func (c *CLI) get(ctx context.Context, args []string) error {
 func (c *CLI) set(ctx context.Context, args []string) error {
 	f := c.flags("set", true, false)
 	envFile := f.fs.String("env-file", "", "dotenv file to import, - for stdin")
+	jsonFile := f.fs.String("json-file", "", "JSON object of string values to import, - for stdin")
 	generated := map[string]string{}
 	f.fs.Func("generate", "set KEY[:LENGTH] to random letters and digits, LENGTH 32 by default", func(v string) error {
 		key, length, err := parseGenerate(v)
@@ -608,20 +621,27 @@ func (c *CLI) set(ctx context.Context, args []string) error {
 		return err
 	}
 
+	if *envFile != "" && *jsonFile != "" {
+		return fmt.Errorf("%w: --env-file and --json-file cannot be combined", errUsage)
+	}
 	values := map[string]string{}
-	if *envFile != "" {
+	name, parse := *envFile, dotenv.Parse
+	if *jsonFile != "" {
+		name, parse = *jsonFile, dotenv.ParseJSON
+	}
+	if name != "" {
 		r := c.Stdin
-		if *envFile != "-" {
-			file, err := os.Open(*envFile)
+		if name != "-" {
+			file, err := os.Open(name)
 			if err != nil {
 				return err
 			}
 			defer file.Close()
 			r = file
 		}
-		parsed, err := parseDotenv(r)
+		parsed, err := parse(r)
 		if err != nil {
-			return fmt.Errorf("%s: %w", *envFile, err)
+			return fmt.Errorf("%s: %w", name, err)
 		}
 		values = parsed
 	}
@@ -705,7 +725,7 @@ func (c *CLI) export(ctx context.Context, args []string) error {
 		return err
 	}
 	if *format == "dotenv" {
-		return formatDotenv(c.Stdout, data)
+		return dotenv.Format(c.Stdout, data)
 	}
 	enc := json.NewEncoder(c.Stdout)
 	enc.SetIndent("", "  ")
@@ -750,7 +770,7 @@ func (c *CLI) history(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		return formatDotenv(c.Stdout, v.Data)
+		return dotenv.Format(c.Stdout, v.Data)
 	default:
 		return fmt.Errorf("%w: history takes at most one VERSION", errUsage)
 	}

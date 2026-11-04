@@ -10,8 +10,10 @@ go install github.com/rapatao/secret-manager/cmd/secret-manager@latest
 secret-manager servers login --server https://secrets.example.com   # approve in the browser, see Servers and login
 
 secret-manager list
+secret-manager list --deleted                          # deleted paths that still have versions
 secret-manager set --path /tools GITHUB_TOKEN=abc OTHER=1
 secret-manager set --path /tools --env-file .env       # or --env-file - for stdin
+secret-manager set --path /tools --json-file keys.json # JSON object of string values, or --json-file - for stdin
 secret-manager set --path /db --generate PASSWORD      # 32 random letters and digits
 secret-manager set --path /db --generate PIN:6         # 6 random letters and digits
 secret-manager keys --path /tools                      # key names, no values

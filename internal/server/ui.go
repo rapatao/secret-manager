@@ -1,11 +1,14 @@
 package server
 
 import (
+	"bytes"
+	"cmp"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"embed"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -19,7 +22,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rapatao/secret-manager/internal/dotenv"
 	"github.com/rapatao/secret-manager/internal/secrets"
+	"github.com/rapatao/secret-manager/internal/storage/encrypted"
 )
 
 const sessionCookie = "sm_session"
@@ -94,7 +99,7 @@ func (s *sessions) valid(id string) bool {
 func (s *Server) ui(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'none'; img-src data:; script-src 'self'; style-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", "default-src 'none'; connect-src 'self'; img-src data:; script-src 'self'; style-src 'self' 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		h.Set("Cache-Control", "no-store")
@@ -283,22 +288,9 @@ func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 		s.uiError(w, r, err)
 		return
 	}
-	from, to := "", "current"
-	if deleted {
-		to = ""
-	}
-	if len(versions) > 0 {
-		from = strconv.Itoa(versions[min(1, len(versions)-1)].Number)
-		if deleted {
-			to = strconv.Itoa(versions[0].Number)
-		}
-	}
-	if cmp != nil {
-		from, to = cmp.From, cmp.To
-	}
 	s.render(w, http.StatusOK, "path", map[string]any{
 		"Path": path, "Deleted": deleted, "Entries": entries, "History": history,
-		"Compare": cmp, "From": from, "To": to, "Error": r.URL.Query().Get("error"),
+		"Compare": cmp, "Error": r.URL.Query().Get("error"),
 	})
 }
 
@@ -489,6 +481,64 @@ func (s *Server) uiSetKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, pathURL(path), http.StatusSeeOther)
+}
+
+// uiExport downloads the keys of a path as a dotenv or JSON file.
+func (s *Server) uiExport(w http.ResponseWriter, r *http.Request) {
+	path, format := r.URL.Query().Get("path"), r.URL.Query().Get("format")
+	if format != "dotenv" && format != "json" {
+		s.uiError(w, r, fmt.Errorf("%w: unknown format %q", secrets.ErrInvalid, format))
+		return
+	}
+	data, err := s.secrets.Get(r.Context(), path, false)
+	s.auditRead(r, "ui", "export", path, data, err)
+	if err != nil {
+		s.uiError(w, r, err)
+		return
+	}
+	var out bytes.Buffer
+	ext := ".env"
+	if format == "json" {
+		ext = ".json"
+		enc := json.NewEncoder(&out)
+		enc.SetIndent("", "  ")
+		err = enc.Encode(data)
+	} else {
+		err = dotenv.Format(&out, data)
+	}
+	if err != nil {
+		s.uiError(w, r, err)
+		return
+	}
+	normalized, _ := secrets.NormalizePath(path)
+	name := cmp.Or(strings.ReplaceAll(strings.Trim(normalized, "/"), "/", "-"), "root")
+	download(w, name+ext, out.Bytes())
+}
+
+// uiBackup downloads a backup of every path, encrypted with the server's
+// backup key when it has one.
+func (s *Server) uiBackup(w http.ResponseWriter, r *http.Request) {
+	doc, err := s.backup(r.Context(), r.URL.Query().Get("history") == "true")
+	var raw []byte
+	if err == nil {
+		raw, err = json.Marshal(doc)
+	}
+	if err == nil && s.Settings.Backups.Key != nil {
+		raw, err = encrypted.SealBackup(s.Settings.Backups.Key, raw)
+	}
+	s.auditAt(s.Events.Backups, r, "ui", "backup", "", nil, err)
+	if err != nil {
+		s.uiError(w, r, err)
+		return
+	}
+	download(w, "backup-"+doc.Time.Format("20060102T150405Z")+".json", raw)
+}
+
+// download sends body as an attachment named name, which must need no quoting.
+func download(w http.ResponseWriter, name string, body []byte) {
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	_, _ = w.Write(body)
 }
 
 func pathURL(path string) string {
