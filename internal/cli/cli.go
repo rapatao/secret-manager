@@ -58,6 +58,8 @@ const Usage = `Client commands:
                                                KEY to LEN (default 32) random letters
                                                and digits
   delete  --path P (KEY... | --all)            delete keys, or the whole path
+  copy    --path P --to Q                      copy a path and its history to a new path
+  move    --path P --to Q                      move a path and its history to a new path
   export  --path P [--recursive] [--format dotenv|json]
   history --path P [VERSION]                   list versions, or print one as dotenv
   history --path P --diff VERSION [VERSION2]   list keys added (+), removed (-) or
@@ -127,6 +129,8 @@ func (c *CLI) Run(ctx context.Context, args []string) int {
 		"get":      c.get,
 		"set":      c.set,
 		"delete":   c.delete,
+		"copy":     c.copyPath(false),
+		"move":     c.copyPath(true),
 		"export":   c.export,
 		"run":      c.run,
 		"history":  c.history,
@@ -596,6 +600,28 @@ func (c *CLI) delete(ctx context.Context, args []string) error {
 		}
 	}
 	return nil
+}
+
+func (c *CLI) copyPath(move bool) func(context.Context, []string) error {
+	name := "copy"
+	if move {
+		name = "move"
+	}
+	return func(ctx context.Context, args []string) error {
+		f := c.flags(name, true, false)
+		to := f.fs.String("to", "", "new path")
+		api, err := f.parse(args)
+		if err != nil {
+			return err
+		}
+		if *to == "" || f.fs.NArg() > 0 {
+			return fmt.Errorf("%w: %s takes --path and --to only", errUsage, name)
+		}
+		if err := api.Require(ctx, "paths-copy"); err != nil {
+			return err
+		}
+		return api.CopyPath(ctx, f.path, *to, move)
+	}
 }
 
 func (c *CLI) export(ctx context.Context, args []string) error {

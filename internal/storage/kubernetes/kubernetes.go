@@ -4,6 +4,8 @@ package kubernetes
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,10 +39,18 @@ const (
 
 	namePrefix    = "sm"
 	historyPrefix = "smh"
-	// tokensName cannot collide with a path Secret: those are "sm" or start
-	// with "sm.".
+	// AuditLabel marks the Secret holding the audit events.
+	AuditLabel = "secretmanager.rapatao.com/audit"
+	// PathHashLabel identifies the path of a history Secret by the first 32
+	// hex digits of its SHA-256, as label values cannot hold every path.
+	PathHashLabel = "secretmanager.rapatao.com/path-hash"
+
+	// tokensName and auditName cannot collide with a path Secret: those are
+	// "sm" or start with "sm.".
 	tokensName = "sm-tokens"
+	auditName  = "sm-audit"
 	tokensKey  = "tokens"
+	auditKey   = "events"
 )
 
 // Backend implements storage.Backend on top of Secrets in a single namespace.
@@ -190,7 +200,7 @@ func (b *Backend) versionSecret(path string, v storage.Version) *corev1.Secret {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      VersionName(path, v.Number),
 			Namespace: b.ns,
-			Labels:    map[string]string{HistoryLabel: "true"},
+			Labels:    map[string]string{HistoryLabel: "true", PathHashLabel: PathHash(path)},
 			Annotations: map[string]string{
 				PathAnnotation:    path,
 				VersionAnnotation: strconv.Itoa(v.Number),
@@ -225,7 +235,7 @@ func (b *Backend) ReplaceVersions(ctx context.Context, path string, versions []s
 		if err := b.c.Get(ctx, client.ObjectKeyFromObject(want), &s); err != nil {
 			return fmt.Errorf("get version %d of %s: %w", v.Number, path, err)
 		}
-		s.Annotations, s.Data = want.Annotations, want.Data
+		s.Labels, s.Annotations, s.Data = want.Labels, want.Annotations, want.Data
 		if err := b.c.Update(ctx, &s); err != nil {
 			return fmt.Errorf("update version %d of %s: %w", v.Number, path, err)
 		}
@@ -237,6 +247,34 @@ func (b *Backend) ReplaceVersions(ctx context.Context, path string, versions []s
 		}
 	}
 	return nil
+}
+
+// PathHash returns the PathHashLabel value of path.
+func PathHash(path string) string {
+	sum := sha256.Sum256([]byte(path))
+	return hex.EncodeToString(sum[:16])
+}
+
+// LabelVersions adds PathHashLabel to the history Secrets written before it
+// existed, so Versions finds them, and returns how many it labeled.
+func (b *Backend) LabelVersions(ctx context.Context) (int, error) {
+	var list corev1.SecretList
+	if err := b.c.List(ctx, &list, client.InNamespace(b.ns), client.MatchingLabels{HistoryLabel: "true"}); err != nil {
+		return 0, fmt.Errorf("list versions: %w", err)
+	}
+	labeled := 0
+	for _, s := range list.Items {
+		path := s.Annotations[PathAnnotation]
+		if path == "" || s.Labels[PathHashLabel] == PathHash(path) {
+			continue
+		}
+		s.Labels[PathHashLabel] = PathHash(path)
+		if err := b.c.Update(ctx, &s); err != nil {
+			return labeled, fmt.Errorf("label version secret %s: %w", s.Name, err)
+		}
+		labeled++
+	}
+	return labeled, nil
 }
 
 // VersionedPaths implements storage.Backend.
@@ -257,10 +295,9 @@ func (b *Backend) VersionedPaths(ctx context.Context) ([]string, error) {
 
 // Versions implements storage.Backend.
 func (b *Backend) Versions(ctx context.Context, path string) ([]storage.Version, error) {
-	// ponytail: lists every history Secret in the namespace; add a label
-	// identifying the path if the namespace grows to thousands of versions.
 	var list corev1.SecretList
-	if err := b.c.List(ctx, &list, client.InNamespace(b.ns), client.MatchingLabels{HistoryLabel: "true"}); err != nil {
+	labels := client.MatchingLabels{HistoryLabel: "true", PathHashLabel: PathHash(path)}
+	if err := b.c.List(ctx, &list, client.InNamespace(b.ns), labels); err != nil {
 		return nil, fmt.Errorf("list versions: %w", err)
 	}
 	var versions []storage.Version
@@ -285,46 +322,71 @@ func (b *Backend) Versions(ctx context.Context, path string) ([]storage.Version,
 
 // Tokens implements storage.Backend.
 func (b *Backend) Tokens(ctx context.Context) ([]storage.Token, error) {
-	var s corev1.Secret
-	err := b.c.Get(ctx, client.ObjectKey{Namespace: b.ns, Name: tokensName}, &s)
-	if apierrors.IsNotFound(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("get tokens: %w", err)
-	}
 	var tokens []storage.Token
-	if err := json.Unmarshal(s.Data[tokensKey], &tokens); err != nil {
-		return nil, fmt.Errorf("secret %s: parse tokens: %w", tokensName, err)
-	}
-	return tokens, nil
+	err := b.getJSON(ctx, tokensName, tokensKey, &tokens)
+	return tokens, err
 }
 
 // PutTokens implements storage.Backend.
 func (b *Backend) PutTokens(ctx context.Context, tokens []storage.Token) error {
-	raw, err := json.Marshal(tokens)
+	return b.putJSON(ctx, tokensName, TokensLabel, tokensKey, tokens)
+}
+
+// AuditEvents implements storage.Backend.
+func (b *Backend) AuditEvents(ctx context.Context) ([]storage.AuditEvent, error) {
+	var events []storage.AuditEvent
+	err := b.getJSON(ctx, auditName, auditKey, &events)
+	return events, err
+}
+
+// PutAuditEvents implements storage.Backend.
+func (b *Backend) PutAuditEvents(ctx context.Context, events []storage.AuditEvent) error {
+	return b.putJSON(ctx, auditName, AuditLabel, auditKey, events)
+}
+
+// getJSON decodes the JSON document stored under key in the Secret name into
+// v, and leaves v unchanged when the Secret does not exist.
+func (b *Backend) getJSON(ctx context.Context, name, key string, v any) error {
+	var s corev1.Secret
+	err := b.c.Get(ctx, client.ObjectKey{Namespace: b.ns, Name: name}, &s)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("get secret %s: %w", name, err)
+	}
+	if err := json.Unmarshal(s.Data[key], v); err != nil {
+		return fmt.Errorf("secret %s: parse: %w", name, err)
+	}
+	return nil
+}
+
+// putJSON stores v as JSON under key in the Secret name, labeled label,
+// creating it when missing.
+func (b *Backend) putJSON(ctx context.Context, name, label, key string, v any) error {
+	raw, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
 	var s corev1.Secret
-	err = b.c.Get(ctx, client.ObjectKey{Namespace: b.ns, Name: tokensName}, &s)
+	err = b.c.Get(ctx, client.ObjectKey{Namespace: b.ns, Name: name}, &s)
 	if apierrors.IsNotFound(err) {
 		s = corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: tokensName, Namespace: b.ns, Labels: map[string]string{TokensLabel: "true"}},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: b.ns, Labels: map[string]string{label: "true"}},
 			Type:       corev1.SecretTypeOpaque,
-			Data:       map[string][]byte{tokensKey: raw},
+			Data:       map[string][]byte{key: raw},
 		}
 		if err := b.c.Create(ctx, &s); err != nil {
-			return fmt.Errorf("create tokens: %w", err)
+			return fmt.Errorf("create secret %s: %w", name, err)
 		}
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("get tokens: %w", err)
+		return fmt.Errorf("get secret %s: %w", name, err)
 	}
-	s.Data = map[string][]byte{tokensKey: raw}
+	s.Data = map[string][]byte{key: raw}
 	if err := b.c.Update(ctx, &s); err != nil {
-		return fmt.Errorf("update tokens: %w", err)
+		return fmt.Errorf("update secret %s: %w", name, err)
 	}
 	return nil
 }

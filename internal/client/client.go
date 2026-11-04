@@ -135,6 +135,16 @@ func (c *Client) DeletePath(ctx context.Context, path string) error {
 	return c.do(ctx, http.MethodDelete, "/api/v1/paths", url.Values{"path": {path}}, nil, nil)
 }
 
+// CopyPath copies path, with its versions, to the new path to; with move,
+// path is deleted afterwards.
+func (c *Client) CopyPath(ctx context.Context, path, to string, move bool) error {
+	op := "/api/v1/paths/copy"
+	if move {
+		op = "/api/v1/paths/move"
+	}
+	return c.do(ctx, http.MethodPost, op, url.Values{"path": {path}, "to": {to}}, nil, nil)
+}
+
 // Version is a stored version of a path. History fills Keys, Version fills
 // Data.
 type Version struct {

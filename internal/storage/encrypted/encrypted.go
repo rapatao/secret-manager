@@ -282,3 +282,14 @@ func (b *Backend) Tokens(ctx context.Context) ([]storage.Token, error) {
 func (b *Backend) PutTokens(ctx context.Context, tokens []storage.Token) error {
 	return b.inner.PutTokens(ctx, tokens)
 }
+
+// AuditEvents implements storage.Backend. Audit events hold no values, so
+// they are not encrypted.
+func (b *Backend) AuditEvents(ctx context.Context) ([]storage.AuditEvent, error) {
+	return b.inner.AuditEvents(ctx)
+}
+
+// PutAuditEvents implements storage.Backend.
+func (b *Backend) PutAuditEvents(ctx context.Context, events []storage.AuditEvent) error {
+	return b.inner.PutAuditEvents(ctx, events)
+}

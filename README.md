@@ -39,9 +39,9 @@ Writes made through the API reach target Secrets immediately. Every `SecretSync`
 
 Storage is pluggable behind a small interface (`internal/storage.Backend`), selected with `--storage`.
 
-`kubernetes` (default): each path is a Secret in the server's namespace (`/kubernetes/app` is stored as `sm.kubernetes.app`, labeled `secretmanager.rapatao.com/store=true`). There is no database or volume to run. Each write that changes a path is also stored as a version, unless history is disabled: a Secret named `smh.<path>.<version>` (`/kubernetes/app` version 3 is `smh.kubernetes.app.3`), labeled `secretmanager.rapatao.com/history=true`. See [History](#history).
+`kubernetes` (default): each path is a Secret in the server's namespace (`/kubernetes/app` is stored as `sm.kubernetes.app`, labeled `secretmanager.rapatao.com/store=true`). There is no database or volume to run. Each write that changes a path is also stored as a version, unless history is disabled: a Secret named `smh.<path>.<version>` (`/kubernetes/app` version 3 is `smh.kubernetes.app.3`), labeled `secretmanager.rapatao.com/history=true` and `secretmanager.rapatao.com/path-hash=<first 32 hex digits of the SHA-256 of the path>`, so the versions of one path are listed without reading the others. On start, the server adds the `path-hash` label to version Secrets written before it existed. See [History](#history). Integration tokens are kept in the Secret `sm-tokens` and the newest audit events in `sm-audit`.
 
-`file`: every path and version is kept in one JSON file (`--file`, mode `0600`), loaded into memory at start and rewritten atomically on every write.
+`file`: every path, version, integration and kept audit event is in one JSON file (`--file`, mode `0600`), loaded into memory at start and rewritten atomically on every write.
 
 ### Encryption
 
@@ -116,6 +116,7 @@ The chart sets these; set them yourself when running `secret-manager server` out
 | `--controller` | `true` | Run the `SecretSync` controller. Requires access to a cluster |
 | `--history-limit` | `10` | Versions kept per path, current included, `0` disables history |
 | `--cache-max-age` | `168h` | How long clients may use the secrets they read while the server is unreachable, `0` disables their [offline cache](#offline-cache). Integrations may override it |
+| `--trusted-proxies` | | Comma-separated CIDRs or addresses of the proxies in front of the server, see [Client address](#client-address) |
 | `--last-used-flush` | `30m` | Time between saves of the last use of every [integration](#integrations), also saved on shutdown |
 | `--backup-dir` | | Directory receiving [scheduled backups](#scheduled-backups), empty disables them |
 | `--backup-interval` | `24h` | Time between scheduled backups |
@@ -200,6 +201,8 @@ secret-manager get --path /tools --recursive           # dotenv output
 secret-manager export --path /tools --format json
 secret-manager delete --path /tools OTHER
 secret-manager delete --path /tools --all
+secret-manager copy --path /tools --to /tools-backup   # data and history, see History
+secret-manager move --path /tools --to /shared/tools
 secret-manager run --path /tools -- make updates
 secret-manager history --path /tools                   # list versions
 secret-manager history --path /tools 3                 # print version 3 as dotenv
@@ -273,6 +276,8 @@ Every write that changes a path (setting keys, deleting a key) stores the path's
 
 `secret-manager history --path P --delete N [M...]` deletes versions, to purge a value that must not stay readable, for example a leaked secret: change the value first, then delete every version holding it. The current data is kept. The Web UI has a Delete button on each version, behind a confirmation dialog; deleting the last version of a deleted path removes the path from the deleted list. Once the newest version is deleted, its number is given to the next version written.
 
+`secret-manager copy --path P --to Q` copies the data and every version of `P` to the new path `Q`, keeping their numbers and times; `move` also deletes `P` and its versions. Nested paths are not copied. `Q` must have no data and no versions, so a deleted path that still has versions cannot be the target until they are deleted. `SecretSync` sources keep reading `P`: after a move they report it missing until they are pointed at `Q`. The Web UI offers both in the danger zone of a path.
+
 Deleting a path keeps its versions, so `rollback` can bring it back. Rolling back writes the old data as a new version, so it can itself be undone. Rolling back a synced path updates its targets like any other write.
 
 A path written while history is disabled has no versions until its next change.
@@ -312,6 +317,8 @@ What an integration can do:
 | `info`, `list` (only paths under its path) | yes | yes |
 | Read data, keys and history | under `P` | every path |
 | Set and delete keys, delete paths and versions, roll back (not read-only) | under `P` | every path |
+| Copy a path (not read-only) | from and to under `P` | every path |
+| Move a path (not read-only) | from and to under `P` | every path |
 | Backup | no | yes |
 | Restore (not read-only) | no | yes |
 
@@ -349,6 +356,7 @@ Secrets
 - One field filters paths as you type, matching anywhere in the path. It opens the typed path when it exists, or creates it after a confirmation dialog.
 - Deleted paths that still have versions are listed separately; restoring one of their versions brings them back.
 - Deleting a path is in the collapsed danger zone of its page, and requires typing the path in a confirmation dialog.
+- Copy or move, also in the danger zone, asks for the new path in a dialog and opens it afterwards, see [History](#history).
 
 Keys
 - Values show as a fixed-length mask until Show opens the editor; an edited badge marks a value with unsaved changes. The copy button copies a value to the clipboard.
@@ -360,19 +368,31 @@ Keys
 
 History
 - Each version can be compared with the current data and restored after a confirmation dialog, see [History](#history).
+- Compare picks any two versions, or a version and the current data, and shows the keys added, changed and deleted between them with their values. It opens with the version before the newest and the current data selected, and the chosen pair stays in the URL (`&from=2&to=current`).
 - Each version can be deleted after a confirmation dialog.
 
 Integrations and logins
 - The Integrations page manages [integrations](#integrations). `/authorize` approves or denies CLI logins, see [Servers and login](#servers-and-login).
 
 Audit
-- The Audit page (`/audit`) lists the newest 500 [audit log](#audit-log) events since the server started, newest first: time, source, operation, integration, path, keys, remote address and result.
+- The Audit page (`/audit`) lists the newest 500 [audit log](#audit-log) events, newest first: time, source, operation, integration, path, keys, client address and result.
 - A filter shows only the events made with one integration's token or acting on that integration (created, updated, revoked, approved).
-- Events are kept in the server's memory: a restart empties the page. The JSON log holds every event.
+- The server saves them to the storage backend every minute and on shutdown, and loads them on start, so a crash loses at most the last minute of them. The JSON log holds every event.
 
 The server rejects every change made without its confirmation, or with one that does not match. Filtering paths, editing keys, the copy button and the integration dialogs need JavaScript; browsers without invoker commands (`commandfor`) also use it to open the dialogs.
 
+After 5 failed sign-ins from one address, each further attempt from it must wait 1 second, then 2, 4 and so on up to 1 minute, and gets `429` with `too many failed sign-ins, try again in Ns` until then. A successful sign-in, or 15 minutes without a failure, resets the count. The address is the [client address](#client-address): without trusted proxies, every client behind an Ingress shares the Ingress address, so the wait never exceeds 1 minute. The counts live in the server's memory.
+
 Sessions last 12 hours and survive server restarts; changing the admin token signs every session out. Signing out deletes the session cookie in the browser. The session cookie is `Secure`: use HTTPS (an Ingress with TLS) or `localhost`.
+
+### Client address
+
+By default the server identifies a client by the address of the connection, because `X-Forwarded-For` is written by whoever sends the request. Behind an Ingress, that is the Ingress pod for every client. With `--trusted-proxies` (chart value `trustedProxies`, a list), a request whose connection comes from one of those ranges is attributed to the rightmost `X-Forwarded-For` address outside them, after joining every `X-Forwarded-For` header line in order. Proxies such as HAProxy (`option forwardfor`), nginx (`$proxy_add_x_forwarded_for`) and cloud load balancers append the address they saw, so entries the client wrote stay on the left and are never used. A malformed entry stops the search at the last valid one.
+
+The client address is used for sign-in limits, and is logged as `client` in the [audit log](#audit-log) when it differs from the connection address. For it to be the real client, every hop has to see it:
+
+- List only the proxies, for example the Ingress controller pods (k3s: `10.42.0.0/16`) and any load balancer in front of them. A range that covers clients lets them pick their own address.
+- A LoadBalancer Service with `externalTrafficPolicy: Cluster` replaces the client address with a node address before the Ingress controller sees it. Use `Local` to keep it. In MetalLB, Services sharing an IP (`metallb.io/allow-shared-ip`) must all use the same policy, and with `Local` also the same pod selector, so an Ingress controller sharing its IP with other Services needs its own IP first.
 
 ## API
 
@@ -386,6 +406,8 @@ All endpoints except `/healthz`, `/readyz` and the two login endpoints require `
 | `PUT` | `/api/v1/secrets?path=P` | Merge a JSON object of string values into P |
 | `DELETE` | `/api/v1/secrets/{key}?path=P` | Delete one key |
 | `DELETE` | `/api/v1/paths?path=P` | Delete a path (nested paths are kept) |
+| `POST` | `/api/v1/paths/copy?path=P&to=Q` | Copy P and its versions to the new path Q; `400` when Q has data or versions |
+| `POST` | `/api/v1/paths/move?path=P&to=Q` | Copy, then delete P and its versions |
 | `GET` | `/api/v1/backup?history=true` | `{"format": 1, "version": "...", "time": "...", "paths": [{"path": "/a", "data": {...}, "versions": [...]}]}`, `versions` only with `history=true` |
 | `POST` | `/api/v1/restore` | Restore a backup document, returns `{"paths": N}` |
 | `GET` | `/api/v1/history?path=P` | `{"versions": [{"version": 3, "time": "...", "keys": [...]}]}`, newest first, without values |
@@ -405,7 +427,7 @@ A loopback login starts in the browser at `/authorize?redirect_uri=http://127.0.
 
 Clients and servers of different versions work together, as long as the server has the features a command uses.
 
-`GET /api/v1/info` lists those features as capabilities: `paths`, `secrets`, `history`, `history-delete`, `backup` and `integrations`. A command that needs a feature checks its capability first and fails with `server v1.2.0 at URL does not support X; upgrade the server`. Servers without `/api/v1/info` are treated as having `paths`, `secrets` and `history`, and their version is shown as unknown. A capability never changes meaning; changed behavior gets a new capability.
+`GET /api/v1/info` lists those features as capabilities: `paths`, `secrets`, `history`, `history-delete`, `backup`, `integrations` and `paths-copy`. A command that needs a feature checks its capability first and fails with `server v1.2.0 at URL does not support X; upgrade the server`. Servers without `/api/v1/info` are treated as having `paths`, `secrets` and `history`, and their version is shown as unknown. A capability never changes meaning; changed behavior gets a new capability.
 
 Authentication depends on the `integrations` capability:
 
@@ -421,7 +443,7 @@ A CLI without browser login works against a server with `integrations` using an 
 ```
 client: v1.5.0
 server: v1.4.0 (https://secrets.example.com)
-capabilities: backup, history, history-delete, integrations, paths, secrets
+capabilities: backup, history, history-delete, integrations, paths, paths-copy, secrets
 ```
 
 ## Observability
@@ -450,7 +472,7 @@ Every change made through the API or the Web UI, every backup, every Web UI logi
 {"level":"WARN","msg":"audit","source":"ui","op":"login","remote":"10.42.0.7:51240","error":"invalid token"}
 ```
 
-`op` is one of `set`, `delete_key`, `delete_path`, `create_path`, `rollback`, `delete_version` (with the `version`), `backup`, `restore`, `create_token`, `update_token`, `revoke_token` (with the integration `name`), `authorize` (a CLI login approved or denied in the Web UI), `login` and `auth` (API bearer token, including expired tokens and requests an integration is not allowed to make). Requests made with an integration token carry its name in `token`. Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Other reads are not logged. The newest events are also shown on the Web UI [Audit](#web-ui) page.
+`op` is one of `set`, `delete_key`, `delete_path`, `create_path`, `copy_path` and `move_path` (with the target in `to`), `rollback`, `delete_version` (with the `version`), `backup`, `restore`, `create_token`, `update_token`, `revoke_token` (with the integration `name`), `authorize` (a CLI login approved or denied in the Web UI), `login` and `auth` (API bearer token, including expired tokens and requests an integration is not allowed to make). Requests made with an integration token carry its name in `token`. `client` is the [client address](#client-address) when trusted proxies resolve one that differs from `remote`. Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Other reads are not logged. The newest events are also shown on the Web UI [Audit](#web-ui) page.
 
 ## Security notes
 
@@ -462,6 +484,7 @@ Every change made through the API or the Web UI, every backup, every Web UI logi
 - With the controller enabled, the server can manage Secrets in every namespace, where `SecretSync` targets live. With `controller.enabled=false` it can only manage Secrets in its own namespace.
 - The metrics port has no authentication. It exposes no secret values, but restrict it with a NetworkPolicy if other workloads should not read it.
 - The admin token signs in to the Web UI, which can read every value and create integrations. Keep it long and random, and rotate it by updating its Secret and restarting the server. Give every client its own [integration](#integrations), as narrow and short-lived as it allows, and revoke it when it is no longer used.
+- Failed Web UI sign-ins are slowed down per [client address](#client-address). Without `--trusted-proxies`, every client behind an Ingress shares one limit; limit sign-in attempts at the Ingress too if the Web UI is reachable from the internet. Never list client ranges in `--trusted-proxies`.
 - Approve a CLI login only if you started it. For a device login, check that the code on the approval page matches the one in your terminal.
 
 ## Development

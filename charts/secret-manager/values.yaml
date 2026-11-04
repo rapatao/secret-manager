@@ -27,6 +27,14 @@ encryption:
   # it; remove it once the server has started with both keys.
   previousKey: ""
 
+# CIDRs of the proxies in front of the server, such as the ingress
+# controller pods (k3s: 10.42.0.0/16). Requests from them are attributed to
+# the rightmost X-Forwarded-For address outside these ranges, for sign-in
+# limits and the audit log. List only the proxies: a range covering clients
+# lets them choose their own address. The proxy must see the client address,
+# e.g. a LoadBalancer Service with externalTrafficPolicy: Local.
+trustedProxies: []
+
 service:
   type: ClusterIP
   port: 80

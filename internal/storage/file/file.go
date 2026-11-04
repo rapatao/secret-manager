@@ -29,6 +29,7 @@ type state struct {
 	Paths    map[string]map[string]string `json:"paths"`
 	Versions map[string][]storage.Version `json:"versions"`
 	Tokens   []storage.Token              `json:"tokens,omitempty"`
+	Audit    []storage.AuditEvent         `json:"audit,omitempty"`
 }
 
 var _ storage.Backend = (*Backend)(nil)
@@ -217,5 +218,20 @@ func (b *Backend) PutTokens(_ context.Context, tokens []storage.Token) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.state.Tokens = slices.Clone(tokens)
+	return b.commit()
+}
+
+// AuditEvents implements storage.Backend.
+func (b *Backend) AuditEvents(_ context.Context) ([]storage.AuditEvent, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Clone(b.state.Audit), nil
+}
+
+// PutAuditEvents implements storage.Backend.
+func (b *Backend) PutAuditEvents(_ context.Context, events []storage.AuditEvent) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.state.Audit = slices.Clone(events)
 	return b.commit()
 }

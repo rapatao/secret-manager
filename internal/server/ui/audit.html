@@ -13,7 +13,7 @@
 </form>
 </div>
 <table class="stack-narrow">
-<thead><tr><th>Time</th><th>Source</th><th>Operation</th><th>Integration</th><th>Path</th><th>Keys</th><th>Remote</th><th>Result</th></tr></thead>
+<thead><tr><th>Time</th><th>Source</th><th>Operation</th><th>Integration</th><th>Path</th><th>Keys</th><th>Client</th><th>Result</th></tr></thead>
 <tbody>
 {{range .Events}}
 <tr>
@@ -23,7 +23,7 @@
 <td data-label="Integration">{{with .Token}}<code>{{.}}</code>{{end}}{{with .Name}} <span class="muted">on</span> <code>{{.}}</code>{{end}}</td>
 <td data-label="Path">{{with .Path}}<code>{{.}}</code>{{end}}</td>
 <td class="mono" data-label="Keys">{{range .Keys}}{{.}} {{end}}</td>
-<td class="muted mono" data-label="Remote">{{.Remote}}{{with .Forwarded}} ({{.}}){{end}}</td>
+<td class="muted mono" data-label="Client">{{if .Client}}{{.Client}} <span class="muted">via</span> {{end}}{{.Remote}}{{if and .Forwarded (not .Client)}} ({{.}}){{end}}</td>
 <td data-label="Result">{{if .Error}}<span class="change del">failed</span> {{.Error}}{{else}}<span class="muted">ok</span>{{end}}</td>
 </tr>
 {{else}}

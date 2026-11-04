@@ -72,6 +72,35 @@
 {{with .History}}
 <div class="card">
 <h2>History</h2>
+<form class="body row compare" method="get" action="/secrets/path">
+<input type="hidden" name="path" value="{{$path}}">
+<label class="inline">Compare
+<select name="from" aria-label="From">
+{{range .}}<option value="{{.Number}}"{{if eq (print .Number) $.From}} selected{{end}}>v{{.Number}}</option>
+{{end}}</select></label>
+<label class="inline">with
+<select name="to" aria-label="To">
+{{if not $.Deleted}}<option value="current"{{if eq $.To "current"}} selected{{end}}>current</option>{{end}}
+{{range .}}<option value="{{.Number}}"{{if eq (print .Number) $.To}} selected{{end}}>v{{.Number}}</option>
+{{end}}</select></label>
+<button type="submit" class="small">Compare</button>
+</form>
+{{with $.Compare}}
+<div class="body compare-result">
+<h3>{{if eq .From "current"}}current{{else}}v{{.From}}{{end}} compared with {{if eq .To "current"}}current{{else}}v{{.To}}{{end}}</h3>
+{{if .Changes}}
+<div class="diff-scroll">
+<table class="diff">
+<thead><tr><th></th><th>Key</th><th>{{if eq .From "current"}}current{{else}}v{{.From}}{{end}}</th><th>{{if eq .To "current"}}current{{else}}v{{.To}}{{end}}</th></tr></thead>
+<tbody>
+{{range .Changes}}<tr class="{{template "op" .Op}}"><td class="mono">{{.Op}}</td><td><code>{{.Key}}</code></td><td>{{if ne .Op "+"}}<code>{{.Before}}</code>{{end}}</td><td>{{if ne .Op "-"}}<code>{{.After}}</code>{{end}}</td></tr>
+{{end}}
+</tbody>
+</table>
+</div>
+{{else}}<p class="muted">Both hold the same data.</p>{{end}}
+</div>
+{{end}}
 <table class="stack-narrow">
 <thead><tr><th>Version</th><th>Written</th><th>Changes</th><th></th></tr></thead>
 <tbody>
@@ -128,9 +157,28 @@
 <details class="card danger-zone">
 <summary>Danger zone</summary>
 <div class="body">
+<span class="muted">Copies or moves this path, with its history, to a new path.</span>
+<button type="button" commandfor="copy-path" command="show-modal">Copy or move</button>
+</div>
+<div class="body">
 <span class="muted">Deletes this path and all its keys.</span>
 <button type="button" class="danger" commandfor="delete-path" command="show-modal">Delete path</button>
 </div>
+<dialog id="copy-path">
+<form class="stack" method="post" action="/secrets/copy">
+<input type="hidden" name="path" value="{{.Path}}">
+<h3>Copy or move path</h3>
+<p>Copy <code>{{.Path}}</code>, its keys and its history to a new path, or move them and delete <code>{{.Path}}</code>. Nested paths stay where they are, and <code>SecretSync</code> sources reading <code>{{.Path}}</code> are not changed.</p>
+<label>New path
+<input name="to" class="mono" autocomplete="off" required pattern="/([a-z0-9\-]+(/[a-z0-9\-]+)*)?" placeholder="/new/path">
+</label>
+<div class="dialog-actions">
+<button type="submit" formmethod="dialog" formnovalidate>Cancel</button>
+<button type="submit" name="confirm" value="copy">Copy</button>
+<button type="submit" name="confirm" value="move" class="danger">Move</button>
+</div>
+</form>
+</dialog>
 <dialog id="delete-path">
 <form class="stack" method="post" action="/secrets/delete">
 <input type="hidden" name="path" value="{{.Path}}">

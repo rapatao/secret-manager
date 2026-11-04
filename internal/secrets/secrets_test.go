@@ -1,11 +1,14 @@
 package secrets
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"maps"
 	"slices"
 	"testing"
+
+	"github.com/rapatao/secret-manager/internal/storage/encrypted"
 )
 
 func TestNormalizePath(t *testing.T) {
@@ -255,6 +258,87 @@ func TestDeleteVersions(t *testing.T) {
 	}
 	if paths, _ := s.backend.VersionedPaths(ctx); len(paths) != 0 {
 		t.Fatalf("versioned paths after deleting all: %v", paths)
+	}
+}
+
+func TestCopyAndMovePath(t *testing.T) {
+	ctx := context.Background()
+	var changed []string
+	s := New(newMem(), func(p string) { changed = append(changed, p) })
+	s.KeepVersions = 10
+	for _, v := range []string{"1", "2"} {
+		if err := s.SetKeys(ctx, "/a", map[string]string{"K": v}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SetKeys(ctx, "/taken", nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, to := range []string{"/a", "/taken", "/BAD"} {
+		if err := s.CopyPath(ctx, "/a", to, false); !errors.Is(err, ErrInvalid) {
+			t.Errorf("copy to %s: want ErrInvalid, got %v", to, err)
+		}
+	}
+	if err := s.CopyPath(ctx, "/missing", "/x", false); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("copy missing path: %v", err)
+	}
+
+	changed = nil
+	if err := s.CopyPath(ctx, "/a", "/b", false); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Get(ctx, "/b", false); got["K"] != "2" {
+		t.Fatalf("copied data %v", got)
+	}
+	if vs, _ := s.History(ctx, "/b"); len(vs) != 2 || vs[0].Number != 2 {
+		t.Fatalf("copied versions %+v", vs)
+	}
+	if _, err := s.Get(ctx, "/a", false); err != nil {
+		t.Fatalf("copy removed the source: %v", err)
+	}
+
+	if err := s.CopyPath(ctx, "/a", "/c", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get(ctx, "/a", false); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("moved source still exists: %v", err)
+	}
+	if vs, _ := s.History(ctx, "/a"); len(vs) != 0 {
+		t.Fatalf("moved source kept versions %+v", vs)
+	}
+	if vs, _ := s.History(ctx, "/c"); len(vs) != 2 {
+		t.Fatalf("moved versions %+v", vs)
+	}
+	if !slices.Equal(changed, []string{"/b", "/c", "/a"}) {
+		t.Fatalf("changes %v", changed)
+	}
+	if err := s.DeletePath(ctx, "/b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CopyPath(ctx, "/c", "/b", false); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("copy onto a deleted path with versions: %v", err)
+	}
+}
+
+func TestCopyPathEncrypted(t *testing.T) {
+	ctx := context.Background()
+	b, err := encrypted.New(newMem(), bytes.Repeat([]byte{7}, encrypted.KeySize), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(b, nil)
+	s.KeepVersions = 10
+	if err := s.SetKeys(ctx, "/a", map[string]string{"K": "v"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CopyPath(ctx, "/a", "/b", false); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Get(ctx, "/b", false); err != nil || got["K"] != "v" {
+		t.Fatalf("copied encrypted data = %v, %v", got, err)
+	}
+	if vs, err := s.History(ctx, "/b"); err != nil || len(vs) != 1 || vs[0].Data["K"] != "v" {
+		t.Fatalf("copied encrypted versions = %v, %v", vs, err)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -38,7 +39,7 @@ const BackupFormat = 1
 // GET /api/v1/info. Clients check them before using a feature added after
 // the first release. A shipped capability never changes meaning and is never
 // removed; changed behavior gets a new name.
-var Capabilities = []string{"backup", "history", "history-delete", "integrations", "paths", "secrets"}
+var Capabilities = []string{"backup", "history", "history-delete", "integrations", "paths", "paths-copy", "secrets"}
 
 // DefaultCacheMaxAge is the CacheMaxAge of a new Server.
 const DefaultCacheMaxAge = 7 * 24 * time.Hour
@@ -61,13 +62,18 @@ type Server struct {
 	CacheMaxAge time.Duration
 	// Settings are shown on the Web UI summary.
 	Settings Settings
+	// TrustedProxies are the addresses whose X-Forwarded-For header names
+	// the client, see clientAddr.
+	TrustedProxies []netip.Prefix
 
-	secrets  *secrets.Service
-	tokens   *tokens.Store
-	token    []byte
-	sessions *sessions
-	grants   *grants
-	auditLog auditLog
+	secrets    *secrets.Service
+	tokens     *tokens.Store
+	token      []byte
+	sessions   *sessions
+	grants     *grants
+	auditLog   auditLog
+	auditStore AuditStore
+	logins     *loginLimiter
 	// lastBackup is the latest scheduled backup run.
 	lastBackup atomic.Pointer[backupRun]
 	mux        *http.ServeMux
@@ -87,6 +93,7 @@ func New(svc *secrets.Service, tks *tokens.Store, token string) (*Server, error)
 		token:       []byte(token),
 		sessions:    newSessions([]byte(token), 12*time.Hour),
 		grants:      newGrants(5 * time.Minute),
+		logins:      newLoginLimiter(),
 		mux:         http.NewServeMux(),
 		log:         slog.Default(),
 	}
@@ -107,6 +114,8 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /api/v1/info", s.bearer(anyToken, s.apiInfo))
 	s.mux.Handle("GET /api/v1/paths", s.bearer(anyToken, s.apiListPaths))
 	s.mux.Handle("DELETE /api/v1/paths", s.bearer(writePath, s.apiDeletePath))
+	s.mux.Handle("POST /api/v1/paths/copy", s.bearer(readPath, s.apiCopyPath(false)))
+	s.mux.Handle("POST /api/v1/paths/move", s.bearer(writePath, s.apiCopyPath(true)))
 	s.mux.Handle("GET /api/v1/secrets", s.bearer(readPath, s.apiGet))
 	s.mux.Handle("PUT /api/v1/secrets", s.bearer(writePath, s.apiSet))
 	s.mux.Handle("DELETE /api/v1/secrets/{key}", s.bearer(writePath, s.apiDeleteKey))
@@ -129,6 +138,7 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /secrets/path", s.ui(s.session(s.uiPath)))
 	s.mux.Handle("POST /secrets/keys", s.ui(s.session(s.uiSetKey)))
 	s.mux.Handle("POST /secrets/delete", s.ui(s.session(s.uiDeletePath)))
+	s.mux.Handle("POST /secrets/copy", s.ui(s.session(s.uiCopyPath)))
 	s.mux.Handle("POST /secrets/rollback", s.ui(s.session(s.uiRollback)))
 	s.mux.Handle("POST /secrets/versions/delete", s.ui(s.session(s.uiDeleteVersion)))
 	s.mux.Handle("GET /audit", s.ui(s.session(s.uiAudit)))
@@ -298,6 +308,37 @@ func (s *Server) apiDeletePath(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// apiCopyPath copies, or with move moves, the path in ?path= to ?to=. The
+// token must be allowed to write to.
+func (s *Server) apiCopyPath(move bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		path, to := r.URL.Query().Get("path"), r.URL.Query().Get("to")
+		if t, ok := scopedToken(r); ok {
+			if err := allowed(t, writePath, to); err != nil {
+				s.audit(r, "api", "auth", to, nil, err)
+				writeError(w, http.StatusForbidden, err.Error())
+				return
+			}
+		}
+		if err := s.copyPath(r, "api", path, to, move); err != nil {
+			s.serviceError(w, r, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// copyPath copies or moves path to to and audits it.
+func (s *Server) copyPath(r *http.Request, source, path, to string, move bool) error {
+	err := s.secrets.CopyPath(r.Context(), path, to, move)
+	op := "copy_path"
+	if move {
+		op = "move_path"
+	}
+	s.audit(r, source, op, path, nil, err, "to", to)
+	return err
+}
+
 type versionJSON struct {
 	Version int               `json:"version"`
 	Time    time.Time         `json:"time"`
@@ -452,11 +493,16 @@ func parseVersion(v string) (int, error) {
 var errInvalidToken = errors.New("invalid token")
 
 // audit logs a change or an authentication attempt and keeps it for the Web
-// UI. Key names are logged, values never are. X-Forwarded-For is client
-// supplied and only informative. extra holds key-value pairs; "name" is the
+// UI. Key names are logged, values never are. X-Forwarded-For is logged as
+// received; client is the address resolved through the trusted proxies. extra holds key-value pairs; "name" is the
 // integration an integration operation acted on.
 func (s *Server) audit(r *http.Request, source, op, path string, keys []string, err error, extra ...any) {
-	e := auditEvent{Source: source, Op: op, Remote: r.RemoteAddr, Forwarded: r.Header.Get("X-Forwarded-For"), Path: path, Keys: keys}
+	e := auditEvent{Source: source, Op: op, Remote: r.RemoteAddr, Forwarded: strings.Join(r.Header.Values("X-Forwarded-For"), ", "), Path: path, Keys: keys}
+	if remote, ok := parseHop(r.RemoteAddr); ok && len(s.TrustedProxies) > 0 {
+		if client := s.clientAddr(r); client != remote.String() {
+			e.Client = client
+		}
+	}
 	if t, ok := scopedToken(r); ok {
 		e.Token = t.Name
 	}
@@ -478,6 +524,9 @@ func (s *Server) record(e auditEvent, extra ...any) {
 	attrs := []any{"source", e.Source, "op", e.Op}
 	if e.Remote != "" {
 		attrs = append(attrs, "remote", e.Remote)
+	}
+	if e.Client != "" {
+		attrs = append(attrs, "client", e.Client)
 	}
 	if e.Token != "" {
 		attrs = append(attrs, "token", e.Token)

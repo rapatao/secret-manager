@@ -216,6 +216,8 @@ func Run(t *testing.T, newBackend func() storage.Backend) {
 		}
 	})
 
+	t.Run("audit events", func(t *testing.T) { runAudit(t, newBackend) })
+
 	t.Run("tokens", func(t *testing.T) {
 		b := newBackend()
 		if got, err := b.Tokens(ctx); err != nil || len(got) != 0 {
@@ -244,6 +246,31 @@ func Run(t *testing.T, newBackend func() storage.Backend) {
 			t.Fatalf("Tokens after clearing = %v", got)
 		}
 	})
+}
+
+func runAudit(t *testing.T, newBackend func() storage.Backend) {
+	ctx := context.Background()
+	b := newBackend()
+	if got, err := b.AuditEvents(ctx); err != nil || len(got) != 0 {
+		t.Fatalf("AuditEvents on empty backend = %v, %v", got, err)
+	}
+	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	want := []storage.AuditEvent{
+		{Time: at, Source: "api", Op: "set", Token: "ci", Path: "/app", Keys: []string{"A", "B"}},
+		{Time: at.Add(time.Second), Source: "ui", Op: "login", Remote: "10.0.0.1:1", Error: "invalid token"},
+	}
+	for range 2 {
+		if err := b.PutAuditEvents(ctx, want); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := b.AuditEvents(ctx)
+	if err != nil || len(got) != 2 || !got[0].Time.Equal(at) || !slices.Equal(got[0].Keys, want[0].Keys) || got[1].Error != "invalid token" {
+		t.Fatalf("AuditEvents = %+v, %v", got, err)
+	}
+	if paths, _ := b.List(ctx, "/"); len(paths) != 0 {
+		t.Fatalf("audit events listed as paths: %v", paths)
+	}
 }
 
 func mustPut(t *testing.T, b storage.Backend, path string, data map[string]string) {

@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -548,6 +549,139 @@ func TestUIPageTitles(t *testing.T) {
 	}
 }
 
+func TestCopyAndMovePath(t *testing.T) {
+	ts, logs := newLoggedServer(t)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/a", apiToken, `{"K":"1"}`)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/a", apiToken, `{"K":"2"}`)
+	if code, _ := do(t, ts, "POST", "/api/v1/paths/copy?path=/a&to=/b", apiToken, ""); code != http.StatusNoContent {
+		t.Fatalf("copy: %d", code)
+	}
+	if code, _ := do(t, ts, "POST", "/api/v1/paths/copy?path=/a&to=/b", apiToken, ""); code != http.StatusBadRequest {
+		t.Fatalf("copy onto an existing path: %d", code)
+	}
+	if _, body := do(t, ts, "GET", "/api/v1/history?path=/b", apiToken, ""); strings.Count(body, `"version"`) != 2 {
+		t.Fatalf("copied history: %s", body)
+	}
+	if !strings.Contains(logs.String(), `"op":"copy_path","remote"`) || !strings.Contains(logs.String(), `"to":"/b"`) {
+		t.Fatalf("copy not audited:\n%s", logs)
+	}
+
+	c := uiClient(t, ts)
+	origin := ts.URL
+	postForm(t, c, ts, "/login", url.Values{"token": {token}}, origin)
+	_, body := postForm(t, c, ts, "/secrets/copy", url.Values{"path": {"/b"}, "to": {"/c"}}, origin)
+	if !strings.Contains(body, "confirm the action first") {
+		t.Fatalf("moved without confirmation:\n%s", body)
+	}
+	_, body = postForm(t, c, ts, "/secrets/copy", url.Values{"path": {"/b"}, "to": {"/c"}, "confirm": {"move"}}, origin)
+	if !strings.Contains(body, `<h1 class="mono">/c</h1>`) {
+		t.Fatalf("move did not open the new path:\n%s", body)
+	}
+	if code, _ := do(t, ts, "GET", "/api/v1/secrets?path=/b", apiToken, ""); code != http.StatusNotFound {
+		t.Fatalf("moved source still readable: %d", code)
+	}
+}
+
+func TestUICompareVersions(t *testing.T) {
+	ts := newTestServer(t)
+	for _, body := range []string{`{"A":"1","B":"x"}`, `{"A":"2"}`, `{"C":"3"}`} {
+		do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, body)
+	}
+	c := uiClient(t, ts)
+	postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL)
+
+	_, body := get(t, c, ts.URL+"/secrets/path?path=/app")
+	if !strings.Contains(body, `<option value="2" selected>v2</option>`) || !strings.Contains(body, `<option value="current" selected>current</option>`) || strings.Contains(body, `class="body compare-result"`) {
+		t.Fatalf("compare form defaults:\n%s", body)
+	}
+	_, body = get(t, c, ts.URL+"/secrets/path?path=/app&from=1&to=3")
+	if !strings.Contains(body, "v1 compared with v3") || !strings.Contains(body, `<tr class="add"><td class="mono">&#43;</td><td><code>C</code>`) ||
+		!strings.Contains(body, `<td><code>1</code></td><td><code>2</code></td>`) || !strings.Contains(body, `<option value="1" selected>v1</option>`) {
+		t.Fatalf("v1 compared with v3:\n%s", body)
+	}
+	_, body = get(t, c, ts.URL+"/secrets/path?path=/app&from=3&to=current")
+	if !strings.Contains(body, "Both hold the same data") {
+		t.Fatalf("same data:\n%s", body)
+	}
+	if code, _ := get(t, c, ts.URL+"/secrets/path?path=/app&from=9&to=current"); code != http.StatusBadRequest {
+		t.Fatalf("missing version: %d", code)
+	}
+}
+
+func TestUILoginRateLimit(t *testing.T) {
+	ts := newTestServer(t)
+	c := uiClient(t, ts)
+	for range loginFreeFailures {
+		if code, _ := postForm(t, c, ts, "/login", url.Values{"token": {"wrong"}}, ts.URL); code != http.StatusUnauthorized {
+			t.Fatalf("failed sign-in: %d", code)
+		}
+	}
+	postForm(t, c, ts, "/login", url.Values{"token": {"wrong"}}, ts.URL)
+	code, body := postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL)
+	if code != http.StatusTooManyRequests || !strings.Contains(body, "too many failed sign-ins") {
+		t.Fatalf("sign-in while limited: %d\n%s", code, body)
+	}
+}
+
+func TestUILoginRateLimitBehindProxy(t *testing.T) {
+	backend := k8sstorage.New(fake.NewClientBuilder().Build(), "sm")
+	s, err := New(secrets.New(backend, nil), tokens.New(backend), token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := &syncBuffer{}
+	s.log = slog.New(slog.NewJSONHandler(logs, nil))
+	if s.TrustedProxies, err = ParseTrustedProxies("127.0.0.1,::1"); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewTLSServer(s)
+	t.Cleanup(ts.Close)
+	c := uiClient(t, ts)
+	for range loginFreeFailures + 1 {
+		postForm(t, c, ts, "/login", url.Values{"token": {"wrong"}}, ts.URL, "X-Forwarded-For", "6.6.6.6, 198.51.100.7")
+	}
+	if code, _ := postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL, "X-Forwarded-For", "198.51.100.7"); code != http.StatusTooManyRequests {
+		t.Fatalf("limited client: %d", code)
+	}
+	if code, _ := postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL, "X-Forwarded-For", "6.6.6.6, 198.51.100.8"); code != http.StatusOK {
+		t.Fatalf("other client behind the same proxy: %d", code)
+	}
+	if !strings.Contains(logs.String(), `"client":"198.51.100.7"`) {
+		t.Fatalf("client not audited:\n%s", logs)
+	}
+}
+
+func TestAuditPersisted(t *testing.T) {
+	ctx := context.Background()
+	backend := k8sstorage.New(fake.NewClientBuilder().Build(), "sm")
+	newServer := func() *Server {
+		s, err := New(secrets.New(backend, nil), tokens.New(backend), token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.log = slog.New(slog.NewJSONHandler(io.Discard, nil))
+		if err := s.LoadAudit(ctx, backend); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	first := newServer()
+	for i := range auditKept + 3 {
+		first.record(auditEvent{Source: "api", Op: "set", Path: "/p" + strconv.Itoa(i)})
+	}
+	if err := first.FlushAudit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	second := newServer()
+	got := second.auditLog.recent()
+	if len(got) != auditKept || got[0].Path != "/p"+strconv.Itoa(auditKept+2) || got[auditKept-1].Path != "/p3" {
+		t.Fatalf("loaded %d events, newest %+v", len(got), got[0])
+	}
+	if second.auditLog.dirty {
+		t.Fatal("loading marked the log dirty")
+	}
+}
+
 func TestUIAudit(t *testing.T) {
 	ts := newTestServer(t)
 	do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"A":"hunter2"}`)
@@ -687,7 +821,7 @@ func TestAPIInfo(t *testing.T) {
 		t.Fatalf("info without token: %d", code)
 	}
 	code, body := do(t, ts, "GET", "/api/v1/info", apiToken, "")
-	if code != http.StatusOK || strings.TrimSpace(body) != `{"capabilities":["backup","history","history-delete","integrations","paths","secrets"],"version":"v9.9.9-test"}` {
+	if code != http.StatusOK || strings.TrimSpace(body) != `{"capabilities":["backup","history","history-delete","integrations","paths","paths-copy","secrets"],"version":"v9.9.9-test"}` {
 		t.Fatalf("info: %d %s", code, body)
 	}
 }
@@ -797,6 +931,11 @@ func TestScopedTokens(t *testing.T) {
 		{rw, "DELETE", "/api/v1/secrets/E?path=/app/db/new", "", http.StatusNoContent},
 		{rw, "PUT", "/api/v1/secrets?path=/app", `{"A":"x"}`, http.StatusForbidden},
 		{rw, "POST", "/api/v1/restore", `{"format":1,"paths":[]}`, http.StatusForbidden},
+		{ro, "POST", "/api/v1/paths/copy?path=/app&to=/app/copy", "", http.StatusForbidden},
+		{rw, "POST", "/api/v1/paths/copy?path=/app/db&to=/other/db", "", http.StatusForbidden},
+		{rw, "POST", "/api/v1/paths/copy?path=/app&to=/app/db/copy", "", http.StatusForbidden},
+		{rw, "POST", "/api/v1/paths/copy?path=/app/db&to=/app/db/copy", "", http.StatusNoContent},
+		{rw, "POST", "/api/v1/paths/move?path=/app/db/copy&to=/app/db/moved", "", http.StatusNoContent},
 		{rootRO, "GET", "/api/v1/backup", "", http.StatusOK},
 		{rootRO, "POST", "/api/v1/restore", `{"format":1,"paths":[]}`, http.StatusForbidden},
 		{token, "GET", "/api/v1/info", "", http.StatusUnauthorized},
@@ -808,7 +947,7 @@ func TestScopedTokens(t *testing.T) {
 		}
 	}
 
-	if _, body := do(t, ts, "GET", "/api/v1/paths", ro, ""); strings.TrimSpace(body) != `{"paths":["/app","/app/db","/app/db/new"]}` {
+	if _, body := do(t, ts, "GET", "/api/v1/paths", ro, ""); strings.TrimSpace(body) != `{"paths":["/app","/app/db","/app/db/moved","/app/db/new"]}` {
 		t.Fatalf("scoped paths: %s", body)
 	}
 	if !strings.Contains(logs.String(), `"op":"set","remote"`) || !strings.Contains(logs.String(), `"token":"dev"`) {
