@@ -1,0 +1,13 @@
+# History
+
+Every write that changes a path (setting keys, deleting a key) stores the path's new data as a version numbered one above the previous, and so does every rollback. A rollback to a version holding the current data is rejected with `400`; the Web UI marks the newest version as current, marks older versions holding the same data as "same as current", and offers no diff or restore for either. Other writes that change nothing, and changes made directly on the stored Secrets, are not recorded. The newest versions are kept, current one included, up to `--history-limit` (chart value `historyLimit`, default `10`). Lowering the limit removes the extra versions of a path on its next write. `0` stops recording; versions already stored stay until removed by hand (`kubectl delete secret -l secretmanager.rapatao.com/history=true`).
+
+`secret-manager history --path P --diff N` lists the keys added (`+`), removed (`-`) or changed (`~`) from version `N` to the current data; `--diff N M` compares two versions. Values are not printed; `history --path P N` prints a version. The Web UI shows the same changes for each version, compared with the version before it. Its Diff button opens a dialog comparing the version with the current data, values included, and the restore and save dialogs show the same comparison. Added keys are green, removed keys red and changed keys amber. A long comparison scrolls inside the dialog, and a long value scrolls inside its cell.
+
+`secret-manager history --path P --delete N [M...]` deletes versions, to purge a value that must not stay readable, for example a leaked secret: change the value first, then delete every version holding it. The current data is kept. The Web UI has a Delete button on each version, behind a confirmation dialog; deleting the last version of a deleted path removes the path from the deleted list. Once the newest version is deleted, its number is given to the next version written.
+
+`secret-manager copy --path P --to Q` copies the data and every version of `P` to the new path `Q`, keeping their numbers and times; `move` also deletes `P` and its versions. Nested paths are not copied. `Q` must have no data and no versions, so a deleted path that still has versions cannot be the target until they are deleted. `SecretSync` sources keep reading `P`: after a move they report it missing until they are pointed at `Q`. The Web UI offers both in the danger zone of a path.
+
+Deleting a path keeps its versions, so `rollback` can bring it back. Rolling back writes the old data as a new version, so it can itself be undone. Rolling back a synced path updates its targets like any other write.
+
+A path written while history is disabled has no versions until its next change.
