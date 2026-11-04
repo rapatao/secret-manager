@@ -9,8 +9,9 @@ A small, self-hosted key-value secret manager for Kubernetes.
 - Every write is kept as a version, so a path can be inspected or rolled back, even after it is deleted. A version holding a leaked value can be deleted.
 - `secret-manager backup` and `restore` copy every path, optionally with its versions, to and from a JSON file, optionally encrypted.
 - Stored values can be encrypted with AES-256-GCM, and the key can be rotated.
+- A [local vault](#local-vault) keeps secrets in an encrypted file on your machine, used by the CLI and Web UI without running a server.
 
-One binary contains the controller, the REST API, the Web UI and the CLI. The controller is optional, and with the `file` storage backend the server runs without Kubernetes.
+One binary contains the controller, the REST API, the Web UI and the CLI. The controller is optional, with the `file` storage backend the server runs without Kubernetes, and with a local vault no server runs at all.
 
 ## Compared to other tools
 
@@ -213,6 +214,7 @@ secret-manager backup --history --output backup.json  # every path and its versi
 secret-manager restore backup.json
 SECRET_MANAGER_BACKUP_KEY=... secret-manager backup    # encrypted backup, see Backup
 secret-manager version                                 # client and server versions, server capabilities
+secret-manager ui                                      # open the Web UI of the default server
 ```
 
 ### Servers and login
@@ -241,6 +243,30 @@ With `--device`, over SSH (`SSH_CONNECTION` is set) or when no browser can be op
 Without a login, set `SECRET_MANAGER_URL` and `SECRET_MANAGER_TOKEN` to a server and an integration token, as in CI.
 
 Tokens are stored in the OS keychain (macOS Keychain, Linux Secret Service, Windows Credential Manager) under the service `secretmanager.rapatao.com`, one entry per server. Without a usable keychain, as on headless Linux, they fall back to `~/.config/secretmanager.rapatao.com/credentials.json` with `0600` permissions and a warning is printed. The list of servers and the default are kept in `config.json` in the same directory (`$XDG_CONFIG_HOME` is honored).
+
+### Local vault
+
+A local vault is a file on your machine holding paths and their versions, used by the CLI and the Web UI without a running server. Its server URL is `file://` followed by the file path:
+
+```sh
+secret-manager servers login --server file://$HOME/.secrets/vault.json   # create or unlock, prompts for the passphrase
+echo "$PASSPHRASE" | secret-manager servers login --server file://$HOME/.secrets/vault.json --token-stdin
+
+secret-manager set --path /tools GITHUB_TOKEN=abc
+secret-manager run --path /tools -- make updates
+secret-manager ui                                     # Web UI of the default vault
+secret-manager ui --server file://$HOME/.secrets/vault.json --addr 127.0.0.1:8090 --no-browser
+```
+
+`servers login` creates the vault when the file is missing, asking for the passphrase twice; the passphrase has at least 8 characters. It derives the vault key from the passphrase with Argon2id (3 passes, 64 MiB, 4 threads, random salt; the parameters and salt are stored in the file) and stores the key like a token, in the OS keychain or in `credentials.json`, so later commands do not prompt. Logging in again with a wrong passphrase fails. `servers logout` removes the stored key; the vault and its passphrase stay.
+
+Every command works on a vault, run in-process: values are encrypted with AES-256-GCM as with [encryption](#encryption), the last 10 versions of each path are kept as [history](#history), and [backups](#backup) work the same. Integration tokens and audit events are not kept in the vault: every command and `ui` run uses its own read-write integration, and the Integrations and Audit log pages only show those of the current `ui` run. The [offline cache](#offline-cache) is not used.
+
+`ui` serves the Web UI of the vault on a loopback address (`--addr`, default `127.0.0.1` on a random port) until Ctrl-C, and opens a sign-in link in the browser. The link works once, within a minute; `--no-browser` only prints it. Run `ui` again to sign in from another browser. For a remote server, `ui` opens its Web UI, which signs in with the admin token, without needing a login.
+
+A vault can be used by several commands at once, including while `ui` runs: each request takes a lock on `<file>.lock` next to the vault and reads the file again. Local vaults need macOS, Linux or another Unix system. To use a vault without a stored login, set `SECRET_MANAGER_URL` to its `file://` URL and `SECRET_MANAGER_TOKEN` to the base64 vault key.
+
+The file can be copied to another machine and unlocked there with the same passphrase. A lost passphrase loses the data; there is no way to change it.
 
 ### Resolution order
 
@@ -344,7 +370,7 @@ The last use is tracked in memory and saved every `--last-used-flush` (default `
 
 ## Web UI
 
-Open the server URL and sign in with the admin token. The header shows the server version next to the name, which links to the summary, and links to Secrets (`/secrets`, the path list), Integrations, Audit and Sign out. The UI follows the system light or dark theme and adapts to narrow screens: on phones, the integrations, recent changes, keys and history tables show each row as a list of labeled fields. Every time is shown in UTC as `YYYY-MM-DD HH:MM UTC`.
+Open the server URL, or run `secret-manager ui`, and sign in with the admin token. A [local vault](#local-vault) has its own Web UI served by `secret-manager ui`. The header shows the server version next to the name, which links to the summary, and links to Secrets (`/secrets`, the path list), Integrations, Audit and Sign out. The UI follows the system light or dark theme and adapts to narrow screens: on phones, the integrations, recent changes, keys and history tables show each row as a list of labeled fields. Every time is shown in UTC as `YYYY-MM-DD HH:MM UTC`.
 
 Summary
 - The main page counts paths, keys, deleted paths and stored versions.
@@ -482,6 +508,7 @@ Every change made through the API or the Web UI, every backup, every Web UI logi
 - Old values stay readable in history after they are changed or deleted. To purge a leaked value, delete the versions holding it with `history --delete` or the Web UI, see [History](#history). Backups taken before still hold it.
 - The CLI caches the secrets it reads, encrypted with a key in the OS keychain, for up to the server's `--cache-max-age` (default 7 days) or the integration's offline cache setting. Anyone who can use your keychain can read them. Disable the offline cache of integrations used on shared machines, or set `SECRET_MANAGER_CACHE_MAX_AGE=0` there.
 - Backup files hold every value in plain text unless `SECRET_MANAGER_BACKUP_KEY` is set, see [Backup](#backup). Keep them out of git either way.
+- A local vault is as strong as its passphrase, and anyone who can use your keychain, or read `credentials.json` without a keychain, can read the stored vault key and every value. The vault file is written with `0600` permissions; paths, key names and version times stay readable in it.
 - With the `file` backend, restrict access to the file and its directory. Without an encryption key, values are stored in plain text in it.
 - With the controller enabled, the server can manage Secrets in every namespace, where `SecretSync` targets live. With `controller.enabled=false` it can only manage Secrets in its own namespace.
 - The metrics port has no authentication. It exposes no secret values, but restrict it with a NetworkPolicy if other workloads should not read it.

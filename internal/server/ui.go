@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rapatao/secret-manager/internal/secrets"
@@ -152,21 +153,61 @@ func (s *Server) uiLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.logins.succeed(addr)
-	http.SetCookie(w, &http.Cookie{
+	s.startSession(w)
+	s.audit(r, "ui", "login", "", nil, nil)
+	http.Redirect(w, r, localPath(r.PostFormValue("next")), http.StatusSeeOther)
+}
+
+func (s *Server) startSession(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure is off only with PlainHTTP, for the loopback local UI
 		Name:     sessionCookie,
 		Value:    s.sessions.create(),
 		Path:     "/",
 		MaxAge:   int(s.sessions.ttl.Seconds()),
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   !s.PlainHTTP,
 		SameSite: http.SameSiteStrictMode,
 	})
+}
+
+// loginLinks holds the unused codes of LoginLink and their expiry.
+type loginLinks struct {
+	mu    sync.Mutex
+	codes map[string]time.Time
+}
+
+// LoginLink returns a path that signs in to the Web UI without the admin
+// token. It works once, within a minute.
+func (s *Server) LoginLink() string {
+	code := rand.Text()
+	s.links.mu.Lock()
+	defer s.links.mu.Unlock()
+	if s.links.codes == nil {
+		s.links.codes = map[string]time.Time{}
+	}
+	s.links.codes[code] = time.Now().Add(time.Minute)
+	return "/login/link?" + url.Values{"code": {code}}.Encode()
+}
+
+func (s *Server) uiLoginLink(w http.ResponseWriter, r *http.Request) {
+	code := r.URL.Query().Get("code")
+	s.links.mu.Lock()
+	expires, ok := s.links.codes[code]
+	delete(s.links.codes, code)
+	s.links.mu.Unlock()
+	if !ok || time.Now().After(expires) {
+		s.audit(r, "ui", "login", "", nil, errors.New("invalid or expired login link"))
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	s.startSession(w)
 	s.audit(r, "ui", "login", "", nil, nil)
-	http.Redirect(w, r, localPath(r.PostFormValue("next")), http.StatusSeeOther)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func (s *Server) uiLogout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1, //nolint:gosec // G124: see startSession
+		HttpOnly: true, Secure: !s.PlainHTTP, SameSite: http.SameSiteStrictMode})
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 

@@ -30,6 +30,7 @@ type state struct {
 	Versions map[string][]storage.Version `json:"versions"`
 	Tokens   []storage.Token              `json:"tokens,omitempty"`
 	Audit    []storage.AuditEvent         `json:"audit,omitempty"`
+	Meta     map[string]string            `json:"meta,omitempty"`
 }
 
 var _ storage.Backend = (*Backend)(nil)
@@ -64,6 +65,32 @@ func (b *Backend) load() error {
 	}
 	b.state = s
 	return nil
+}
+
+// Reload replaces the in-memory state with the file, picking up changes
+// written by other processes.
+func (b *Backend) Reload() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.load()
+}
+
+// Meta returns the value stored under key outside the secret data, or "".
+func (b *Backend) Meta(key string) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.state.Meta[key]
+}
+
+// SetMeta stores values outside the secret data and writes the file.
+func (b *Backend) SetMeta(values map[string]string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.state.Meta == nil {
+		b.state.Meta = map[string]string{}
+	}
+	maps.Copy(b.state.Meta, values)
+	return b.commit()
 }
 
 // commit writes the in-memory state to disk. On failure it reloads the file,
