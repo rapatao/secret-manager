@@ -80,13 +80,16 @@ func (s *Store) List(ctx context.Context) ([]Token, error) {
 
 // Create stores a new token named name for the paths under path, expiring at
 // expires unless it is zero, and returns it with its secret value, which is
-// not stored.
-func (s *Store) Create(ctx context.Context, name, path string, readOnly bool, expires time.Time) (Token, string, error) {
+// not stored. A nil cacheMaxAge uses the server default.
+func (s *Store) Create(ctx context.Context, name, path string, readOnly bool, expires time.Time, cacheMaxAge *time.Duration) (Token, string, error) {
 	if !nameRe.MatchString(name) {
 		return Token{}, "", fmt.Errorf("%w: token name %q must match [a-z0-9-]{1,63}", secrets.ErrInvalid, name)
 	}
 	path, err := secrets.NormalizePath(path)
 	if err != nil {
+		return Token{}, "", err
+	}
+	if err := validCacheMaxAge(cacheMaxAge); err != nil {
 		return Token{}, "", err
 	}
 	now := time.Now().UTC().Truncate(time.Second)
@@ -103,7 +106,7 @@ func (s *Store) Create(ctx context.Context, name, path string, readOnly bool, ex
 		return Token{}, "", fmt.Errorf("%w: token %s already exists", secrets.ErrInvalid, name)
 	}
 	secret := Prefix + rand.Text()
-	t := Token{Name: name, Hash: hash(secret), Path: path, ReadOnly: readOnly, Created: now}
+	t := Token{Name: name, Hash: hash(secret), Path: path, ReadOnly: readOnly, Created: now, CacheMaxAge: cacheMaxAge}
 	if !expires.IsZero() {
 		t.Expires = expires.UTC().Truncate(time.Second)
 	}
@@ -115,12 +118,15 @@ func (s *Store) Create(ctx context.Context, name, path string, readOnly bool, ex
 	return t, secret, nil
 }
 
-// Update changes the path, access and expiry of the token named name. Its
-// secret value stays the same. expires must be in the future, zero or the
-// current expiry.
-func (s *Store) Update(ctx context.Context, name, path string, readOnly bool, expires time.Time) (Token, error) {
+// Update changes the path, access, expiry and cache max age of the token
+// named name. Its secret value stays the same. expires must be in the future,
+// zero or the current expiry.
+func (s *Store) Update(ctx context.Context, name, path string, readOnly bool, expires time.Time, cacheMaxAge *time.Duration) (Token, error) {
 	path, err := secrets.NormalizePath(path)
 	if err != nil {
+		return Token{}, err
+	}
+	if err := validCacheMaxAge(cacheMaxAge); err != nil {
 		return Token{}, err
 	}
 	s.mu.Lock()
@@ -139,12 +145,19 @@ func (s *Store) Update(ctx context.Context, name, path string, readOnly bool, ex
 		}
 	}
 	tokens := slices.Clone(s.tokens)
-	tokens[i].Path, tokens[i].ReadOnly, tokens[i].Expires = path, readOnly, expires
+	tokens[i].Path, tokens[i].ReadOnly, tokens[i].Expires, tokens[i].CacheMaxAge = path, readOnly, expires, cacheMaxAge
 	if err := s.backend.PutTokens(ctx, tokens); err != nil {
 		return Token{}, err
 	}
 	s.tokens, s.dirty = tokens, false
 	return tokens[i], nil
+}
+
+func validCacheMaxAge(d *time.Duration) error {
+	if d != nil && *d < 0 {
+		return fmt.Errorf("%w: cache max age must not be negative", secrets.ErrInvalid)
+	}
+	return nil
 }
 
 // Revoke deletes the token named name.

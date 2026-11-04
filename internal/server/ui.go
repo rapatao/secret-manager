@@ -34,9 +34,23 @@ var uiFS embed.FS
 
 var pages = map[string]*template.Template{}
 
+// timeLayout formats every time the Web UI shows, in UTC.
+const timeLayout = "2006-01-02 15:04 UTC"
+
+func formatTime(t time.Time) string {
+	return t.UTC().Format(timeLayout)
+}
+
+var pageFuncs = template.FuncMap{
+	"time": func(t time.Time) template.HTML {
+		day, clock, _ := strings.Cut(formatTime(t), " ")
+		return template.HTML(`<time datetime="` + t.UTC().Format(time.RFC3339) + `"><span>` + day + `</span> <span>` + clock + `</span></time>`) //nolint:gosec // only formatted digits
+	},
+}
+
 func init() {
-	for _, name := range []string{"login", "index", "path", "integrations", "authorize"} {
-		pages[name] = template.Must(template.ParseFS(uiFS, "ui/layout.html", "ui/"+name+".html"))
+	for _, name := range []string{"login", "summary", "secrets", "path", "integrations", "authorize"} {
+		pages[name] = template.Must(template.New(name).Funcs(pageFuncs).ParseFS(uiFS, "ui/layout.html", "ui/"+name+".html"))
 	}
 }
 
@@ -146,7 +160,7 @@ func (s *Server) uiLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
-func (s *Server) uiIndex(w http.ResponseWriter, r *http.Request) {
+func (s *Server) uiSecrets(w http.ResponseWriter, r *http.Request) {
 	paths, err := s.secrets.ListPaths(r.Context())
 	if err != nil {
 		s.uiError(w, r, err)
@@ -157,14 +171,19 @@ func (s *Server) uiIndex(w http.ResponseWriter, r *http.Request) {
 		s.uiError(w, r, err)
 		return
 	}
-	s.render(w, http.StatusOK, "index", map[string]any{
+	s.render(w, http.StatusOK, "secrets", map[string]any{
 		"Paths":   paths,
 		"Deleted": deleted,
 		"Error":   r.URL.Query().Get("error"),
 	})
 }
 
-type entry struct{ Key, Value string }
+// entry is a key of a path. Changed is the time of the newest version that
+// set it, zero when the kept history does not reach that far.
+type entry struct {
+	Key, Value string
+	Changed    time.Time
+}
 
 func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
@@ -179,13 +198,10 @@ func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 		s.uiError(w, r, err)
 		return
 	}
-	var entries []entry
-	for _, k := range slices.Sorted(maps.Keys(data)) {
-		entries = append(entries, entry{k, data[k]})
-	}
 	var history []uiVersion
+	changed := map[string]time.Time{}
 	for i, v := range versions {
-		h := uiVersion{Number: v.Number, Time: v.Time.Format(time.RFC3339), Current: !deleted && i == 0, Same: !deleted && maps.Equal(v.Data, data)}
+		h := uiVersion{Number: v.Number, Time: v.Time, Current: !deleted && i == 0, Same: !deleted && maps.Equal(v.Data, data)}
 		for _, c := range secrets.Diff(data, v.Data) {
 			h.Restore = append(h.Restore, uiChange{c, data[c.Key], v.Data[c.Key]})
 		}
@@ -195,14 +211,23 @@ func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 		case v.Number == 1:
 			h.Changes = secrets.Diff(nil, v.Data)
 		}
+		for _, c := range h.Changes {
+			if _, seen := changed[c.Key]; !seen && c.Op != "-" {
+				changed[c.Key] = v.Time
+			}
+		}
 		history = append(history, h)
+	}
+	var entries []entry
+	for _, k := range slices.Sorted(maps.Keys(data)) {
+		entries = append(entries, entry{k, data[k], changed[k]})
 	}
 	s.render(w, http.StatusOK, "path", map[string]any{"Path": path, "Deleted": deleted, "Entries": entries, "History": history, "Error": r.URL.Query().Get("error")})
 }
 
 type uiVersion struct {
 	Number  int
-	Time    string
+	Time    time.Time
 	Changes []secrets.Change
 	Current bool
 	Same    bool
@@ -233,13 +258,13 @@ func (s *Server) uiRollback(w http.ResponseWriter, r *http.Request) {
 func (s *Server) uiCreatePath(w http.ResponseWriter, r *http.Request) {
 	path := r.PostFormValue("path")
 	if r.PostFormValue("confirm") != "yes" {
-		s.redirectWithError(w, r, "/?", errUnconfirmed)
+		s.redirectWithError(w, r, "/secrets?", errUnconfirmed)
 		return
 	}
 	err := s.secrets.SetKeys(r.Context(), path, nil)
 	s.audit(r, "ui", "create_path", path, nil, err)
 	if err != nil {
-		s.redirectWithError(w, r, "/?", err)
+		s.redirectWithError(w, r, "/secrets?", err)
 		return
 	}
 	normalized, _ := secrets.NormalizePath(path)
@@ -255,10 +280,10 @@ func (s *Server) uiDeletePath(w http.ResponseWriter, r *http.Request) {
 	err := s.secrets.DeletePath(r.Context(), path)
 	s.audit(r, "ui", "delete_path", path, nil, err)
 	if err != nil {
-		s.redirectWithError(w, r, "/?", err)
+		s.redirectWithError(w, r, "/secrets?", err)
 		return
 	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	http.Redirect(w, r, "/secrets", http.StatusSeeOther)
 }
 
 func (s *Server) uiSetKey(w http.ResponseWriter, r *http.Request) {
@@ -312,7 +337,7 @@ func (s *Server) uiSetKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func pathURL(path string) string {
-	return "/path?path=" + url.QueryEscape(path)
+	return "/secrets/path?path=" + url.QueryEscape(path)
 }
 
 func (s *Server) redirectWithError(w http.ResponseWriter, r *http.Request, prefix string, err error) {

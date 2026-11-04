@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/rapatao/secret-manager/internal/secrets"
@@ -39,18 +40,37 @@ const BackupFormat = 1
 // removed; changed behavior gets a new name.
 var Capabilities = []string{"backup", "history", "integrations", "paths", "secrets"}
 
+// DefaultCacheMaxAge is the CacheMaxAge of a new Server.
+const DefaultCacheMaxAge = 7 * 24 * time.Hour
+
+// Settings describe how the server runs.
+type Settings struct {
+	Storage    string
+	Encryption bool
+	Controller bool
+	Backups    BackupSchedule
+}
+
 // Server serves the API under /api/v1 and the Web UI under /.
 type Server struct {
 	// Version is reported by GET /api/v1/info.
 	Version string
+	// CacheMaxAge is how long clients may use the secrets they read while the
+	// server is unreachable, unless the integration sets its own. 0 disables
+	// their cache.
+	CacheMaxAge time.Duration
+	// Settings are shown on the Web UI summary.
+	Settings Settings
 
 	secrets  *secrets.Service
 	tokens   *tokens.Store
 	token    []byte
 	sessions *sessions
 	grants   *grants
-	mux      *http.ServeMux
-	log      *slog.Logger
+	// lastBackup is the latest scheduled backup run.
+	lastBackup atomic.Pointer[backupRun]
+	mux        *http.ServeMux
+	log        *slog.Logger
 }
 
 // New returns a Server whose Web UI signs in with the admin token and whose
@@ -60,13 +80,14 @@ func New(svc *secrets.Service, tks *tokens.Store, token string) (*Server, error)
 		return nil, errors.New("admin token must have at least 32 characters")
 	}
 	s := &Server{
-		secrets:  svc,
-		tokens:   tks,
-		token:    []byte(token),
-		sessions: newSessions([]byte(token), 12*time.Hour),
-		grants:   newGrants(5 * time.Minute),
-		mux:      http.NewServeMux(),
-		log:      slog.Default(),
+		CacheMaxAge: DefaultCacheMaxAge,
+		secrets:     svc,
+		tokens:      tks,
+		token:       []byte(token),
+		sessions:    newSessions([]byte(token), 12*time.Hour),
+		grants:      newGrants(5 * time.Minute),
+		mux:         http.NewServeMux(),
+		log:         slog.Default(),
 	}
 	s.routes()
 	return s, nil
@@ -100,12 +121,13 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /login", s.ui(s.uiLoginForm))
 	s.mux.Handle("POST /login", s.ui(s.uiLogin))
 	s.mux.Handle("POST /logout", s.ui(s.session(s.uiLogout)))
-	s.mux.Handle("GET /{$}", s.ui(s.session(s.uiIndex)))
-	s.mux.Handle("GET /path", s.ui(s.session(s.uiPath)))
-	s.mux.Handle("POST /path", s.ui(s.session(s.uiCreatePath)))
-	s.mux.Handle("POST /path/delete", s.ui(s.session(s.uiDeletePath)))
-	s.mux.Handle("POST /key", s.ui(s.session(s.uiSetKey)))
-	s.mux.Handle("POST /path/rollback", s.ui(s.session(s.uiRollback)))
+	s.mux.Handle("GET /{$}", s.ui(s.session(s.uiSummary)))
+	s.mux.Handle("GET /secrets", s.ui(s.session(s.uiSecrets)))
+	s.mux.Handle("POST /secrets", s.ui(s.session(s.uiCreatePath)))
+	s.mux.Handle("GET /secrets/path", s.ui(s.session(s.uiPath)))
+	s.mux.Handle("POST /secrets/keys", s.ui(s.session(s.uiSetKey)))
+	s.mux.Handle("POST /secrets/delete", s.ui(s.session(s.uiDeletePath)))
+	s.mux.Handle("POST /secrets/rollback", s.ui(s.session(s.uiRollback)))
 	s.mux.Handle("GET /integrations", s.ui(s.session(s.uiIntegrations)))
 	s.mux.Handle("POST /integrations", s.ui(s.session(s.uiCreateIntegration)))
 	s.mux.Handle("POST /integrations/update", s.ui(s.session(s.uiUpdateIntegration)))
@@ -227,7 +249,11 @@ func (s *Server) apiGet(w http.ResponseWriter, r *http.Request) {
 		s.serviceError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]map[string]string{"data": data})
+	maxAge := s.CacheMaxAge
+	if t, _ := scopedToken(r); t.CacheMaxAge != nil {
+		maxAge = *t.CacheMaxAge
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": data, "cacheMaxAge": int(maxAge.Seconds())})
 }
 
 func (s *Server) apiSet(w http.ResponseWriter, r *http.Request) {

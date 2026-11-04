@@ -95,13 +95,29 @@ func (c *Client) Paths(ctx context.Context) ([]string, error) {
 
 // Get returns the secrets at path, merging nested paths when recursive.
 func (c *Client) Get(ctx context.Context, path string, recursive bool) (map[string]string, error) {
+	data, _, err := c.Read(ctx, path, recursive)
+	return data, err
+}
+
+// Read is Get that also returns how long the server allows the secrets to be
+// used from a cache while it is unreachable, nil when the server does not say.
+func (c *Client) Read(ctx context.Context, path string, recursive bool) (map[string]string, *time.Duration, error) {
 	q := url.Values{"path": {path}}
 	if recursive {
 		q.Set("recursive", "true")
 	}
-	var out struct{ Data map[string]string }
-	err := c.do(ctx, http.MethodGet, "/api/v1/secrets", q, nil, &out)
-	return out.Data, err
+	var out struct {
+		Data        map[string]string
+		CacheMaxAge *int
+	}
+	if err := c.do(ctx, http.MethodGet, "/api/v1/secrets", q, nil, &out); err != nil {
+		return nil, nil, err
+	}
+	if out.CacheMaxAge == nil {
+		return out.Data, nil, nil
+	}
+	maxAge := time.Duration(*out.CacheMaxAge) * time.Second
+	return out.Data, &maxAge, nil
 }
 
 // Set merges values into path.

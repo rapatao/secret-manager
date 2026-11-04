@@ -65,8 +65,9 @@ const Usage = `Client commands:
                                                server is set, its version and capabilities
 
 get, export and run fall back to the last secrets read, kept encrypted for
-$` + EnvCacheMaxAge + ` (default 168h, 0 disables), when the server is
-unreachable. servers logout removes them.
+as long as the server allows (default 168h), when the server is unreachable.
+$` + EnvCacheMaxAge + ` can only lower that, 0 disables. servers logout
+removes them.
 
 Every command accepts --server URL. Without it, $` + EnvURL + ` or the
 default server is used. $` + EnvToken + ` is only sent to $` + EnvURL + `;

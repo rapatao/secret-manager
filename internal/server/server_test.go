@@ -141,7 +141,7 @@ func TestAPIRoundTrip(t *testing.T) {
 		t.Fatalf("delete key: %d", code)
 	}
 	_, body = do(t, ts, "GET", "/api/v1/secrets?path=/app", apiToken, "")
-	if strings.TrimSpace(body) != `{"data":{"B":"2"}}` {
+	if strings.TrimSpace(body) != `{"cacheMaxAge":604800,"data":{"B":"2"}}` {
 		t.Fatalf("after delete key: %s", body)
 	}
 
@@ -183,7 +183,7 @@ func TestAPIHistory(t *testing.T) {
 		t.Fatalf("rollback: %d %s", code, body)
 	}
 	_, body = do(t, ts, "GET", "/api/v1/secrets?path=/app", apiToken, "")
-	if strings.TrimSpace(body) != `{"data":{"A":"1"}}` {
+	if strings.TrimSpace(body) != `{"cacheMaxAge":604800,"data":{"A":"1"}}` {
 		t.Fatalf("after rollback: %s", body)
 	}
 
@@ -281,18 +281,18 @@ func TestUIFlow(t *testing.T) {
 	if code, _ := postForm(t, c, ts, "/login", url.Values{"token": {token}}, origin); code != http.StatusOK {
 		t.Fatalf("login: %d", code)
 	}
-	if _, body := postForm(t, c, ts, "/path", url.Values{"path": {"/app"}}, origin); !strings.Contains(body, "confirm the action first") || strings.Contains(body, `data-path="/app"`) {
+	if _, body := postForm(t, c, ts, "/secrets", url.Values{"path": {"/app"}}, origin); !strings.Contains(body, "confirm the action first") || strings.Contains(body, `data-path="/app"`) {
 		t.Fatalf("path created without confirmation:\n%s", body)
 	}
-	if code, _ := postForm(t, c, ts, "/path", url.Values{"path": {"/app"}, "confirm": {"yes"}}, origin); code != http.StatusOK {
+	if code, _ := postForm(t, c, ts, "/secrets", url.Values{"path": {"/app"}, "confirm": {"yes"}}, origin); code != http.StatusOK {
 		t.Fatalf("create path: %d", code)
 	}
-	if code, _ := postForm(t, c, ts, "/key", url.Values{"path": {"/app"}, "key": {"PASS"}, "value": {"<s3cret>"}, "confirm": {"yes"}}, origin); code != http.StatusOK {
+	if code, _ := postForm(t, c, ts, "/secrets/keys", url.Values{"path": {"/app"}, "key": {"PASS"}, "value": {"<s3cret>"}, "confirm": {"yes"}}, origin); code != http.StatusOK {
 		t.Fatalf("set key: %d", code)
 	}
-	postForm(t, c, ts, "/path", url.Values{"path": {"/other"}, "confirm": {"yes"}}, origin)
-	_, body := get(t, c, ts.URL+"/")
-	if !strings.Contains(body, `Secret-Manager</a><span class="muted mono">(v9.9.9-test)</span>`) || !strings.Contains(body, `href="/integrations">Integrations</a>`) {
+	postForm(t, c, ts, "/secrets", url.Values{"path": {"/other"}, "confirm": {"yes"}}, origin)
+	_, body := get(t, c, ts.URL+"/secrets")
+	if !strings.Contains(body, `Secret-Manager</a><span class="muted mono">(v9.9.9-test)</span>`) || !strings.Contains(body, `href="/secrets">Secrets</a>`) || !strings.Contains(body, `href="/integrations">Integrations</a>`) {
 		t.Fatalf("header missing server version:\n%s", body)
 	}
 	if !strings.Contains(body, `<tr data-path="/app">`) || !strings.Contains(body, `<tr data-path="/other">`) || strings.Contains(body, ">Search<") {
@@ -302,13 +302,16 @@ func TestUIFlow(t *testing.T) {
 		t.Fatalf("ui.js: %d", code)
 	}
 
-	_, body = get(t, c, ts.URL+"/path?path=/app")
+	_, body = get(t, c, ts.URL+"/secrets/path?path=/app")
 	if !strings.Contains(body, "PASS") || !strings.Contains(body, "&lt;s3cret&gt;") {
 		t.Fatalf("path page missing escaped key/value:\n%s", body)
 	}
+	if !strings.Contains(body, `<span class="masked mono" aria-hidden="true">`) || !strings.Contains(body, `<td class="muted" data-label="Changed"><time datetime=`) {
+		t.Fatalf("path page missing masked value or change time:\n%s", body)
+	}
 
-	postForm(t, c, ts, "/key", url.Values{"path": {"/app"}, "key": {"PASS"}, "value": {"new"}, "confirm": {"yes"}}, origin)
-	_, body = get(t, c, ts.URL+"/path?path=/app")
+	postForm(t, c, ts, "/secrets/keys", url.Values{"path": {"/app"}, "key": {"PASS"}, "value": {"new"}, "confirm": {"yes"}}, origin)
+	_, body = get(t, c, ts.URL+"/secrets/path?path=/app")
 	if !strings.Contains(body, "<h2>History</h2>") || !strings.Contains(body, `name="version" value="2"`) ||
 		!strings.Contains(body, `<span class="change mod">~PASS</span>`) || !strings.Contains(body, `<span class="change add">&#43;PASS</span>`) {
 		t.Fatalf("path page missing history:\n%s", body)
@@ -330,29 +333,29 @@ func TestUIFlow(t *testing.T) {
 	if !strings.Contains(body, `<td class="mono">~</td><td><code>PASS</code></td><td><code>new</code></td><td><code>&lt;s3cret&gt;</code></td>`) {
 		t.Fatalf("restore dialog missing diff:\n%s", body)
 	}
-	_, body = postForm(t, c, ts, "/path/rollback", url.Values{"path": {"/app"}, "version": {"2"}}, origin)
+	_, body = postForm(t, c, ts, "/secrets/rollback", url.Values{"path": {"/app"}, "version": {"2"}}, origin)
 	if !strings.Contains(body, "confirm the action first") {
 		t.Fatalf("rollback without confirmation:\n%s", body)
 	}
-	if code, _ := postForm(t, c, ts, "/path/rollback", url.Values{"path": {"/app"}, "version": {"2"}, "confirm": {"2"}}, origin); code != http.StatusOK {
+	if code, _ := postForm(t, c, ts, "/secrets/rollback", url.Values{"path": {"/app"}, "version": {"2"}, "confirm": {"2"}}, origin); code != http.StatusOK {
 		t.Fatalf("rollback: %d", code)
 	}
-	_, body = get(t, c, ts.URL+"/path?path=/app")
+	_, body = get(t, c, ts.URL+"/secrets/path?path=/app")
 	if !strings.Contains(body, `form="edit-keys">&lt;s3cret&gt;</textarea>`) {
 		t.Fatalf("rollback not applied:\n%s", body)
 	}
 
-	_, body = postForm(t, c, ts, "/key", url.Values{"path": {"/app"}, "key": {"PASS"}, "value": {"x"}}, origin)
+	_, body = postForm(t, c, ts, "/secrets/keys", url.Values{"path": {"/app"}, "key": {"PASS"}, "value": {"x"}}, origin)
 	if !strings.Contains(body, "confirm the action first") {
 		t.Fatalf("save without confirmation:\n%s", body)
 	}
 
-	_, body = postForm(t, c, ts, "/key", url.Values{"path": {"/app"}, "key": {"bad key"}, "value": {"x"}, "confirm": {"yes"}}, origin)
+	_, body = postForm(t, c, ts, "/secrets/keys", url.Values{"path": {"/app"}, "key": {"bad key"}, "value": {"x"}, "confirm": {"yes"}}, origin)
 	if !strings.Contains(body, `class="error"`) {
 		t.Fatal("invalid key error not shown")
 	}
 
-	if code, _ := postForm(t, c, ts, "/key", url.Values{"path": {"/app"}, "key": {"X"}, "value": {"1"}, "confirm": {"yes"}}, "https://evil.example"); code != http.StatusForbidden {
+	if code, _ := postForm(t, c, ts, "/secrets/keys", url.Values{"path": {"/app"}, "key": {"X"}, "value": {"1"}, "confirm": {"yes"}}, "https://evil.example"); code != http.StatusForbidden {
 		t.Fatalf("cross-origin post: %d", code)
 	}
 
@@ -365,17 +368,56 @@ func TestUIFlow(t *testing.T) {
 	}
 }
 
+func TestUISummary(t *testing.T) {
+	ts := newTestServer(t)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"A":"1","B":"2"}`)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"C":"3"}`)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/gone", apiToken, `{"D":"4"}`)
+	do(t, ts, "DELETE", "/api/v1/paths?path=/gone", apiToken, "")
+	createToken(t, ts, url.Values{"name": {"soon"}, "path": {"/app"}, "expires": {"7d"}})
+
+	c := uiClient(t, ts)
+	postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL)
+	code, body := get(t, c, ts.URL+"/")
+	for _, want := range []string{
+		`<span class="value">1</span><span class="muted">Paths</span>`,
+		`<span class="value">3</span><span class="muted">Keys</span>`,
+		`<span class="value">1</span><span class="muted">Deleted paths</span>`,
+		`<span class="value">3</span><span class="muted">Stored versions</span>`,
+		`<tr><td>Expiring within 7 days</td><td>1</td></tr>`,
+		`<span class="change add">&#43;C</span>`,
+		`<tr><td>History limit</td><td>10 versions per path</td></tr>`,
+		`<tr><td>Offline cache default</td><td>7 days</td></tr>`,
+		` UTC</span></time></td>`,
+	} {
+		if code != http.StatusOK || !strings.Contains(body, want) {
+			t.Fatalf("summary: %d, missing %s\n%s", code, want, body)
+		}
+	}
+	if strings.Contains(body, `data-path=`) {
+		t.Fatalf("summary lists paths:\n%s", body)
+	}
+}
+
+func TestShortDuration(t *testing.T) {
+	for d, want := range map[time.Duration]string{24 * time.Hour: "24h", 90 * time.Minute: "1h30m", 30 * time.Minute: "30m", 30 * time.Second: "30s", 0: "0s"} {
+		if got := shortDuration(d); got != want {
+			t.Errorf("shortDuration(%v) = %q, want %q", d, got, want)
+		}
+	}
+}
+
 func TestUIHistoryCurrentOnlyNewest(t *testing.T) {
 	ts := newTestServer(t)
 	c := uiClient(t, ts)
 	origin := ts.URL
 	postForm(t, c, ts, "/login", url.Values{"token": {token}}, origin)
-	postForm(t, c, ts, "/path", url.Values{"path": {"/dup"}, "confirm": {"yes"}}, origin)
+	postForm(t, c, ts, "/secrets", url.Values{"path": {"/dup"}, "confirm": {"yes"}}, origin)
 	add := url.Values{"path": {"/dup"}, "new-key": {"KEY"}, "new-value": {"v"}, "confirm": {"yes"}}
-	postForm(t, c, ts, "/key", add, origin)
-	postForm(t, c, ts, "/key", url.Values{"path": {"/dup"}, "delete": {"KEY"}, "confirm": {"yes"}}, origin)
-	postForm(t, c, ts, "/key", add, origin)
-	_, body := get(t, c, ts.URL+"/path?path=/dup")
+	postForm(t, c, ts, "/secrets/keys", add, origin)
+	postForm(t, c, ts, "/secrets/keys", url.Values{"path": {"/dup"}, "delete": {"KEY"}, "confirm": {"yes"}}, origin)
+	postForm(t, c, ts, "/secrets/keys", add, origin)
+	_, body := get(t, c, ts.URL+"/secrets/path?path=/dup")
 	if strings.Count(body, `<span class="badge">current</span>`) != 1 || strings.Count(body, "same as current") != 1 ||
 		!strings.Contains(body, `<dialog id="restore-3">`) || strings.Contains(body, `<dialog id="restore-2">`) {
 		t.Fatalf("history current markers:\n%s", body)
@@ -387,16 +429,16 @@ func TestUIDeletedPath(t *testing.T) {
 	c := uiClient(t, ts)
 	origin := ts.URL
 	postForm(t, c, ts, "/login", url.Values{"token": {token}}, origin)
-	postForm(t, c, ts, "/key", url.Values{"path": {"/gone"}, "key": {"A", "B"}, "value": {"1", "2"}, "confirm": {"yes"}}, origin)
-	postForm(t, c, ts, "/path", url.Values{"path": {"/kept"}, "confirm": {"yes"}}, origin)
-	_, body := get(t, c, ts.URL+"/path?path=/gone")
+	postForm(t, c, ts, "/secrets/keys", url.Values{"path": {"/gone"}, "key": {"A", "B"}, "value": {"1", "2"}, "confirm": {"yes"}}, origin)
+	postForm(t, c, ts, "/secrets", url.Values{"path": {"/kept"}, "confirm": {"yes"}}, origin)
+	_, body := get(t, c, ts.URL+"/secrets/path?path=/gone")
 	if !strings.Contains(body, "<code>A</code>") || !strings.Contains(body, "<code>B</code>") {
 		t.Fatalf("multiple keys not set:\n%s", body)
 	}
 	if strings.Count(body, `form="edit-keys"`) != 6 || strings.Count(body, ">Save changes</button>") != 1 || !strings.Contains(body, `<dialog id="review-save">`) {
 		t.Fatalf("key table not one edit form:\n%s", body)
 	}
-	_, body = postForm(t, c, ts, "/key", url.Values{"path": {"/gone"}, "key": {"C", "D"}, "value": {"3"}, "confirm": {"yes"}}, origin)
+	_, body = postForm(t, c, ts, "/secrets/keys", url.Values{"path": {"/gone"}, "key": {"C", "D"}, "value": {"3"}, "confirm": {"yes"}}, origin)
 	if !strings.Contains(body, "every key needs a value") {
 		t.Fatalf("mismatched keys and values accepted:\n%s", body)
 	}
@@ -407,48 +449,48 @@ func TestUIDeletedPath(t *testing.T) {
 		{[]string{"A"}, `key &#34;A&#34; already exists`},
 		{[]string{"N", "N"}, `key &#34;N&#34; is added twice`},
 	} {
-		_, body = postForm(t, c, ts, "/key", url.Values{"path": {"/gone"}, "new-key": tc.keys, "new-value": make([]string, len(tc.keys)), "confirm": {"yes"}}, origin)
+		_, body = postForm(t, c, ts, "/secrets/keys", url.Values{"path": {"/gone"}, "new-key": tc.keys, "new-value": make([]string, len(tc.keys)), "confirm": {"yes"}}, origin)
 		if !strings.Contains(body, tc.want) || strings.Contains(body, `data-key="N"`) {
 			t.Fatalf("new keys %v: want %s:\n%s", tc.keys, tc.want, body)
 		}
 	}
 	edits := url.Values{"path": {"/gone"}, "key": {"A"}, "value": {"10"}, "new-key": {"E"}, "new-value": {"5"}, "delete": {"B"}}
-	_, body = postForm(t, c, ts, "/key", edits, origin)
+	_, body = postForm(t, c, ts, "/secrets/keys", edits, origin)
 	if !strings.Contains(body, "confirm the action first") || !strings.Contains(body, `data-key="B"`) {
 		t.Fatalf("edits saved without confirmation:\n%s", body)
 	}
 	edits.Set("confirm", "yes")
-	postForm(t, c, ts, "/key", edits, origin)
-	_, body = get(t, c, ts.URL+"/path?path=/gone")
+	postForm(t, c, ts, "/secrets/keys", edits, origin)
+	_, body = get(t, c, ts.URL+"/secrets/path?path=/gone")
 	if strings.Contains(body, `data-key="B"`) || !strings.Contains(body, `data-key="E"`) ||
 		!strings.Contains(body, `form="edit-keys">10</textarea>`) ||
 		!strings.Contains(body, `<span class="badge">v2</span>`) || strings.Contains(body, `<span class="badge">v3</span>`) {
 		t.Fatalf("add, change and delete not saved as one version:\n%s", body)
 	}
-	_, body = postForm(t, c, ts, "/path/delete", url.Values{"path": {"/gone"}, "confirm": {"/kept"}}, origin)
+	_, body = postForm(t, c, ts, "/secrets/delete", url.Values{"path": {"/gone"}, "confirm": {"/kept"}}, origin)
 	if !strings.Contains(body, "type the path to confirm") || !strings.Contains(body, "<code>A</code>") {
 		t.Fatalf("delete without confirmation:\n%s", body)
 	}
-	if code, _ := postForm(t, c, ts, "/path/delete", url.Values{"path": {"/gone"}, "confirm": {"/gone"}}, origin); code != http.StatusOK {
+	if code, _ := postForm(t, c, ts, "/secrets/delete", url.Values{"path": {"/gone"}, "confirm": {"/gone"}}, origin); code != http.StatusOK {
 		t.Fatalf("delete path: %d", code)
 	}
 
-	_, body = get(t, c, ts.URL+"/")
+	_, body = get(t, c, ts.URL+"/secrets")
 	if !strings.Contains(body, "Deleted paths") || !strings.Contains(body, ">/gone<") {
 		t.Fatalf("deleted path not listed:\n%s", body)
 	}
 
-	code, body := get(t, c, ts.URL+"/path?path=/gone")
+	code, body := get(t, c, ts.URL+"/secrets/path?path=/gone")
 	if code != http.StatusOK || !strings.Contains(body, "This path was deleted") ||
 		!strings.Contains(body, `name="version" value="1"`) || strings.Contains(body, "Add key") {
 		t.Fatalf("deleted path page: %d\n%s", code, body)
 	}
-	postForm(t, c, ts, "/path/rollback", url.Values{"path": {"/gone"}, "version": {"1"}, "confirm": {"1"}}, origin)
-	_, body = get(t, c, ts.URL+"/")
+	postForm(t, c, ts, "/secrets/rollback", url.Values{"path": {"/gone"}, "version": {"1"}, "confirm": {"1"}}, origin)
+	_, body = get(t, c, ts.URL+"/secrets")
 	if strings.Contains(body, "Deleted paths") {
 		t.Fatalf("restored path still listed as deleted:\n%s", body)
 	}
-	if code, _ := get(t, c, ts.URL+"/path?path=/never"); code != http.StatusNotFound {
+	if code, _ := get(t, c, ts.URL+"/secrets/path?path=/never"); code != http.StatusNotFound {
 		t.Fatalf("missing path: %d", code)
 	}
 }
@@ -601,7 +643,7 @@ func TestAPIBackupRestore(t *testing.T) {
 	if code, body := do(t, dst, "POST", "/api/v1/restore", apiToken, full); code != http.StatusOK || strings.TrimSpace(body) != `{"paths":1}` {
 		t.Fatalf("restore: %d %s", code, body)
 	}
-	if _, body := do(t, dst, "GET", "/api/v1/secrets?path=/app", apiToken, ""); strings.TrimSpace(body) != `{"data":{"A":"2"}}` {
+	if _, body := do(t, dst, "GET", "/api/v1/secrets?path=/app", apiToken, ""); strings.TrimSpace(body) != `{"cacheMaxAge":604800,"data":{"A":"2"}}` {
 		t.Fatalf("restored data: %s", body)
 	}
 	if _, body := do(t, dst, "GET", "/api/v1/history?path=/app", apiToken, ""); strings.Count(body, `"version":`) != 2 {
@@ -747,6 +789,34 @@ func TestScopedTokens(t *testing.T) {
 	}
 	if code, _ := postForm(t, uiClient(t, ts), ts, "/login", url.Values{"token": {rw}}, ts.URL); code != http.StatusUnauthorized {
 		t.Fatalf("integration token logged into the UI: %d", code)
+	}
+}
+
+func TestCacheMaxAge(t *testing.T) {
+	ts := newTestServer(t)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"A":"1"}`)
+	def := createToken(t, ts, url.Values{"name": {"def"}, "path": {"/app"}})
+	off := createToken(t, ts, url.Values{"name": {"off"}, "path": {"/app"}, "cache-max-age": {"0s"}})
+	hour := createToken(t, ts, url.Values{"name": {"hour"}, "path": {"/app"}, "cache-max-age": {"1h0m0s"}})
+	for tok, want := range map[string]string{def: `"cacheMaxAge":604800`, off: `"cacheMaxAge":0`, hour: `"cacheMaxAge":3600`} {
+		if _, body := do(t, ts, "GET", "/api/v1/secrets?path=/app", tok, ""); !strings.Contains(body, want) {
+			t.Errorf("secrets with %.8s: %s, want %s", tok, body, want)
+		}
+	}
+
+	c := uiClient(t, ts)
+	postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL)
+	_, body := get(t, c, ts.URL+"/integrations")
+	if !strings.Contains(body, `data-cache="1 hour"`) || !strings.Contains(body, `data-cache="Server default (7 days)"`) {
+		t.Fatalf("integration list:\n%s", body)
+	}
+	edit := url.Values{"name": {"hour"}, "path": {"/app"}, "expires": {"keep"}, "cache-max-age": {"default"}, "confirm": {"yes"}}
+	postForm(t, c, ts, "/integrations/update", edit, ts.URL)
+	if _, body := do(t, ts, "GET", "/api/v1/secrets?path=/app", hour, ""); !strings.Contains(body, `"cacheMaxAge":604800`) {
+		t.Errorf("after reset to default: %s", body)
+	}
+	if _, body := postForm(t, c, ts, "/integrations", url.Values{"name": {"bad"}, "path": {"/"}, "expires": {"never"}, "cache-max-age": {"-1h"}, "confirm": {"yes"}}, ts.URL); !strings.Contains(body, "unknown offline cache") {
+		t.Fatalf("negative cache accepted:\n%s", body)
 	}
 }
 

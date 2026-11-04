@@ -42,7 +42,8 @@ type Backend interface {
 
 // Token is an access token limited to the paths under Path. Hash is the hex
 // SHA-256 of the token; the token itself is never stored. A zero Expires
-// never expires.
+// never expires. A nil CacheMaxAge uses the server default for how long
+// clients may use cached secrets while the server is unreachable.
 type Token struct {
 	Name     string    `json:"name"`
 	Hash     string    `json:"hash"`
@@ -51,6 +52,8 @@ type Token struct {
 	Created  time.Time `json:"created"`
 	Expires  time.Time `json:"expires,omitzero"`
 	LastUsed time.Time `json:"lastUsed,omitzero"`
+
+	CacheMaxAge *time.Duration `json:"cacheMaxAge,omitempty"`
 }
 
 // Version is a snapshot of the data stored at a path.

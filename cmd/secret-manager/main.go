@@ -87,6 +87,7 @@ func runServer(args []string) error {
 	filePath := fs.String("file", "secret-manager.json", "file holding the stored secrets (file storage)")
 	runController := fs.Bool("controller", true, "run the SecretSync controller")
 	historyLimit := fs.Int("history-limit", 10, "versions kept per path, current included, 0 to disable history")
+	cacheMaxAge := fs.Duration("cache-max-age", server.DefaultCacheMaxAge, "default time clients may use cached secrets while the server is unreachable, 0 to disable their cache; integrations may override it")
 	lastUsedFlush := fs.Duration("last-used-flush", 30*time.Minute, "time between saves of the last use of every integration")
 	var sched server.BackupSchedule
 	fs.StringVar(&sched.Dir, "backup-dir", "", "directory receiving scheduled backups, empty to disable them")
@@ -188,6 +189,11 @@ func runServer(args []string) error {
 		return err
 	}
 	handler.Version = version
+	if *cacheMaxAge < 0 {
+		return errors.New("--cache-max-age must not be negative")
+	}
+	handler.CacheMaxAge = *cacheMaxAge
+	handler.Settings = server.Settings{Storage: *storageName, Encryption: key != nil, Controller: *runController, Backups: sched}
 	httpServer := &http.Server{Addr: *addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 
 	slog.Info("starting secret-manager", "version", version, "storage", *storageName, "controller", *runController,

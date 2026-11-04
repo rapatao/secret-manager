@@ -28,16 +28,20 @@ a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 code, textarea, summary, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
 header { background: var(--surface); border-bottom: 1px solid var(--border); }
-header .bar { max-width: 60rem; margin: 0 auto; padding: .75rem 1rem; display: flex; justify-content: space-between; align-items: center; }
+header .bar { max-width: 72rem; margin: 0 auto; padding: .75rem 1rem; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .5rem; }
 .brand { display: flex; align-items: center; gap: .5rem; color: var(--fg); font-weight: 600; font-size: 1.05rem; }
 .brand:hover { text-decoration: none; }
 .logo { width: 1.6rem; height: 1.6rem; border-radius: 6px; background: var(--accent); color: var(--accent-fg); display: grid; place-items: center; font-size: .9rem; }
-main { max-width: 60rem; margin: 1.5rem auto; padding: 0 1rem; }
+main { max-width: 72rem; margin: 1.5rem auto; padding: 0 1rem; }
 h1 { font-size: 1.4rem; margin: 0 0 1rem; word-break: break-all; }
 h2 { font-size: 1rem; margin: 0; padding: .75rem 1rem; border-bottom: 1px solid var(--border); }
 h3 { font-size: 1rem; margin: 0 0 .5rem; }
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 1.25rem; overflow: hidden; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 1.25rem; overflow-x: auto; }
 .card > .body { padding: 1rem; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+.stats .stat { display: grid; gap: .25rem; padding: 1rem; margin: 0; color: inherit; text-decoration: none; }
+.stats .stat .value { font-size: 1.75rem; font-weight: 600; }
+table.summary-table td:last-child { text-align: right; }
 .card.danger-zone { border-color: var(--danger); }
 .card.danger-zone > summary { font-family: inherit; font-size: 1rem; font-weight: 600; color: var(--danger); padding: .75rem 1rem; margin: 0; }
 .card.danger-zone[open] > summary { border-bottom: 1px solid var(--border); }
@@ -52,10 +56,10 @@ td.empty { color: var(--muted); text-align: center; padding: 1.5rem; }
 td table td { padding: .25rem .5rem; }
 .path-link { display: block; }
 .badge { display: inline-block; padding: 0 .5rem; border-radius: 999px; background: var(--code-bg); color: var(--muted); font-size: .8rem; }
-.change { white-space: nowrap; }
+.change, td code, td .badge, time > span { white-space: nowrap; }
 code { background: var(--code-bg); padding: .1rem .35rem; border-radius: 4px; }
 form.inline { display: inline; }
-header .row { display: flex; align-items: center; gap: .75rem; }
+header .row { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; }
 form.row { display: flex; gap: .5rem; flex-wrap: wrap; }
 form.row input { flex: 1; min-width: 12rem; }
 form.stack { display: grid; gap: .6rem; }
@@ -91,7 +95,7 @@ table.diff td code { display: block; max-height: 8rem; overflow: auto; white-spa
 .change { color: var(--op); font-weight: 600; }
 table.diff tr[class] { background: color-mix(in srgb, var(--op) 12%, transparent); }
 table.diff tr[class] td:first-child { color: var(--op); font-weight: 600; }
-.dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; }
+.dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; }
 #edit-keys { border-top: 1px solid var(--border); }
 tr.staged-delete td:not(.actions) { opacity: .5; text-decoration: line-through; }
 .error { background: var(--danger-bg); border: 1px solid var(--danger); color: var(--danger); border-radius: var(--radius); padding: .6rem 1rem; margin: 0 0 1rem; }
@@ -99,7 +103,7 @@ tr.staged-delete td:not(.actions) { opacity: .5; text-decoration: line-through; 
 .login { max-width: 24rem; margin: 12vh auto 0; }
 .login .logo { width: 2.5rem; height: 2.5rem; font-size: 1.3rem; margin: 0 auto .75rem; }
 .login h1 { text-align: center; }
-.token-once { display: flex; gap: .5rem; }
+.token-once { display: flex; flex-wrap: wrap; gap: .5rem; }
 .user-code { font-size: 1.6rem; letter-spacing: .1em; text-align: center; margin: 0 0 1rem; }
 fieldset { border: 0; padding: 0; margin: 0; display: grid; gap: .6rem; }
 label.check { display: flex; align-items: center; gap: .5rem; font-weight: 400; }
@@ -109,6 +113,33 @@ table.summary td, table.summary th { padding: .4rem .75rem; word-break: break-al
 table.summary td:first-child { color: var(--muted); }
 table.summary tr.changed td:last-child { color: var(--mod); font-weight: 600; }
 table.summary[data-create] .current { display: none; }
+td.value { width: 50%; }
+td.value summary { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.masked { letter-spacing: .1em; color: var(--muted); }
+details[open] .masked, details[open] .when-closed, details:not([open]) .when-open, .edited-badge { display: none; }
+tr.edited .edited-badge { display: inline-block; }
+.when-closed, .when-open { color: var(--accent); font-size: .85rem; }
+@media (max-width: 40rem) {
+  header .bar { padding: .5rem .75rem; }
+  main { margin: 1rem auto; padding: 0 .5rem; }
+  h1 { font-size: 1.2rem; }
+  td, th { padding: .5rem .6rem; }
+  h2 { padding: .6rem .75rem; }
+  .card > .body { padding: .75rem; }
+  dialog { padding: 1rem; }
+  .stats { gap: .5rem; }
+  .stats .stat { padding: .75rem; }
+  .stats .stat .value { font-size: 1.4rem; }
+  table.stack-narrow thead { display: none; }
+  table.stack-narrow tr { display: block; padding: .5rem 0; border-bottom: 1px solid var(--border); }
+  table.stack-narrow tr:last-child { border-bottom: 0; }
+  table.stack-narrow td { display: flex; flex-wrap: wrap; gap: .25rem .75rem; justify-content: space-between; align-items: baseline; border: 0; padding: .2rem .75rem; width: auto; text-align: left; }
+  table.stack-narrow td[data-label]::before { content: attr(data-label); color: var(--muted); font-size: .8rem; font-family: system-ui, sans-serif; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  table.stack-narrow td.actions { justify-content: flex-end; gap: .5rem; padding-top: .4rem; }
+  table.stack-narrow td.empty { display: block; text-align: center; }
+  table.stack-narrow td.value { display: block; width: auto; }
+  table.stack-narrow td.value::before { display: block; margin-bottom: .2rem; }
+}
 .custom-date { display: none; }
 fieldset:has(select[name="expires"] option[value="custom"]:checked) .custom-date { display: grid; }
 select { font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: .45rem .65rem; }
@@ -118,7 +149,8 @@ select { font: inherit; color: inherit; background: var(--bg); border: 1px solid
 {{block "header" .}}
 <header><div class="bar">
 <div class="row"><a class="brand" href="/"><span class="logo" aria-hidden="true">&#128273;</span>Secret-Manager</a>{{with .Version}}<span class="muted mono">({{.}})</span>{{end}}</div>
-<nav class="row"><a class="button small" href="/integrations">Integrations</a>
+<nav class="row"><a class="button small" href="/secrets">Secrets</a>
+<a class="button small" href="/integrations">Integrations</a>
 <form class="inline" method="post" action="/logout"><button type="submit" class="small">Sign out</button></form></nav>
 </div></header>
 {{end}}
@@ -128,6 +160,7 @@ select { font: inherit; color: inherit; background: var(--bg); border: 1px solid
 </main>
 </body>
 </html>{{end}}
+{{define "op"}}{{if eq . "+"}}add{{else if eq . "-"}}del{{else}}mod{{end}}{{end}}
 {{define "grant-fields"}}
 <fieldset>
 {{if .Grant.Edit}}<input type="hidden" name="name" value="{{.Grant.Name}}">{{else}}
@@ -139,5 +172,7 @@ select { font: inherit; color: inherit; background: var(--bg); border: 1px solid
 <label>Expires <select name="expires">{{$exp := .Grant.Expires}}{{range .Presets}}<option value="{{.Value}}"{{if eq .Value $exp}} selected{{end}}>{{.Label}}</option>{{end}}</select></label>
 <label class="custom-date">Expiry date <input type="date" name="expires-date">
 <span class="muted">The integration works through the end of that day, UTC.</span></label>
+<label>Offline cache <select name="cache-max-age">{{$cache := .Grant.Cache}}{{range .CacheOptions}}<option value="{{.Value}}"{{if eq .Value $cache}} selected{{end}}>{{.Label}}</option>{{end}}</select>
+<span class="muted">How long the CLI may use the secrets it read while the server is unreachable.</span></label>
 </fieldset>
 {{end}}
