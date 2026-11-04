@@ -33,7 +33,7 @@ Integrations and logins
 - The Integrations page manages [integrations](integrations.md). `/authorize` approves or denies CLI logins, see [Servers and login](cli.md#servers-and-login).
 
 Audit
-- The Audit page (`/audit`) lists the newest 500 [audit log](observability.md#audit-log) events, newest first: time, source, operation, integration, path, keys, client address and result.
+- The Audit page (`/audit`) lists the newest 500 [audited](observability.md#event-categories) events, newest first: time, source, operation, integration, path, keys, client address and result.
 - A filter shows only the events made with one integration's token or acting on that integration (created, updated, revoked, approved).
 - The server saves them to the storage backend every minute and on shutdown, and loads them on start, so a crash loses at most the last minute of them. The JSON log holds every event.
 

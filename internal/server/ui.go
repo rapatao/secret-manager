@@ -141,20 +141,20 @@ func (s *Server) uiLogin(w http.ResponseWriter, r *http.Request) {
 	addr, now := s.clientAddr(r), time.Now()
 	if wait := s.logins.wait(addr, now); wait > 0 {
 		err := fmt.Errorf("too many failed sign-ins, try again in %s", wait.Round(time.Second))
-		s.audit(r, "ui", "login", "", nil, err)
+		s.auditAt(s.Events.Logins, r, "ui", "login", "", nil, err)
 		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Round(time.Second).Seconds())))
 		s.render(w, http.StatusTooManyRequests, "login", map[string]any{"Error": err.Error(), "Next": r.PostFormValue("next")})
 		return
 	}
 	if !s.validToken(r.PostFormValue("token")) {
 		s.logins.fail(addr, now)
-		s.audit(r, "ui", "login", "", nil, errInvalidToken)
+		s.auditAt(s.Events.Logins, r, "ui", "login", "", nil, errInvalidToken)
 		s.render(w, http.StatusUnauthorized, "login", map[string]any{"Error": "invalid token", "Next": r.PostFormValue("next")})
 		return
 	}
 	s.logins.succeed(addr)
 	s.startSession(w)
-	s.audit(r, "ui", "login", "", nil, nil)
+	s.auditAt(s.Events.Logins, r, "ui", "login", "", nil, nil)
 	http.Redirect(w, r, localPath(r.PostFormValue("next")), http.StatusSeeOther)
 }
 
@@ -196,12 +196,12 @@ func (s *Server) uiLoginLink(w http.ResponseWriter, r *http.Request) {
 	delete(s.links.codes, code)
 	s.links.mu.Unlock()
 	if !ok || time.Now().After(expires) {
-		s.audit(r, "ui", "login", "", nil, errors.New("invalid or expired login link"))
+		s.auditAt(s.Events.Logins, r, "ui", "login", "", nil, errors.New("invalid or expired login link"))
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
 	s.startSession(w)
-	s.audit(r, "ui", "login", "", nil, nil)
+	s.auditAt(s.Events.Logins, r, "ui", "login", "", nil, nil)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 

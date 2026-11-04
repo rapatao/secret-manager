@@ -6,6 +6,9 @@ image:
 
 imagePullSecrets: []
 
+# Old ReplicaSets kept for rollback with kubectl rollout undo.
+revisionHistoryLimit: 10
+
 # Secret holding the admin token (at least 32 characters) that signs in to the
 # Web UI. Create it before installing, e.g.:
 #   kubectl create secret generic secret-manager-token \
@@ -35,10 +38,18 @@ encryption:
 # e.g. a LoadBalancer Service with externalTrafficPolicy: Local.
 trustedProxies: []
 
-# Also audit reads of secret values (API reads and Web UI path views), with
-# key names only. Reads can outnumber changes in the Audit page, which keeps
-# the newest 500 events.
-auditReads: false
+# Where each category of audit events goes: none (dropped), log (the JSON
+# log only) or audit (also kept on the Audit page, which keeps the newest 500
+# events, and in storage). Every other event is always audited.
+events:
+  # Reads of secret values (API reads and Web UI path views), key names only.
+  reads: none
+  # Reads without values: server info, path lists and version lists.
+  lists: none
+  # Web UI sign-ins and CLI logins: log or audit.
+  logins: audit
+  # Backups and restores: log or audit.
+  backups: audit
 
 service:
   type: ClusterIP

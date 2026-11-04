@@ -670,7 +670,7 @@ func TestAuditPersisted(t *testing.T) {
 	}
 	first := newServer()
 	for i := range auditKept + 3 {
-		first.record(auditEvent{Source: "api", Op: "set", Path: "/p" + strconv.Itoa(i)})
+		first.record(LevelAudit, auditEvent{Source: "api", Op: "set", Path: "/p" + strconv.Itoa(i)})
 	}
 	if err := first.FlushAudit(ctx); err != nil {
 		t.Fatal(err)
@@ -700,6 +700,17 @@ func TestUIAudit(t *testing.T) {
 	_, body = get(t, c, ts.URL+"/audit?integration=full")
 	if !strings.Contains(body, "<code>set</code>") || strings.Contains(body, "invalid token") || strings.Contains(body, "<code>login</code>") {
 		t.Fatalf("audit page filtered by integration:\n%s", body)
+	}
+	if !strings.Contains(body, "since the server started") {
+		t.Fatalf("audit page without a store does not say events are lost on restart:\n%s", body)
+	}
+
+	saved, _ := newLoggedServer(t, func(s *Server) { s.auditStore = k8sstorage.New(fake.NewClientBuilder().Build(), "sm") })
+	c = uiClient(t, saved)
+	postForm(t, c, saved, "/login", url.Values{"token": {token}}, saved.URL)
+	_, body = get(t, c, saved.URL+"/audit")
+	if strings.Contains(body, "since the server started") {
+		t.Fatalf("audit page with a store says events are lost on restart:\n%s", body)
 	}
 }
 
@@ -953,8 +964,8 @@ func TestIntegrationAllowedFrom(t *testing.T) {
 }
 
 func TestAuditReads(t *testing.T) {
-	for _, on := range []bool{false, true} {
-		ts, logs := newLoggedServer(t, func(s *Server) { s.AuditReads = on })
+	for _, level := range []Level{LevelNone, LevelLog, LevelAudit} {
+		ts, logs := newLoggedServer(t, func(s *Server) { s.Events.Reads = level })
 		do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"PASS":"hunter2"}`)
 		do(t, ts, "GET", "/api/v1/secrets?path=/app", apiToken, "")
 		do(t, ts, "GET", "/api/v1/history/1?path=/app", apiToken, "")
@@ -964,14 +975,74 @@ func TestAuditReads(t *testing.T) {
 
 		out := logs.String()
 		reads := strings.Count(out, `"op":"read"`) + strings.Count(out, `"op":"read_version"`)
-		if want := map[bool]int{false: 0, true: 3}[on]; reads != want {
-			t.Fatalf("audit reads %v: %d read events, want %d\n%s", on, reads, want, out)
+		if want := map[Level]int{LevelNone: 0, LevelLog: 3, LevelAudit: 3}[level]; reads != want {
+			t.Fatalf("reads=%s: %d read events, want %d\n%s", level, reads, want, out)
 		}
-		if on && (!strings.Contains(out, `"source":"ui","op":"read"`) || !strings.Contains(out, `"keys":["PASS"],"version":1`)) {
+		if level != LevelNone && (!strings.Contains(out, `"source":"ui","op":"read"`) || !strings.Contains(out, `"keys":["PASS"],"version":1`)) {
 			t.Fatalf("read events:\n%s", out)
 		}
 		if strings.Contains(out, "hunter2") {
 			t.Fatal("secret value logged")
+		}
+		_, body := get(t, c, ts.URL+"/audit")
+		if kept := strings.Contains(body, "<code>read</code>"); kept != (level == LevelAudit) || !strings.Contains(body, "<code>set</code>") {
+			t.Fatalf("reads=%s: audit page:\n%s", level, body)
+		}
+	}
+}
+
+func TestEventCategories(t *testing.T) {
+	for _, level := range []Level{LevelNone, LevelLog, LevelAudit} {
+		ts, logs := newLoggedServer(t, func(s *Server) {
+			s.Events = Events{Lists: level, Logins: max(level, LevelLog), Backups: max(level, LevelLog)}
+		})
+		do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"A":"1"}`)
+		do(t, ts, "GET", "/api/v1/info", apiToken, "")
+		do(t, ts, "GET", "/api/v1/paths", apiToken, "")
+		do(t, ts, "GET", "/api/v1/history?path=/app", apiToken, "")
+		do(t, ts, "GET", "/api/v1/backup", apiToken, "")
+		do(t, ts, "POST", "/api/v1/authorize/device", "", `{"name":"laptop"}`)
+		do(t, ts, "POST", "/api/v1/authorize/token", "", `{"deviceCode":"guess"}`)
+		c := uiClient(t, ts)
+		postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL)
+
+		out := logs.String()
+		for _, op := range []string{"info", "list_paths", "list_history"} {
+			if logged := strings.Contains(out, `"op":"`+op+`"`); logged != (level != LevelNone) {
+				t.Fatalf("lists=%s: %s logged %v\n%s", level, op, logged, out)
+			}
+		}
+		for _, op := range []string{"backup", "authorize_start", "authorize_token", "login"} {
+			if !strings.Contains(out, `"op":"`+op+`"`) {
+				t.Fatalf("%s not logged\n%s", op, out)
+			}
+		}
+		if !strings.Contains(out, `"error":"`+errLoginInvalid.Error()+`"`) {
+			t.Fatalf("failed authorize_token:\n%s", out)
+		}
+		_, body := get(t, c, ts.URL+"/audit")
+		for _, op := range []string{"list_paths", "backup", "authorize_start", "login"} {
+			if kept := strings.Contains(body, "<code>"+op+"</code>"); kept != (level == LevelAudit) {
+				t.Fatalf("level %s: %s kept %v on the audit page:\n%s", level, op, kept, body)
+			}
+		}
+	}
+}
+
+func TestParseEvents(t *testing.T) {
+	got, err := ParseEvents(DefaultEvents, "reads=log, lists=audit,logins=log")
+	if want := (Events{Reads: LevelLog, Lists: LevelAudit, Logins: LevelLog, Backups: LevelAudit}); err != nil || got != want {
+		t.Fatalf("got %v, %v", got, err)
+	}
+	if got.String() != "reads=log,lists=audit,logins=log,backups=audit" {
+		t.Fatalf("String: %s", got)
+	}
+	if got, err := ParseEvents(DefaultEvents, ""); err != nil || got != DefaultEvents {
+		t.Fatalf("empty: %v, %v", got, err)
+	}
+	for _, bad := range []string{"logins=none", "backups=none", "reads=verbose", "writes=log", "reads"} {
+		if _, err := ParseEvents(DefaultEvents, bad); err == nil {
+			t.Errorf("%q accepted", bad)
 		}
 	}
 }

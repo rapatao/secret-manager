@@ -12,7 +12,7 @@ helm install secret-manager oci://ghcr.io/rapatao/charts/secret-manager -n secre
   --set ingress.enabled=true --set ingress.host=secrets.example.com
 ```
 
-Add `--version 1.2.0` to pin a release. Set `historyLimit` (default `10`, `0` disables history) to change how many versions are kept per path. From a checkout, use `charts/secret-manager` instead of the `oci://` reference.
+Add `--version 1.2.0` to pin a release. Set `historyLimit` (default `10`, `0` disables history) to change how many versions are kept per path, `events` to choose which [audit events](observability.md#event-categories) are logged or kept, and `revisionHistoryLimit` (default `10`) to change how many old ReplicaSets the Deployment keeps for `kubectl rollout undo`. From a checkout, use `charts/secret-manager` instead of the `oci://` reference.
 
 The chart installs the `SecretSync` CRD. Helm does not upgrade CRDs, so apply them after upgrading:
 
@@ -49,7 +49,7 @@ The chart sets these; set them yourself when running `secret-manager server` out
 | `--history-limit` | `10` | Versions kept per path, current included, `0` disables history |
 | `--cache-max-age` | `168h` | How long clients may use the secrets they read while the server is unreachable, `0` disables their [offline cache](cli.md#offline-cache). Integrations may override it |
 | `--trusted-proxies` | | Comma-separated CIDRs or addresses of the proxies in front of the server, see [Client address](client-address.md) |
-| `--audit-reads` | `false` | Also audit reads of secret values, see [Audit log](observability.md#audit-log) |
+| `--events` | `reads=none,lists=none,logins=audit,backups=audit` | Where each category of audit events goes, see [Event categories](observability.md#event-categories) |
 | `--last-used-flush` | `30m` | Time between saves of the last use of every [integration](integrations.md), also saved on shutdown |
 | `--backup-dir` | | Directory receiving [scheduled backups](backup.md#scheduled-backups), empty disables them |
 | `--backup-interval` | `24h` | Time between scheduled backups |
