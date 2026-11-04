@@ -23,7 +23,7 @@ Keys
 - Adding keys, editing values and deleting keys are staged on the page: a deleted key is struck through until saved, and Undo brings it back.
 - A new key cannot reuse the name of an existing key or of another new key; existing keys change in their own row.
 - Generate, under a value being added or edited, replaces it with random letters and digits made in the browser, as many as the length next to it (default 32, up to 4096).
-- Import opens a dialog taking pasted text or a file: `KEY=VALUE` lines, read with the same rules as `set --env-file`, or a JSON object of string values, as `export --format json` writes. Text starting with `{` is read as JSON. Each key becomes a staged addition, or a staged change of an existing key, including one staged for deletion. A line that cannot be read is reported with its number and nothing is staged.
+- Import opens a dialog taking pasted text or a file, read as `set --json-file` reads it, a JSON object of string values, when it starts with `{`, otherwise as `set --env-file` reads `KEY=VALUE` lines. Each key becomes a staged addition, or a staged change of an existing key, including one staged for deletion. A line that cannot be read is reported with its number and nothing is staged.
 - Download asks for a format, `.env` or JSON, and saves the keys of the path as `secret-manager export` prints them, in a file named after the path (`/app/db` gives `app-db.env` or `app-db.json`). Unsaved changes are not included.
 - Save changes is enabled once something is staged. It opens a confirmation dialog listing the keys added (`+`), changed (`~`) and deleted (`-`) with their current and new values, and writes every staged change as one version.
 

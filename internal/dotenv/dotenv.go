@@ -3,12 +3,36 @@ package dotenv
 
 import (
 	"bufio"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"slices"
 	"strings"
 )
+
+// ParseJSON reads a JSON object of string values, as export --format json
+// writes it.
+func ParseJSON(r io.Reader) (map[string]string, error) {
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil || doc == nil {
+		return nil, errors.New("invalid JSON: want an object of string values")
+	}
+	out := make(map[string]string, len(doc))
+	for k, v := range doc {
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("key %s: value must be a string", k)
+		}
+		out[k] = s
+	}
+	return out, nil
+}
 
 // Parse reads KEY=VALUE lines. Blank lines, # comments and an optional
 // "export " prefix are accepted. Values may be bare, 'single quoted' (literal)

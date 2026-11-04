@@ -60,8 +60,10 @@ const Usage = `Client commands:
                                                --recursive, as PATH KEY for every
                                                nested path
   get     --path P [--recursive] [KEY]         print one value, or all as dotenv
-  set     --path P [--env-file F|-] [--generate KEY[:LEN]...] [K=V...]
-                                               merge keys into a path; --generate sets
+  set     --path P [--env-file F|- | --json-file F|-] [--generate KEY[:LEN]...] [K=V...]
+                                               merge keys into a path; --env-file reads
+                                               KEY=VALUE lines, --json-file a JSON
+                                               object of string values; --generate sets
                                                KEY to LEN (default 32) random letters
                                                and digits
   delete  --path P (KEY... | --all)            delete keys, or the whole path
@@ -604,6 +606,7 @@ func (c *CLI) get(ctx context.Context, args []string) error {
 func (c *CLI) set(ctx context.Context, args []string) error {
 	f := c.flags("set", true, false)
 	envFile := f.fs.String("env-file", "", "dotenv file to import, - for stdin")
+	jsonFile := f.fs.String("json-file", "", "JSON object of string values to import, - for stdin")
 	generated := map[string]string{}
 	f.fs.Func("generate", "set KEY[:LENGTH] to random letters and digits, LENGTH 32 by default", func(v string) error {
 		key, length, err := parseGenerate(v)
@@ -618,20 +621,27 @@ func (c *CLI) set(ctx context.Context, args []string) error {
 		return err
 	}
 
+	if *envFile != "" && *jsonFile != "" {
+		return fmt.Errorf("%w: --env-file and --json-file cannot be combined", errUsage)
+	}
 	values := map[string]string{}
-	if *envFile != "" {
+	name, parse := *envFile, dotenv.Parse
+	if *jsonFile != "" {
+		name, parse = *jsonFile, dotenv.ParseJSON
+	}
+	if name != "" {
 		r := c.Stdin
-		if *envFile != "-" {
-			file, err := os.Open(*envFile)
+		if name != "-" {
+			file, err := os.Open(name)
 			if err != nil {
 				return err
 			}
 			defer file.Close()
 			r = file
 		}
-		parsed, err := dotenv.Parse(r)
+		parsed, err := parse(r)
 		if err != nil {
-			return fmt.Errorf("%s: %w", *envFile, err)
+			return fmt.Errorf("%s: %w", name, err)
 		}
 		values = parsed
 	}

@@ -29,3 +29,15 @@ func TestParseDotenvErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestParseJSON(t *testing.T) {
+	got, err := ParseJSON(strings.NewReader("\n  {\"A\": \"1\", \"B\": \"x\\ny\"}\n"))
+	if want := map[string]string{"A": "1", "B": "x\ny"}; err != nil || !maps.Equal(got, want) {
+		t.Fatalf("got %q, %v, want %q", got, err, want)
+	}
+	for _, in := range []string{`{"A":1}`, `{"A":null}`, `{"A":`, `{"A":"1"} x`, `null`, `["A"]`, `A=1`} {
+		if _, err := ParseJSON(strings.NewReader(in)); err == nil {
+			t.Errorf("%q: want error", in)
+		}
+	}
+}

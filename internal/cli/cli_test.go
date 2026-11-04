@@ -199,6 +199,23 @@ func TestSetFromEnvFileAndExport(t *testing.T) {
 	if got := h.mustRun("export", "--path", "/app"); got != "MULTI=\"a\\nb \\$x\"\nUSER=\"bob\"\n" {
 		t.Fatalf("dotenv export: %q", got)
 	}
+
+	want := h.stdout.String()
+	h.stdin = h.mustRun("export", "--path", "/app", "--format", "json")
+	h.mustRun("set", "--path", "/copy", "--json-file", "-")
+	if got := h.mustRun("export", "--path", "/copy"); got != want {
+		t.Fatalf("json import: %q, want %q", got, want)
+	}
+	h.stdin = `{"N":1}`
+	if code := h.run("set", "--path", "/copy", "--json-file", "-"); code != 1 || !strings.Contains(h.stderr.String(), "key N: value must be a string") {
+		t.Fatalf("non-string json value: exit %d, %q", code, h.stderr.String())
+	}
+	if code := h.run("set", "--path", "/copy", "--env-file", "-"); code != 1 || !strings.Contains(h.stderr.String(), "missing '='") {
+		t.Fatalf("json read by --env-file: exit %d, %q", code, h.stderr.String())
+	}
+	if code := h.run("set", "--path", "/copy", "--env-file", "a", "--json-file", "b"); code != 2 || !strings.Contains(h.stderr.String(), "cannot be combined") {
+		t.Fatalf("both files: exit %d, %q", code, h.stderr.String())
+	}
 }
 
 func TestRunInjectsEnvAndForwardsExitCode(t *testing.T) {
