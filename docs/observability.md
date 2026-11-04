@@ -17,11 +17,26 @@ Logs are JSON on stderr. `--log-level` (chart value `logLevel`) sets the level: 
 
 ## Audit log
 
-Every change made through the API or the Web UI, every backup, every Web UI login and every failed authentication is logged as a JSON line with `"msg":"audit"`:
+Changes, backups, sign-ins, CLI logins and failed authentications are logged as a JSON line with `"msg":"audit"`; reads can be too, see [Event categories](#event-categories):
 
 ```json
 {"level":"INFO","msg":"audit","source":"api","op":"set","remote":"10.42.0.7:51234","forwarded_for":"203.0.113.9","path":"/tools","keys":["GITHUB_TOKEN"]}
 {"level":"WARN","msg":"audit","source":"ui","op":"login","remote":"10.42.0.7:51240","error":"invalid token"}
 ```
 
-`op` is one of `read` and `read_version` (only with `--audit-reads`), `set`, `delete_key`, `delete_path`, `create_path`, `copy_path` and `move_path` (with the target in `to`), `rollback`, `delete_version` (with the `version`), `backup`, `restore`, `create_token`, `update_token`, `revoke_token` (with the integration `name`), `authorize` (a CLI login approved or denied in the Web UI), `login` and `auth` (API bearer token, including expired tokens and requests an integration is not allowed to make). Requests made with an integration token carry its name in `token`. `client` is the [client address](client-address.md) when trusted proxies resolve one that differs from `remote`. Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Reads are not logged unless the server runs with `--audit-reads` (chart value `auditReads`): then every `GET /api/v1/secrets` is logged as `read` with the key names returned (and `recursive`), every `GET /api/v1/history/{version}` as `read_version` with the `version`, and every Web UI path page view as `read` with source `ui`. `get`, `export` and `run` served from the [offline cache](cli.md#offline-cache) do not reach the server and are not logged. Reads can far outnumber changes, so the Audit page, which keeps the newest 500 events, may then show only recent reads. The newest events are also shown on the Web UI [Audit](web-ui.md) page.
+Requests made with an integration token carry its name in `token`. `client` is the [client address](client-address.md) when trusted proxies resolve one that differs from `remote`. Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Audited events are also kept on the Web UI [Audit](web-ui.md) page, which shows the newest 500, and saved in storage.
+
+### Event categories
+
+`--events` (chart value `events`) sets where each category goes, as comma-separated `category=level`, such as `--events reads=log,lists=log`. The levels are `none` (dropped), `log` (the JSON log only) and `audit` (the JSON log, the Audit page and storage). Categories not named keep their default. The server logs the levels in use on start, as `events` in the `starting secret-manager` line.
+
+| Category | Levels | Default | `op` |
+|----------|--------|---------|------|
+| `reads` | `none`, `log`, `audit` | `none` | `read`: every `GET /api/v1/secrets` with the key names returned (and `recursive`), and every Web UI path page view with source `ui`; `read_version`: every `GET /api/v1/history/{version}` with the `version` |
+| `lists` | `none`, `log`, `audit` | `none` | `info` (`GET /api/v1/info`), `list_paths` (`GET /api/v1/paths`), `list_history` (`GET /api/v1/history`, with the `path`) |
+| `logins` | `log`, `audit` | `audit` | `login` (Web UI sign-in), `authorize` (a CLI login approved or denied in the Web UI), `authorize_start` (a CLI device login started, with the requested `name`), `authorize_token` (a CLI login code that is invalid, expired or denied) |
+| `backups` | `log`, `audit` | `audit` | `backup` (API or, with source `schedule`, scheduled), `restore` |
+
+Every other event is always audited: `set`, `delete_key`, `delete_path`, `create_path`, `copy_path` and `move_path` (with the target in `to`), `rollback`, `delete_version` (with the `version`), `create_token`, `update_token`, `revoke_token` (with the integration `name`) and `auth` (API bearer token rejected, including expired tokens and requests an integration is not allowed to make).
+
+`get`, `export` and `run` served from the [offline cache](cli.md#offline-cache) do not reach the server and are not logged. Reads can far outnumber changes, so with `reads=audit` the Audit page may show only recent reads; `reads=log` keeps them out of it.

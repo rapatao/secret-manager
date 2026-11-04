@@ -8,7 +8,7 @@ Without a key, the file holds every value in plain text. With `SECRET_MANAGER_BA
 
 ## Scheduled backups
 
-With `--backup-dir DIR`, the server writes a backup to `DIR/backup-<UTC time>.json` (`0600`) every `--backup-interval` (default `24h`) and keeps the newest `--backup-keep` files (default `7`). `--backup-history` adds versions. The first backup is written one interval after the server starts. Each run is logged as an audit entry with `source` `schedule` and `op` `backup`; a failed run is logged at `WARN` and tried again on the next interval.
+With `--backup-dir DIR`, the server writes a backup to `DIR/backup-<UTC time>.json` (`0600`) every `--backup-interval` (default `24h`) and keeps the newest `--backup-keep` files (default `7`). `--backup-history` adds versions. The first backup is written one interval after the server starts. Each run is logged as an audit entry with `source` `schedule` and `op` `backup` (category [`backups`](observability.md#event-categories)); a failed run is logged at `WARN` and tried again on the next interval.
 
 With `SECRET_MANAGER_BACKUP_KEY` set on the server, every scheduled backup is encrypted like `secret-manager backup` does with that variable, and the summary page shows the schedule as encrypted. Restore one with `secret-manager restore` and the same key.
 

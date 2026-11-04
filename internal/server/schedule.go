@@ -48,10 +48,10 @@ func (s *Server) RunBackups(ctx context.Context, sched BackupSchedule) {
 			e := auditEvent{Source: "schedule", Op: "backup"}
 			if err != nil {
 				e.Error = err.Error()
-				s.record(e)
+				s.record(s.Events.Backups, e)
 				continue
 			}
-			s.record(e, "file", file)
+			s.record(s.Events.Backups, e, "file", file)
 		}
 	}
 }

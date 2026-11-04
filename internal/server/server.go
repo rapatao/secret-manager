@@ -65,8 +65,8 @@ type Server struct {
 	// TrustedProxies are the addresses whose X-Forwarded-For header names
 	// the client, see clientAddr.
 	TrustedProxies []netip.Prefix
-	// AuditReads also audits reads of secret values.
-	AuditReads bool
+	// Events sets where each category of audit events goes.
+	Events Events
 	// PlainHTTP sets Web UI cookies without Secure, for a Web UI served over
 	// plain HTTP on a loopback address.
 	PlainHTTP bool
@@ -94,6 +94,7 @@ func New(svc *secrets.Service, tks *tokens.Store, token string) (*Server, error)
 	}
 	s := &Server{
 		CacheMaxAge: DefaultCacheMaxAge,
+		Events:      DefaultEvents,
 		secrets:     svc,
 		tokens:      tks,
 		token:       []byte(token),
@@ -266,12 +267,14 @@ func allowed(t tokens.Token, n need, path string) error {
 	return nil
 }
 
-func (s *Server) apiInfo(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) apiInfo(w http.ResponseWriter, r *http.Request) {
+	s.auditAt(s.Events.Lists, r, "api", "info", "", nil, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"version": s.Version, "capabilities": Capabilities})
 }
 
 func (s *Server) apiListPaths(w http.ResponseWriter, r *http.Request) {
 	paths, err := s.secrets.ListPaths(r.Context())
+	s.auditAt(s.Events.Lists, r, "api", "list_paths", "", nil, err)
 	if err != nil {
 		s.serviceError(w, r, err)
 		return
@@ -285,12 +288,9 @@ func (s *Server) apiListPaths(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string][]string{"paths": paths})
 }
 
-// auditRead audits a read of the values of keys at path when AuditReads is
-// set.
+// auditRead audits a read of the values of keys at path at the level of reads.
 func (s *Server) auditRead(r *http.Request, source, op, path string, data map[string]string, err error, extra ...any) {
-	if s.AuditReads {
-		s.audit(r, source, op, path, slices.Sorted(maps.Keys(data)), err, extra...)
-	}
+	s.auditAt(s.Events.Reads, r, source, op, path, slices.Sorted(maps.Keys(data)), err, extra...)
 }
 
 func (s *Server) apiGet(w http.ResponseWriter, r *http.Request) {
@@ -403,7 +403,7 @@ type backupPathJSON struct {
 
 func (s *Server) apiBackup(w http.ResponseWriter, r *http.Request) {
 	out, err := s.backup(r.Context(), r.URL.Query().Get("history") == "true")
-	s.audit(r, "api", "backup", "", nil, err)
+	s.auditAt(s.Events.Backups, r, "api", "backup", "", nil, err)
 	if err != nil {
 		s.serviceError(w, r, err)
 		return
@@ -446,7 +446,7 @@ func (s *Server) apiRestore(w http.ResponseWriter, r *http.Request) {
 		backup = append(backup, b)
 	}
 	err := s.secrets.Restore(r.Context(), backup)
-	s.audit(r, "api", "restore", "", nil, err)
+	s.auditAt(s.Events.Backups, r, "api", "restore", "", nil, err)
 	if err != nil {
 		s.serviceError(w, r, err)
 		return
@@ -456,6 +456,7 @@ func (s *Server) apiRestore(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiHistory(w http.ResponseWriter, r *http.Request) {
 	versions, err := s.secrets.History(r.Context(), r.URL.Query().Get("path"))
+	s.auditAt(s.Events.Lists, r, "api", "list_history", r.URL.Query().Get("path"), nil, err)
 	if err != nil {
 		s.serviceError(w, r, err)
 		return
@@ -540,6 +541,17 @@ var errInvalidToken = errors.New("invalid token")
 // received; client is the address resolved through the trusted proxies. extra holds key-value pairs; "name" is the
 // integration an integration operation acted on.
 func (s *Server) audit(r *http.Request, source, op, path string, keys []string, err error, extra ...any) {
+	s.auditAt(LevelAudit, r, source, op, path, keys, err, extra...)
+}
+
+// auditAt is audit for an event of a category set to level.
+func (s *Server) auditAt(level Level, r *http.Request, source, op, path string, keys []string, err error, extra ...any) {
+	if level != LevelNone {
+		s.record(level, s.newAuditEvent(r, source, op, path, keys, err, extra...), extra...)
+	}
+}
+
+func (s *Server) newAuditEvent(r *http.Request, source, op, path string, keys []string, err error, extra ...any) auditEvent {
 	e := auditEvent{Source: source, Op: op, Remote: r.RemoteAddr, Forwarded: strings.Join(r.Header.Values("X-Forwarded-For"), ", "), Path: path, Keys: keys}
 	if remote, ok := parseHop(r.RemoteAddr); ok && len(s.TrustedProxies) > 0 {
 		if client := s.clientAddr(r); client != remote.String() {
@@ -557,13 +569,16 @@ func (s *Server) audit(r *http.Request, source, op, path string, keys []string, 
 	if err != nil {
 		e.Error = err.Error()
 	}
-	s.record(e, extra...)
+	return e
 }
 
-// record logs e, with extra attributes, and keeps it for the Web UI.
-func (s *Server) record(e auditEvent, extra ...any) {
+// record logs e, with extra attributes, and keeps it for the Web UI when
+// level is LevelAudit.
+func (s *Server) record(level Level, e auditEvent, extra ...any) {
 	e.Time = time.Now()
-	s.auditLog.add(e)
+	if level == LevelAudit {
+		s.auditLog.add(e)
+	}
 	attrs := []any{"source", e.Source, "op", e.Op}
 	if e.Remote != "" {
 		attrs = append(attrs, "remote", e.Remote)

@@ -422,7 +422,7 @@ func (s *Server) uiAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	q := url.Values{"state": {state}}
 	if deny {
-		s.audit(r, "ui", "authorize", "", nil, errLoginDenied)
+		s.auditAt(s.Events.Logins, r, "ui", "authorize", "", nil, errLoginDenied)
 		q.Set("error", errLoginDenied.Error())
 	} else {
 		g, err := s.approvedGrant(r, false)
@@ -444,7 +444,7 @@ func (s *Server) uiAuthorize(w http.ResponseWriter, r *http.Request) {
 // approvedGrant validates the approval form. Denied logins need no fields.
 func (s *Server) approvedGrant(r *http.Request, deny bool) (grant, error) {
 	if deny {
-		s.audit(r, "ui", "authorize", "", nil, errLoginDenied)
+		s.auditAt(s.Events.Logins, r, "ui", "authorize", "", nil, errLoginDenied)
 		return grant{}, nil
 	}
 	if r.PostFormValue("confirm") != "yes" {
@@ -454,7 +454,7 @@ func (s *Server) approvedGrant(r *http.Request, deny bool) (grant, error) {
 	if err == nil {
 		err = s.nameTaken(r, g.name)
 	}
-	s.audit(r, "ui", "authorize", g.path, nil, err, "name", g.name)
+	s.auditAt(s.Events.Logins, r, "ui", "authorize", g.path, nil, err, "name", g.name)
 	return g, err
 }
 
@@ -476,7 +476,9 @@ func (s *Server) apiAuthorizeDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	l := &login{name: in.Name, userCode: newUserCode(), deviceCode: rand.Text()}
-	if err := s.grants.add(l); err != nil {
+	err := s.grants.add(l)
+	s.auditAt(s.Events.Logins, r, "api", "authorize_start", "", nil, err, "name", in.Name)
+	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
@@ -524,10 +526,12 @@ func (s *Server) apiAuthorizeToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !ok {
+		s.auditAt(s.Events.Logins, r, "api", "authorize_token", "", nil, errLoginInvalid)
 		writeError(w, http.StatusBadRequest, errLoginInvalid.Error())
 		return
 	}
 	if l.denied {
+		s.auditAt(s.Events.Logins, r, "api", "authorize_token", "", nil, errLoginDenied, "name", l.name)
 		writeError(w, http.StatusForbidden, errLoginDenied.Error())
 		return
 	}
