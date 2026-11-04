@@ -45,6 +45,12 @@ func New(baseURL, token string) *Client {
 	}
 }
 
+// WithTransport makes c send its requests through rt and returns c.
+func (c *Client) WithTransport(rt http.RoundTripper) *Client {
+	c.http.Transport = rt
+	return c
+}
+
 // Info describes a server: its version and the API features it supports.
 type Info struct {
 	Version      string   `json:"version"`

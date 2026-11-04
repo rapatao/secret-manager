@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/zalando/go-keyring"
+
+	"github.com/rapatao/secret-manager/internal/local"
 )
 
 const keyringService = "secretmanager.rapatao.com"
@@ -62,7 +64,7 @@ func DefaultConfigDir() string {
 }
 
 func normalizeServer(server string) string {
-	return strings.TrimSuffix(server, "/")
+	return local.Normalize(strings.TrimSuffix(server, "/"))
 }
 
 func (s store) config() (configFile, error) {

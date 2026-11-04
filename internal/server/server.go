@@ -67,6 +67,9 @@ type Server struct {
 	TrustedProxies []netip.Prefix
 	// AuditReads also audits reads of secret values.
 	AuditReads bool
+	// PlainHTTP sets Web UI cookies without Secure, for a Web UI served over
+	// plain HTTP on a loopback address.
+	PlainHTTP bool
 
 	secrets    *secrets.Service
 	tokens     *tokens.Store
@@ -76,6 +79,7 @@ type Server struct {
 	auditLog   auditLog
 	auditStore AuditStore
 	logins     *loginLimiter
+	links      loginLinks
 	// lastBackup is the latest scheduled backup run.
 	lastBackup atomic.Pointer[backupRun]
 	mux        *http.ServeMux
@@ -102,6 +106,10 @@ func New(svc *secrets.Service, tks *tokens.Store, token string) (*Server, error)
 	s.routes()
 	return s, nil
 }
+
+// SetLogger replaces the logger of audit events and errors, slog.Default
+// unless set.
+func (s *Server) SetLogger(l *slog.Logger) { s.log = l }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
@@ -133,6 +141,7 @@ func (s *Server) routes() {
 	s.mux.Handle("GET /ui.js", s.ui(s.uiScript))
 	s.mux.Handle("GET /login", s.ui(s.uiLoginForm))
 	s.mux.Handle("POST /login", s.ui(s.uiLogin))
+	s.mux.Handle("GET /login/link", s.ui(s.uiLoginLink))
 	s.mux.Handle("POST /logout", s.ui(s.session(s.uiLogout)))
 	s.mux.Handle("GET /{$}", s.ui(s.session(s.uiSummary)))
 	s.mux.Handle("GET /secrets", s.ui(s.session(s.uiSecrets)))

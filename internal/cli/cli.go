@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/rapatao/secret-manager/internal/client"
+	"github.com/rapatao/secret-manager/internal/local"
 	"github.com/rapatao/secret-manager/internal/secrets"
 	"github.com/rapatao/secret-manager/internal/storage"
 	"github.com/rapatao/secret-manager/internal/storage/encrypted"
@@ -45,7 +47,10 @@ const Usage = `Client commands:
   servers login --server URL [--device | --token-stdin]
                                                approve a new integration in the browser,
                                                or read a token from stdin; store the
-                                               token and make URL the default
+                                               token and make URL the default; with a
+                                               file:///PATH URL, create or unlock
+                                               the local vault at PATH with a passphrase
+                                               prompted for, or read from stdin
   servers logout [--server URL]                remove the stored token
   servers use URL                              make a logged-in server the default
   list                                         list paths
@@ -74,6 +79,8 @@ const Usage = `Client commands:
                                                decrypting it with $` + EnvBackupKey + `
   run     --path P [--recursive] -- CMD [ARGS...]
                                                run CMD with secrets as env vars
+  ui      [--addr 127.0.0.1:0] [--no-browser]  serve the Web UI of a local vault on
+                                               loopback and open a one-time sign-in link
   version                                      print the client version and, when a
                                                server is set, its version and capabilities
 
@@ -138,6 +145,7 @@ func (c *CLI) Run(ctx context.Context, args []string) int {
 		"version":  c.version,
 		"backup":   c.backup,
 		"restore":  c.restore,
+		"ui":       c.ui,
 	}
 	if len(args) == 0 {
 		fmt.Fprint(c.Stderr, Usage)
@@ -185,6 +193,7 @@ type flags struct {
 	path      string
 	recursive bool
 	needPath  bool
+	version   string
 }
 
 // flags returns a flag set with --server and, when withPath, --path and
@@ -196,6 +205,7 @@ func (c *CLI) flags(name string, withPath, recursive bool) *flags {
 		envURL:   normalizeServer(c.Getenv(EnvURL)),
 		envToken: c.Getenv(EnvToken),
 		needPath: withPath,
+		version:  c.Version,
 	}
 	f.fs.SetOutput(io.Discard)
 	f.fs.StringVar(&f.server, "server", "", "server URL")
@@ -234,28 +244,64 @@ func (f *flags) parseFlags(args []string) error {
 	return nil
 }
 
-// parse parses args and returns a client for the resolved server.
-// $SECRET_MANAGER_TOKEN belongs to $SECRET_MANAGER_URL and is only sent to
-// that server; every other server uses the token stored by servers login.
+// parse parses args and returns a client for the resolved server, served
+// in-process when it names a local vault.
 func (f *flags) parse(args []string) (*client.Client, error) {
-	if err := f.parseFlags(args); err != nil {
-		return nil, err
-	}
-	if f.envToken != "" && f.envURL == "" {
-		return nil, fmt.Errorf("%w: %s is set but %s is not; set both, or unset %s to use stored logins",
-			errUsage, EnvToken, EnvURL, EnvToken)
-	}
-	if f.envToken != "" && f.server == f.envURL {
-		return client.New(f.server, f.envToken), nil
-	}
-	token, err := f.store.token(f.server)
+	token, err := f.parseToken(args)
 	if err != nil {
 		return nil, err
 	}
-	if token == "" {
-		return nil, fmt.Errorf("%w: no token for %s; run servers login --server %s", errUsage, f.server, f.server)
+	if _, ok := local.Path(f.server); !ok {
+		return client.New(f.server, token), nil
 	}
-	return client.New(f.server, token), nil
+	v, err := f.vault(token)
+	if err != nil {
+		return nil, err
+	}
+	return client.New(f.server, v.Token).WithTransport(v), nil
+}
+
+// parseToken parses args and returns the token of the resolved server.
+// $SECRET_MANAGER_TOKEN belongs to $SECRET_MANAGER_URL and is only sent to
+// that server; every other server uses the token stored by servers login.
+func (f *flags) parseToken(args []string) (string, error) {
+	if err := f.parseFlags(args); err != nil {
+		return "", err
+	}
+	if f.envToken != "" && f.envURL == "" {
+		return "", fmt.Errorf("%w: %s is set but %s is not; set both, or unset %s to use stored logins",
+			errUsage, EnvToken, EnvURL, EnvToken)
+	}
+	if f.envToken != "" && f.server == f.envURL {
+		return f.envToken, nil
+	}
+	token, err := f.store.token(f.server)
+	if err != nil {
+		return "", err
+	}
+	if token == "" {
+		return "", fmt.Errorf("%w: no token for %s; run servers login --server %s", errUsage, f.server, f.server)
+	}
+	return token, nil
+}
+
+// vault opens the local vault named by f.server with key, the base64 vault
+// key stored by servers login.
+func (f *flags) vault(key string) (*local.Vault, error) {
+	path, _ := local.Path(f.server)
+	k, err := encrypted.ParseKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("vault key for %s: %w", f.server, err)
+	}
+	v, err := local.Open(context.Background(), path, k)
+	if errors.Is(err, local.ErrWrongPassphrase) {
+		return nil, fmt.Errorf("the stored key does not open %s; run servers login --server %s", path, f.server)
+	}
+	if err != nil {
+		return nil, err
+	}
+	v.Version = f.version
+	return v, nil
 }
 
 func (c *CLI) servers(ctx context.Context, args []string) error {
@@ -331,7 +377,19 @@ func (c *CLI) serversLogin(ctx context.Context, args []string) error {
 	}
 
 	var token, granted string
-	if *fromStdin {
+	if path, ok := local.Path(f.server); ok {
+		if *device {
+			return fmt.Errorf("%w: --device does not apply to a local vault", errUsage)
+		}
+		key, created, err := c.unlockVault(path, *fromStdin)
+		if err != nil {
+			return fmt.Errorf("login to %s failed: %w", f.server, err)
+		}
+		token = base64.StdEncoding.EncodeToString(key)
+		if created {
+			granted = " (created a new vault)"
+		}
+	} else if *fromStdin {
 		var err error
 		if token, err = c.readToken(); err != nil {
 			return err
