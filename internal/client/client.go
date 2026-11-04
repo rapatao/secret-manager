@@ -101,22 +101,41 @@ func (c *Client) Paths(ctx context.Context) ([]string, error) {
 
 // Get returns the secrets at path, merging nested paths when recursive.
 func (c *Client) Get(ctx context.Context, path string, recursive bool) (map[string]string, error) {
-	data, _, err := c.Read(ctx, path, recursive)
+	data, _, err := c.Read(ctx, path, "", recursive)
 	return data, err
 }
 
 // Read is Get that also returns how long the server allows the secrets to be
 // used from a cache while it is unreachable, nil when the server does not say.
-func (c *Client) Read(ctx context.Context, path string, recursive bool) (map[string]string, *time.Duration, error) {
+// A non-empty key asks the server for that key only. Servers without the
+// secrets-key capability send the whole path, and Read drops the other keys.
+func (c *Client) Read(ctx context.Context, path, key string, recursive bool) (map[string]string, *time.Duration, error) {
 	q := url.Values{"path": {path}}
 	if recursive {
 		q.Set("recursive", "true")
+	}
+	endpoint := "/api/v1/secrets"
+	if key != "" {
+		endpoint += "/" + url.PathEscape(key)
 	}
 	var out struct {
 		Data        map[string]string
 		CacheMaxAge *int
 	}
-	if err := c.do(ctx, http.MethodGet, "/api/v1/secrets", q, nil, &out); err != nil {
+	err := c.do(ctx, http.MethodGet, endpoint, q, nil, &out)
+	// Servers before secrets-key only route DELETE on /api/v1/secrets/{key}.
+	if apiErr := (*Error)(nil); key != "" && errors.As(err, &apiErr) && apiErr.Status == http.StatusMethodNotAllowed {
+		data, maxAge, err := c.Read(ctx, path, "", recursive)
+		if err != nil {
+			return nil, nil, err
+		}
+		v, ok := data[key]
+		if !ok {
+			return nil, nil, &Error{Status: http.StatusNotFound, Message: fmt.Sprintf("key %s not found in %s", key, path)}
+		}
+		return map[string]string{key: v}, maxAge, nil
+	}
+	if err != nil {
 		return nil, nil, err
 	}
 	if out.CacheMaxAge == nil {
