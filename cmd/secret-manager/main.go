@@ -37,7 +37,10 @@ import (
 
 var version = "dev"
 
-const envEncryptionKey = "SECRET_MANAGER_ENCRYPTION_KEY"
+const (
+	envEncryptionKey         = "SECRET_MANAGER_ENCRYPTION_KEY"
+	envPreviousEncryptionKey = "SECRET_MANAGER_PREVIOUS_ENCRYPTION_KEY"
+)
 
 const usage = `Usage: secret-manager <command> [flags]
 
@@ -50,7 +53,11 @@ Server:
                                                run controller, API and Web UI
                                                (Web UI admin token from ` + cli.EnvToken + `,
                                                optional encryption key from
-                                               ` + envEncryptionKey + `)
+                                               ` + envEncryptionKey + `, the key it
+                                               replaces from
+                                               ` + envPreviousEncryptionKey + `, and
+                                               scheduled backup key from
+                                               ` + cli.EnvBackupKey + `)
 
 `
 
@@ -142,24 +149,31 @@ func runServer(args []string) error {
 	default:
 		return fmt.Errorf("unknown storage %q", *storageName)
 	}
-	var key []byte
-	if v := os.Getenv(envEncryptionKey); v != "" {
-		var err error
-		if key, err = encrypted.ParseKey(v); err != nil {
-			return fmt.Errorf("%s: %w", envEncryptionKey, err)
-		}
+	key, err := envKey(envEncryptionKey)
+	if err != nil {
+		return err
 	}
-	enc, err := encrypted.New(backend, key)
+	previous, err := envKey(envPreviousEncryptionKey)
+	if err != nil {
+		return err
+	}
+	if sched.Key, err = envKey(cli.EnvBackupKey); err != nil {
+		return err
+	}
+	enc, err := encrypted.New(backend, key, previous)
 	if err != nil {
 		return err
 	}
 	backend = enc
-	migrated, err := enc.EncryptPlaintext(context.Background())
+	migrated, unreadable, err := enc.Migrate(context.Background())
 	if err != nil {
-		return fmt.Errorf("encrypt stored plaintext: %w", err)
+		return fmt.Errorf("encrypt stored values: %w", err)
 	}
 	if len(migrated) > 0 {
-		slog.Info("encrypted plaintext paths", "paths", migrated)
+		slog.Info("encrypted stored values with the current key", "paths", migrated)
+	}
+	if len(unreadable) > 0 {
+		slog.Warn("stored values not readable with the encryption keys", "paths", unreadable)
 	}
 
 	var changes controller.Changes
@@ -229,6 +243,20 @@ func runServer(args []string) error {
 		go func() { errc <- serve(ctx, metricsServer) }()
 	}
 	return <-errc
+}
+
+// envKey parses the base64 key in the environment variable name, nil when
+// unset.
+func envKey(name string) ([]byte, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return nil, nil
+	}
+	key, err := encrypted.ParseKey(v)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
+	}
+	return key, nil
 }
 
 func newManager(metricsAddr string) (manager.Manager, error) {

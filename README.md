@@ -6,8 +6,9 @@ A small, self-hosted key-value secret manager for Kubernetes.
 - A `SecretSync` resource syncs one or more paths into Kubernetes Secrets, in any namespace, optionally shaped with Go templates.
 - Deployments, StatefulSets and DaemonSets that opt in are restarted when a Secret they use changes.
 - `secret-manager run` injects secrets as environment variables into local commands, and keeps working from an encrypted cache while the server is unreachable.
-- Every write is kept as a version, so a path can be inspected or rolled back, even after it is deleted.
-- `secret-manager backup` and `restore` copy every path, optionally with its versions, to and from a JSON file.
+- Every write is kept as a version, so a path can be inspected or rolled back, even after it is deleted. A version holding a leaked value can be deleted.
+- `secret-manager backup` and `restore` copy every path, optionally with its versions, to and from a JSON file, optionally encrypted.
+- Stored values can be encrypted with AES-256-GCM, and the key can be rotated.
 
 One binary contains the controller, the REST API, the Web UI and the CLI. The controller is optional, and with the `file` storage backend the server runs without Kubernetes.
 
@@ -51,7 +52,17 @@ kubectl -n secret-manager create secret generic secret-manager-encryption \
   --from-literal=key="$(openssl rand -base64 32)"
 ```
 
-The API, the Web UI, `SecretSync` targets and backups still see plain values. On start, the server encrypts every path still holding a plaintext value. Versions written before the key was set stay plaintext until they are pruned by newer ones. Values written with a key cannot be read without it: a server started without the key, or with another one, answers `500` for them and logs the path and key. Keep a copy of the key outside the cluster; losing it loses the data. Changing the key is not supported: to move to a new key, `backup`, start the server with the new key on an empty store, then `restore`.
+The API, the Web UI, `SecretSync` targets and backups still see plain values. On start, the server encrypts every path and version still holding a plaintext value. Values written with a key cannot be read without it: a server started without the key, or with another one, answers `500` for them and logs the path and key. Keep a copy of the key outside the cluster; losing it loses the data.
+
+To rotate the key, set the new key in `SECRET_MANAGER_ENCRYPTION_KEY` and the old one in `SECRET_MANAGER_PREVIOUS_ENCRYPTION_KEY`, then restart the server. Reads accept values encrypted with either key. On start, the server rewrites every path and version encrypted with the previous key, or still plaintext, with the new key, and logs them as `encrypted stored values with the current key`. Values that neither key decrypts are left as they are and logged as `stored values not readable with the encryption keys`. Once the server has started with both keys and that warning is absent, remove the previous key. In the chart, add the old key to the same Secret and set `encryption.previousKey` to its key name:
+
+```sh
+kubectl -n secret-manager create secret generic secret-manager-encryption \
+  --from-literal=key="$(openssl rand -base64 32)" \
+  --from-literal=previous="$OLD_KEY" \
+  --dry-run=client -o yaml | kubectl apply -f -
+helm upgrade secret-manager ... --set encryption.previousKey=previous
+```
 
 To add a backend (SQLite, Postgres, ...), implement `storage.Backend`, run `storagetest.Run` against it in its tests, and add a case to the `--storage` switch in `cmd/secret-manager/main.go`.
 
@@ -112,7 +123,7 @@ The chart sets these; set them yourself when running `secret-manager server` out
 | `--backup-history` | `false` | Include versions in scheduled backups |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error` |
 
-The Web UI admin token is read from `SECRET_MANAGER_TOKEN`, the optional [encryption](#encryption) key from `SECRET_MANAGER_ENCRYPTION_KEY`.
+The Web UI admin token is read from `SECRET_MANAGER_TOKEN`, the optional [encryption](#encryption) key from `SECRET_MANAGER_ENCRYPTION_KEY`, the key being rotated out from `SECRET_MANAGER_PREVIOUS_ENCRYPTION_KEY`, and the optional [scheduled backup](#scheduled-backups) key from `SECRET_MANAGER_BACKUP_KEY`.
 
 ## SecretSync
 
@@ -180,6 +191,8 @@ secret-manager servers login --server https://secrets.example.com   # approve in
 secret-manager list
 secret-manager set --path /tools GITHUB_TOKEN=abc OTHER=1
 secret-manager set --path /tools --env-file .env       # or --env-file - for stdin
+secret-manager set --path /db --generate PASSWORD      # 32 random letters and digits
+secret-manager set --path /db --generate PIN:6         # 6 random letters and digits
 secret-manager keys --path /tools                      # key names, no values
 secret-manager keys --path /tools --recursive          # PATH KEY for every nested path
 secret-manager get --path /tools GITHUB_TOKEN
@@ -190,9 +203,11 @@ secret-manager delete --path /tools --all
 secret-manager run --path /tools -- make updates
 secret-manager history --path /tools                   # list versions
 secret-manager history --path /tools 3                 # print version 3 as dotenv
+secret-manager history --path /tools --delete 3        # delete version 3, see History
 secret-manager rollback --path /tools 3
 secret-manager backup --history --output backup.json  # every path and its versions, see Backup
 secret-manager restore backup.json
+SECRET_MANAGER_BACKUP_KEY=... secret-manager backup    # encrypted backup, see Backup
 secret-manager version                                 # client and server versions, server capabilities
 ```
 
@@ -256,6 +271,8 @@ Every write that changes a path (setting keys, deleting a key) stores the path's
 
 `secret-manager history --path P --diff N` lists the keys added (`+`), removed (`-`) or changed (`~`) from version `N` to the current data; `--diff N M` compares two versions. Values are not printed; `history --path P N` prints a version. The Web UI shows the same changes for each version, compared with the version before it. Its Diff button opens a dialog comparing the version with the current data, values included, and the restore and save dialogs show the same comparison. Added keys are green, removed keys red and changed keys amber. A long comparison scrolls inside the dialog, and a long value scrolls inside its cell.
 
+`secret-manager history --path P --delete N [M...]` deletes versions, to purge a value that must not stay readable, for example a leaked secret: change the value first, then delete every version holding it. The current data is kept. The Web UI has a Delete button on each version, behind a confirmation dialog; deleting the last version of a deleted path removes the path from the deleted list. Once the newest version is deleted, its number is given to the next version written.
+
 Deleting a path keeps its versions, so `rollback` can bring it back. Rolling back writes the old data as a new version, so it can itself be undone. Rolling back a synced path updates its targets like any other write.
 
 A path written while history is disabled has no versions until its next change.
@@ -266,13 +283,15 @@ A path written while history is disabled has no versions until its next change.
 
 `secret-manager restore F` (`-` for stdin) replaces the data of every path in the file. Paths not in the file are kept. Each changed path is recorded as a new version and its targets are synced, like any other write. Versions in the file are restored only for paths that have none yet, renumbered from 1 and limited to `--history-limit`; a path that already has versions only gets a new one for the restored data. Restoring the same file twice changes nothing. Every path and key is checked before anything is written.
 
-The file holds every value in plain text. Encrypt it before storing it elsewhere, for example `secret-manager backup | age -r KEY > backup.json.age`. To move to a new server, or to keep a copy before an upgrade, back up from the old server and restore on the new one; any client version with `backup` can talk to both, see [Compatibility](#compatibility).
+Without a key, the file holds every value in plain text. With `SECRET_MANAGER_BACKUP_KEY` set to a base64 AES-256 key (`openssl rand -base64 32`), `backup` encrypts the document with AES-256-GCM into `{"encryption": "aes-256-gcm", "data": "<base64>"}`. `restore` decrypts such a file with the same variable, and fails with `is encrypted; set SECRET_MANAGER_BACKUP_KEY` without it, or `cannot decrypt backup, wrong backup key?` with another key. Keep the backup key apart from the backups, and apart from the [encryption](#encryption) key. To move to a new server, or to keep a copy before an upgrade, back up from the old server and restore on the new one; any client version with `backup` can talk to both, see [Compatibility](#compatibility).
 
 ### Scheduled backups
 
 With `--backup-dir DIR`, the server writes a backup to `DIR/backup-<UTC time>.json` (`0600`) every `--backup-interval` (default `24h`) and keeps the newest `--backup-keep` files (default `7`). `--backup-history` adds versions. The first backup is written one interval after the server starts. Each run is logged as an audit entry with `source` `schedule` and `op` `backup`; a failed run is logged at `WARN` and tried again on the next interval.
 
-In the chart, set `backup.enabled=true` (`backup.interval`, `backup.keep`, `backup.history`). Backups go to a `ReadWriteOnce` PersistentVolumeClaim named `<release>-backups` (`backup.persistence.size`, default `1Gi`, and `backup.persistence.storageClass`), or to `backup.persistence.existingClaim`. Helm keeps the claim when the release is uninstalled. The image has no shell, so to copy a file out, mount the claim in another pod. The same plain-text warning applies to these files.
+With `SECRET_MANAGER_BACKUP_KEY` set on the server, every scheduled backup is encrypted like `secret-manager backup` does with that variable, and the summary page shows the schedule as encrypted. Restore one with `secret-manager restore` and the same key.
+
+In the chart, set `backup.enabled=true` (`backup.interval`, `backup.keep`, `backup.history`). To encrypt the files, create a Secret holding the key and set `backup.encryption.existingSecret` (and `backup.encryption.key`, default `key`). Backups go to a `ReadWriteOnce` PersistentVolumeClaim named `<release>-backups` (`backup.persistence.size`, default `1Gi`, and `backup.persistence.storageClass`), or to `backup.persistence.existingClaim`. Helm keeps the claim when the release is uninstalled. The image has no shell, so to copy a file out, mount the claim in another pod. Without a backup key, the same plain-text warning applies to these files.
 
 ## Integrations
 
@@ -292,7 +311,7 @@ What an integration can do:
 |---|---|---|
 | `info`, `list` (only paths under its path) | yes | yes |
 | Read data, keys and history | under `P` | every path |
-| Set and delete keys, delete paths, roll back (not read-only) | under `P` | every path |
+| Set and delete keys, delete paths and versions, roll back (not read-only) | under `P` | every path |
 | Backup | no | yes |
 | Restore (not read-only) | no | yes |
 
@@ -316,7 +335,7 @@ The last use is tracked in memory and saved every `--last-used-flush` (default `
 
 ## Web UI
 
-Open the server URL and sign in with the admin token. The header shows the server version next to the name, which links to the summary, and links to Secrets (`/secrets`, the path list), Integrations and Sign out. The UI follows the system light or dark theme and adapts to narrow screens: on phones, the integrations, recent changes, keys and history tables show each row as a list of labeled fields. Every time is shown in UTC as `YYYY-MM-DD HH:MM UTC`.
+Open the server URL and sign in with the admin token. The header shows the server version next to the name, which links to the summary, and links to Secrets (`/secrets`, the path list), Integrations, Audit and Sign out. The UI follows the system light or dark theme and adapts to narrow screens: on phones, the integrations, recent changes, keys and history tables show each row as a list of labeled fields. Every time is shown in UTC as `YYYY-MM-DD HH:MM UTC`.
 
 Summary
 - The main page counts paths, keys, deleted paths and stored versions.
@@ -336,13 +355,20 @@ Keys
 - Changed shows when each key was last added or changed, from the versions kept in history.
 - Adding keys, editing values and deleting keys are staged on the page: a deleted key is struck through until saved, and Undo brings it back.
 - A new key cannot reuse the name of an existing key or of another new key; existing keys change in their own row.
+- Generate, under a value being added or edited, replaces it with 32 random letters and digits made in the browser.
 - Save changes is enabled once something is staged. It opens a confirmation dialog listing the keys added (`+`), changed (`~`) and deleted (`-`) with their current and new values, and writes every staged change as one version.
 
 History
 - Each version can be compared with the current data and restored after a confirmation dialog, see [History](#history).
+- Each version can be deleted after a confirmation dialog.
 
 Integrations and logins
 - The Integrations page manages [integrations](#integrations). `/authorize` approves or denies CLI logins, see [Servers and login](#servers-and-login).
+
+Audit
+- The Audit page (`/audit`) lists the newest 500 [audit log](#audit-log) events since the server started, newest first: time, source, operation, integration, path, keys, remote address and result.
+- A filter shows only the events made with one integration's token or acting on that integration (created, updated, revoked, approved).
+- Events are kept in the server's memory: a restart empties the page. The JSON log holds every event.
 
 The server rejects every change made without its confirmation, or with one that does not match. Filtering paths, editing keys, the copy button and the integration dialogs need JavaScript; browsers without invoker commands (`commandfor`) also use it to open the dialogs.
 
@@ -364,6 +390,7 @@ All endpoints except `/healthz`, `/readyz` and the two login endpoints require `
 | `POST` | `/api/v1/restore` | Restore a backup document, returns `{"paths": N}` |
 | `GET` | `/api/v1/history?path=P` | `{"versions": [{"version": 3, "time": "...", "keys": [...]}]}`, newest first, without values |
 | `GET` | `/api/v1/history/{version}?path=P` | `{"version": 3, "time": "...", "data": {"KEY": "value"}}` |
+| `DELETE` | `/api/v1/history/{version}?path=P` | Delete that version; `404` when it does not exist |
 | `POST` | `/api/v1/history/{version}/rollback?path=P` | Replace the data at P with that version |
 | `POST` | `/api/v1/authorize/device` | Start a device login from `{"name": "cli-box"}`, returns `{"deviceCode": "...", "userCode": "ABCD-2345", "verificationUri": "/authorize?user_code=ABCD-2345", "expiresIn": 300, "interval": 2}`. No token needed |
 | `POST` | `/api/v1/authorize/token` | Collect the token of an approved login, once: `{"code": "...", "codeVerifier": "..."}` for a loopback login, `{"deviceCode": "..."}` for a device login. Returns `{"name", "path", "readOnly", "expires", "token"}`; `400` with `authorization_pending` until a device login is approved, `403` with `access_denied` when denied. No token needed |
@@ -378,7 +405,7 @@ A loopback login starts in the browser at `/authorize?redirect_uri=http://127.0.
 
 Clients and servers of different versions work together, as long as the server has the features a command uses.
 
-`GET /api/v1/info` lists those features as capabilities: `paths`, `secrets`, `history`, `backup` and `integrations`. A command that needs a feature checks its capability first and fails with `server v1.2.0 at URL does not support X; upgrade the server`. Servers without `/api/v1/info` are treated as having `paths`, `secrets` and `history`, and their version is shown as unknown. A capability never changes meaning; changed behavior gets a new capability.
+`GET /api/v1/info` lists those features as capabilities: `paths`, `secrets`, `history`, `history-delete`, `backup` and `integrations`. A command that needs a feature checks its capability first and fails with `server v1.2.0 at URL does not support X; upgrade the server`. Servers without `/api/v1/info` are treated as having `paths`, `secrets` and `history`, and their version is shown as unknown. A capability never changes meaning; changed behavior gets a new capability.
 
 Authentication depends on the `integrations` capability:
 
@@ -394,7 +421,7 @@ A CLI without browser login works against a server with `integrations` using an 
 ```
 client: v1.5.0
 server: v1.4.0 (https://secrets.example.com)
-capabilities: backup, history, integrations, paths, secrets
+capabilities: backup, history, history-delete, integrations, paths, secrets
 ```
 
 ## Observability
@@ -423,14 +450,14 @@ Every change made through the API or the Web UI, every backup, every Web UI logi
 {"level":"WARN","msg":"audit","source":"ui","op":"login","remote":"10.42.0.7:51240","error":"invalid token"}
 ```
 
-`op` is one of `set`, `delete_key`, `delete_path`, `create_path`, `rollback`, `backup`, `restore`, `create_token`, `update_token`, `revoke_token` (with the integration `name`), `authorize` (a CLI login approved or denied in the Web UI), `login` and `auth` (API bearer token, including expired tokens and requests an integration is not allowed to make). Requests made with an integration token carry its name in `token`. Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Other reads are not logged.
+`op` is one of `set`, `delete_key`, `delete_path`, `create_path`, `rollback`, `delete_version` (with the `version`), `backup`, `restore`, `create_token`, `update_token`, `revoke_token` (with the integration `name`), `authorize` (a CLI login approved or denied in the Web UI), `login` and `auth` (API bearer token, including expired tokens and requests an integration is not allowed to make). Requests made with an integration token carry its name in `token`. Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Other reads are not logged. The newest events are also shown on the Web UI [Audit](#web-ui) page.
 
 ## Security notes
 
 - Without [encryption](#encryption), values are only as protected as the storage backend: Secrets in your cluster, or the `file` backend's file. Set an encryption key, or enable encryption at rest in the cluster (k3s: `--secrets-encryption`), and restrict who can read Secrets in the server namespace. The encryption key is as sensitive as the admin token.
-- Old values stay readable in history Secrets after they are changed or deleted. To purge a leaked value, delete its versions: `kubectl -n secret-manager get secrets -l secretmanager.rapatao.com/history=true` lists them.
+- Old values stay readable in history after they are changed or deleted. To purge a leaked value, delete the versions holding it with `history --delete` or the Web UI, see [History](#history). Backups taken before still hold it.
 - The CLI caches the secrets it reads, encrypted with a key in the OS keychain, for up to the server's `--cache-max-age` (default 7 days) or the integration's offline cache setting. Anyone who can use your keychain can read them. Disable the offline cache of integrations used on shared machines, or set `SECRET_MANAGER_CACHE_MAX_AGE=0` there.
-- Backup files hold every value in plain text. Encrypt them and keep them out of git.
+- Backup files hold every value in plain text unless `SECRET_MANAGER_BACKUP_KEY` is set, see [Backup](#backup). Keep them out of git either way.
 - With the `file` backend, restrict access to the file and its directory. Without an encryption key, values are stored in plain text in it.
 - With the controller enabled, the server can manage Secrets in every namespace, where `SecretSync` targets live. With `controller.enabled=false` it can only manage Secrets in its own namespace.
 - The metrics port has no authentication. It exposes no secret values, but restrict it with a NetworkPolicy if other workloads should not read it.

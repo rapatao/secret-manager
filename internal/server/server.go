@@ -38,7 +38,7 @@ const BackupFormat = 1
 // GET /api/v1/info. Clients check them before using a feature added after
 // the first release. A shipped capability never changes meaning and is never
 // removed; changed behavior gets a new name.
-var Capabilities = []string{"backup", "history", "integrations", "paths", "secrets"}
+var Capabilities = []string{"backup", "history", "history-delete", "integrations", "paths", "secrets"}
 
 // DefaultCacheMaxAge is the CacheMaxAge of a new Server.
 const DefaultCacheMaxAge = 7 * 24 * time.Hour
@@ -67,6 +67,7 @@ type Server struct {
 	token    []byte
 	sessions *sessions
 	grants   *grants
+	auditLog auditLog
 	// lastBackup is the latest scheduled backup run.
 	lastBackup atomic.Pointer[backupRun]
 	mux        *http.ServeMux
@@ -113,6 +114,7 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /api/v1/restore", s.bearer(writeAll, s.apiRestore))
 	s.mux.Handle("GET /api/v1/history", s.bearer(readPath, s.apiHistory))
 	s.mux.Handle("GET /api/v1/history/{version}", s.bearer(readPath, s.apiVersion))
+	s.mux.Handle("DELETE /api/v1/history/{version}", s.bearer(writePath, s.apiDeleteVersion))
 	s.mux.Handle("POST /api/v1/history/{version}/rollback", s.bearer(writePath, s.apiRollback))
 	s.mux.HandleFunc("POST /api/v1/authorize/device", s.apiAuthorizeDevice)
 	s.mux.HandleFunc("POST /api/v1/authorize/token", s.apiAuthorizeToken)
@@ -128,6 +130,8 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /secrets/keys", s.ui(s.session(s.uiSetKey)))
 	s.mux.Handle("POST /secrets/delete", s.ui(s.session(s.uiDeletePath)))
 	s.mux.Handle("POST /secrets/rollback", s.ui(s.session(s.uiRollback)))
+	s.mux.Handle("POST /secrets/versions/delete", s.ui(s.session(s.uiDeleteVersion)))
+	s.mux.Handle("GET /audit", s.ui(s.session(s.uiAudit)))
 	s.mux.Handle("GET /integrations", s.ui(s.session(s.uiIntegrations)))
 	s.mux.Handle("POST /integrations", s.ui(s.session(s.uiCreateIntegration)))
 	s.mux.Handle("POST /integrations/update", s.ui(s.session(s.uiUpdateIntegration)))
@@ -405,6 +409,30 @@ func (s *Server) apiRollback(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) apiDeleteVersion(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	err := s.deleteVersion(r, path, r.PathValue("version"))
+	if err != nil {
+		s.serviceError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteVersion deletes one version of path and audits it.
+func (s *Server) deleteVersion(r *http.Request, path, version string) error {
+	n, err := parseVersion(version)
+	if err == nil {
+		err = s.secrets.DeleteVersions(r.Context(), path, n)
+	}
+	source := "api"
+	if _, ok := scopedToken(r); !ok {
+		source = "ui"
+	}
+	s.audit(r, source, "delete_version", path, nil, err, "version", version)
+	return err
+}
+
 func (s *Server) rollback(r *http.Request, path, version string) error {
 	n, err := parseVersion(version)
 	if err != nil {
@@ -423,25 +451,49 @@ func parseVersion(v string) (int, error) {
 
 var errInvalidToken = errors.New("invalid token")
 
-// audit logs a change or an authentication attempt. Key names are logged,
-// values never are. X-Forwarded-For is client supplied and only informative.
+// audit logs a change or an authentication attempt and keeps it for the Web
+// UI. Key names are logged, values never are. X-Forwarded-For is client
+// supplied and only informative. extra holds key-value pairs; "name" is the
+// integration an integration operation acted on.
 func (s *Server) audit(r *http.Request, source, op, path string, keys []string, err error, extra ...any) {
-	attrs := []any{"source", source, "op", op, "remote", r.RemoteAddr}
+	e := auditEvent{Source: source, Op: op, Remote: r.RemoteAddr, Forwarded: r.Header.Get("X-Forwarded-For"), Path: path, Keys: keys}
 	if t, ok := scopedToken(r); ok {
-		attrs = append(attrs, "token", t.Name)
+		e.Token = t.Name
 	}
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		attrs = append(attrs, "forwarded_for", fwd)
+	for i := 0; i+1 < len(extra); i += 2 {
+		if extra[i] == "name" {
+			e.Name, _ = extra[i+1].(string)
+		}
 	}
-	if path != "" {
-		attrs = append(attrs, "path", path)
+	if err != nil {
+		e.Error = err.Error()
 	}
-	if len(keys) > 0 {
-		attrs = append(attrs, "keys", keys)
+	s.record(e, extra...)
+}
+
+// record logs e, with extra attributes, and keeps it for the Web UI.
+func (s *Server) record(e auditEvent, extra ...any) {
+	e.Time = time.Now()
+	s.auditLog.add(e)
+	attrs := []any{"source", e.Source, "op", e.Op}
+	if e.Remote != "" {
+		attrs = append(attrs, "remote", e.Remote)
+	}
+	if e.Token != "" {
+		attrs = append(attrs, "token", e.Token)
+	}
+	if e.Forwarded != "" {
+		attrs = append(attrs, "forwarded_for", e.Forwarded)
+	}
+	if e.Path != "" {
+		attrs = append(attrs, "path", e.Path)
+	}
+	if len(e.Keys) > 0 {
+		attrs = append(attrs, "keys", e.Keys)
 	}
 	attrs = append(attrs, extra...)
-	if err != nil {
-		s.log.Warn("audit", append(attrs, "error", err.Error())...)
+	if e.Error != "" {
+		s.log.Warn("audit", append(attrs, "error", e.Error)...)
 		return
 	}
 	s.log.Info("audit", attrs...)

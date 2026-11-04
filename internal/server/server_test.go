@@ -316,7 +316,7 @@ func TestUIFlow(t *testing.T) {
 		!strings.Contains(body, `<span class="change mod">~PASS</span>`) || !strings.Contains(body, `<span class="change add">&#43;PASS</span>`) {
 		t.Fatalf("path page missing history:\n%s", body)
 	}
-	if !strings.Contains(body, `<span class="badge">current</span>`) || strings.Contains(body, `name="confirm" value="3"`) {
+	if !strings.Contains(body, `<span class="badge">current</span>`) || strings.Contains(body, `<dialog id="restore-3">`) {
 		t.Fatalf("current version offered for restore:\n%s", body)
 	}
 	if strings.Contains(body, "<th>Data</th>") || !strings.Contains(body, `<dialog id="diff-2">`) || strings.Contains(body, `<dialog id="diff-3">`) {
@@ -495,6 +495,56 @@ func TestUIDeletedPath(t *testing.T) {
 	}
 }
 
+func TestDeleteVersion(t *testing.T) {
+	ts, logs := newLoggedServer(t)
+	for _, v := range []string{"1", "leaked"} {
+		do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"A":"`+v+`"}`)
+	}
+	if code, _ := do(t, ts, "DELETE", "/api/v1/history/2?path=/app", apiToken, ""); code != http.StatusNoContent {
+		t.Fatalf("delete version: %d", code)
+	}
+	if code, _ := do(t, ts, "GET", "/api/v1/history/2?path=/app", apiToken, ""); code != http.StatusNotFound {
+		t.Fatalf("deleted version still readable: %d", code)
+	}
+	if code, _ := do(t, ts, "DELETE", "/api/v1/history/2?path=/app", apiToken, ""); code != http.StatusNotFound {
+		t.Fatalf("delete missing version: %d", code)
+	}
+	if !strings.Contains(logs.String(), `"op":"delete_version","remote"`) {
+		t.Fatalf("delete not audited:\n%s", logs)
+	}
+
+	c := uiClient(t, ts)
+	origin := ts.URL
+	postForm(t, c, ts, "/login", url.Values{"token": {token}}, origin)
+	do(t, ts, "DELETE", "/api/v1/paths?path=/app", apiToken, "")
+	_, body := postForm(t, c, ts, "/secrets/versions/delete", url.Values{"path": {"/app"}, "version": {"1"}}, origin)
+	if !strings.Contains(body, "confirm the action first") {
+		t.Fatalf("version deleted without confirmation:\n%s", body)
+	}
+	_, body = postForm(t, c, ts, "/secrets/versions/delete", url.Values{"path": {"/app"}, "version": {"1"}, "confirm": {"1"}}, origin)
+	if !strings.Contains(body, "<h1>Secrets</h1>") || strings.Contains(body, "Deleted paths") {
+		t.Fatalf("deleting the last version of a deleted path:\n%s", body)
+	}
+}
+
+func TestUIAudit(t *testing.T) {
+	ts := newTestServer(t)
+	do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"A":"hunter2"}`)
+	do(t, ts, "GET", "/api/v1/paths", "wrong-token", "")
+	c := uiClient(t, ts)
+	postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL)
+
+	_, body := get(t, c, ts.URL+"/audit")
+	if !strings.Contains(body, "<code>set</code>") || !strings.Contains(body, "invalid token") ||
+		!strings.Contains(body, `<option value="full">full</option>`) || strings.Contains(body, "hunter2") {
+		t.Fatalf("audit page:\n%s", body)
+	}
+	_, body = get(t, c, ts.URL+"/audit?integration=full")
+	if !strings.Contains(body, "<code>set</code>") || strings.Contains(body, "invalid token") || strings.Contains(body, "<code>login</code>") {
+		t.Fatalf("audit page filtered by integration:\n%s", body)
+	}
+}
+
 func TestUICrossOrigin(t *testing.T) {
 	ts := newTestServer(t)
 	c := uiClient(t, ts)
@@ -616,7 +666,7 @@ func TestAPIInfo(t *testing.T) {
 		t.Fatalf("info without token: %d", code)
 	}
 	code, body := do(t, ts, "GET", "/api/v1/info", apiToken, "")
-	if code != http.StatusOK || strings.TrimSpace(body) != `{"capabilities":["backup","history","integrations","paths","secrets"],"version":"v9.9.9-test"}` {
+	if code != http.StatusOK || strings.TrimSpace(body) != `{"capabilities":["backup","history","history-delete","integrations","paths","secrets"],"version":"v9.9.9-test"}` {
 		t.Fatalf("info: %d %s", code, body)
 	}
 }

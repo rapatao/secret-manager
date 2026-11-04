@@ -169,31 +169,71 @@ func (b *Backend) AddVersion(ctx context.Context, path string, at time.Time, dat
 	if len(versions) > 0 {
 		n = versions[0].Number + 1
 	}
-	raw := make(map[string][]byte, len(data))
-	for k, v := range data {
-		raw[k] = []byte(v)
-	}
-	s := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      VersionName(path, n),
-			Namespace: b.ns,
-			Labels:    map[string]string{HistoryLabel: "true"},
-			Annotations: map[string]string{
-				PathAnnotation:    path,
-				VersionAnnotation: strconv.Itoa(n),
-				TimeAnnotation:    at.UTC().Format(time.RFC3339),
-			},
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: raw,
-	}
-	if err := b.c.Create(ctx, s); err != nil {
+	if err := b.c.Create(ctx, b.versionSecret(path, storage.Version{Number: n, Time: at, Data: data})); err != nil {
 		return fmt.Errorf("create version %d of %s: %w", n, path, err)
 	}
 	for _, v := range versions[min(keep-1, len(versions)):] {
 		old := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: b.ns, Name: VersionName(path, v.Number)}}
 		if err := client.IgnoreNotFound(b.c.Delete(ctx, old)); err != nil {
 			return fmt.Errorf("prune version %d of %s: %w", v.Number, path, err)
+		}
+	}
+	return nil
+}
+
+func (b *Backend) versionSecret(path string, v storage.Version) *corev1.Secret {
+	raw := make(map[string][]byte, len(v.Data))
+	for k, val := range v.Data {
+		raw[k] = []byte(val)
+	}
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      VersionName(path, v.Number),
+			Namespace: b.ns,
+			Labels:    map[string]string{HistoryLabel: "true"},
+			Annotations: map[string]string{
+				PathAnnotation:    path,
+				VersionAnnotation: strconv.Itoa(v.Number),
+				TimeAnnotation:    v.Time.UTC().Format(time.RFC3339),
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: raw,
+	}
+}
+
+// ReplaceVersions implements storage.Backend.
+func (b *Backend) ReplaceVersions(ctx context.Context, path string, versions []storage.Version) error {
+	existing, err := b.Versions(ctx, path)
+	if err != nil {
+		return err
+	}
+	stored := map[int]bool{}
+	for _, v := range existing {
+		stored[v.Number] = true
+	}
+	for _, v := range versions {
+		want := b.versionSecret(path, v)
+		if !stored[v.Number] {
+			if err := b.c.Create(ctx, want); err != nil {
+				return fmt.Errorf("create version %d of %s: %w", v.Number, path, err)
+			}
+			continue
+		}
+		delete(stored, v.Number)
+		var s corev1.Secret
+		if err := b.c.Get(ctx, client.ObjectKeyFromObject(want), &s); err != nil {
+			return fmt.Errorf("get version %d of %s: %w", v.Number, path, err)
+		}
+		s.Annotations, s.Data = want.Annotations, want.Data
+		if err := b.c.Update(ctx, &s); err != nil {
+			return fmt.Errorf("update version %d of %s: %w", v.Number, path, err)
+		}
+	}
+	for n := range stored {
+		old := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: b.ns, Name: VersionName(path, n)}}
+		if err := client.IgnoreNotFound(b.c.Delete(ctx, old)); err != nil {
+			return fmt.Errorf("delete version %d of %s: %w", n, path, err)
 		}
 	}
 	return nil

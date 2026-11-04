@@ -33,6 +33,10 @@ type Backend interface {
 	// VersionedPaths returns, sorted, every path with at least one stored
 	// version, deleted paths included.
 	VersionedPaths(ctx context.Context) ([]string, error)
+	// ReplaceVersions replaces every stored version of path with versions,
+	// newest first, keeping their numbers and times. An empty versions
+	// removes every version of path.
+	ReplaceVersions(ctx context.Context, path string, versions []Version) error
 
 	// Tokens returns every stored access token, or none.
 	Tokens(ctx context.Context) ([]Token, error)

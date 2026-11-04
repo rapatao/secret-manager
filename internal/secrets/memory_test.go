@@ -44,6 +44,17 @@ func (m *memBackend) Versions(_ context.Context, path string) ([]storage.Version
 	return slices.Clone(m.versions[path]), nil
 }
 
+func (m *memBackend) ReplaceVersions(_ context.Context, path string, versions []storage.Version) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(versions) == 0 {
+		delete(m.versions, path)
+		return nil
+	}
+	m.versions[path] = slices.Clone(versions)
+	return nil
+}
+
 func (m *memBackend) VersionedPaths(_ context.Context) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

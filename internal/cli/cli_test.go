@@ -439,7 +439,7 @@ func TestServersListAndUse(t *testing.T) {
 
 func TestVersion(t *testing.T) {
 	h := newHarness(t)
-	want := "client: 1.5.0\nserver: 1.4.0 (" + h.url + ")\ncapabilities: backup, history, integrations, paths, secrets\n"
+	want := "client: 1.5.0\nserver: 1.4.0 (" + h.url + ")\ncapabilities: backup, history, history-delete, integrations, paths, secrets\n"
 	if got := h.mustRun("version"); got != want {
 		t.Fatalf("version: %q", got)
 	}
@@ -488,6 +488,75 @@ func TestBackupRestore(t *testing.T) {
 	dst.stdin = "not json"
 	if code := dst.run("restore", "-"); code != 1 || !strings.Contains(dst.stderr.String(), "is not a JSON backup") {
 		t.Fatalf("restore invalid: %d %s", code, dst.stderr.String())
+	}
+}
+
+func TestBackupEncrypted(t *testing.T) {
+	const backupKey = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+	src := newHarness(t)
+	src.mustRun("set", "--path", "/tools", "A=s3cret")
+	src.env[EnvBackupKey] = backupKey
+	out := src.mustRun("backup")
+	if strings.Contains(out, "s3cret") || !strings.Contains(out, `"encryption":"aes-256-gcm"`) {
+		t.Fatalf("encrypted backup: %s", out)
+	}
+
+	dst := newHarness(t)
+	dst.stdin = out
+	if code := dst.run("restore", "-"); code != 1 || !strings.Contains(dst.stderr.String(), "is encrypted; set "+EnvBackupKey) {
+		t.Fatalf("restore without key: %d %s", code, dst.stderr.String())
+	}
+	dst.env[EnvBackupKey] = "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg="
+	if code := dst.run("restore", "-"); code != 1 || !strings.Contains(dst.stderr.String(), "wrong backup key") {
+		t.Fatalf("restore with wrong key: %d %s", code, dst.stderr.String())
+	}
+	dst.env[EnvBackupKey] = backupKey
+	dst.mustRun("restore", "-")
+	if got := dst.mustRun("get", "--path", "/tools", "A"); got != "s3cret\n" {
+		t.Fatalf("restored value: %q", got)
+	}
+}
+
+func TestSetGenerate(t *testing.T) {
+	h := newHarness(t)
+	h.mustRun("set", "--path", "/db", "--generate", "PASS", "--generate", "PIN:6", "USER=app")
+	data, err := client.New(h.url, token).Get(context.Background(), "/db", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data["PASS"]) != 32 || len(data["PIN"]) != 6 || data["USER"] != "app" || strings.Trim(data["PASS"], generateAlphabet) != "" {
+		t.Fatalf("generated %v", data)
+	}
+	for _, args := range [][]string{
+		{"set", "--path", "/db", "--generate", "PASS:0"},
+		{"set", "--path", "/db", "--generate", "BAD KEY"},
+		{"set", "--path", "/db", "--generate", "A", "A=1"},
+	} {
+		if code := h.run(args...); code != 2 {
+			t.Errorf("%v: exit %d, want 2", args, code)
+		}
+	}
+}
+
+func TestHistoryDelete(t *testing.T) {
+	h := newHarness(t)
+	for _, v := range []string{"1", "leaked", "3"} {
+		h.mustRun("set", "--path", "/tools", "A="+v)
+	}
+	if got := h.mustRun("history", "--path", "/tools", "--delete", "2"); got != "Deleted version 2 of /tools\n" {
+		t.Fatalf("history --delete: %q", got)
+	}
+	if got := h.mustRun("history", "--path", "/tools"); strings.Contains(got, "\n2 ") || strings.Count(got, "\n") != 3 {
+		t.Fatalf("history after delete: %q", got)
+	}
+	if code := h.run("history", "--path", "/tools", "--delete", "2"); code != 1 {
+		t.Fatalf("deleting a missing version: exit %d", code)
+	}
+	if code := h.run("history", "--path", "/tools", "--delete"); code != 2 {
+		t.Fatalf("delete without versions: exit %d", code)
+	}
+	if got := h.mustRun("get", "--path", "/tools", "A"); got != "3\n" {
+		t.Fatalf("current data after delete: %q", got)
 	}
 }
 
