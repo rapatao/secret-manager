@@ -1,8 +1,9 @@
+{{define "title"}}Sign in - {{end}}
 {{define "header"}}{{end}}
 {{define "content"}}
 <div class="login">
 <div class="logo" aria-hidden="true">&#128273;</div>
-<h1>secret-manager</h1>
+<h1>Secret Manager</h1>
 <div class="card"><div class="body">
 <form class="stack" method="post" action="/login">
 {{with .Next}}<input type="hidden" name="next" value="{{.}}">{{end}}

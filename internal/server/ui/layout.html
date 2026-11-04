@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>secret-manager</title>
+<title>{{block "title" .}}{{end}}Secret Manager</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230969da'/><text x='16' y='23' font-size='18' text-anchor='middle'>&#128273;</text></svg>">
 <script src="/ui.js" defer></script>
 <style>
@@ -149,7 +149,7 @@ select { font: inherit; color: inherit; background: var(--bg); border: 1px solid
 <body>
 {{block "header" .}}
 <header><div class="bar">
-<div class="row"><a class="brand" href="/"><span class="logo" aria-hidden="true">&#128273;</span>Secret-Manager</a>{{with .Version}}<span class="muted mono">({{.}})</span>{{end}}</div>
+<div class="row"><a class="brand" href="/"><span class="logo" aria-hidden="true">&#128273;</span>Secret Manager</a>{{with .Version}}<span class="muted mono">({{.}})</span>{{end}}</div>
 <nav class="row"><a class="button small" href="/secrets">Secrets</a>
 <a class="button small" href="/integrations">Integrations</a>
 <a class="button small" href="/audit">Audit</a>
