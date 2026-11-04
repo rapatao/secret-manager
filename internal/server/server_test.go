@@ -701,6 +701,17 @@ func TestUIAudit(t *testing.T) {
 	if !strings.Contains(body, "<code>set</code>") || strings.Contains(body, "invalid token") || strings.Contains(body, "<code>login</code>") {
 		t.Fatalf("audit page filtered by integration:\n%s", body)
 	}
+	if !strings.Contains(body, "since the server started") {
+		t.Fatalf("audit page without a store does not say events are lost on restart:\n%s", body)
+	}
+
+	saved, _ := newLoggedServer(t, func(s *Server) { s.auditStore = k8sstorage.New(fake.NewClientBuilder().Build(), "sm") })
+	c = uiClient(t, saved)
+	postForm(t, c, saved, "/login", url.Values{"token": {token}}, saved.URL)
+	_, body = get(t, c, saved.URL+"/audit")
+	if strings.Contains(body, "since the server started") {
+		t.Fatalf("audit page with a store says events are lost on restart:\n%s", body)
+	}
 }
 
 func TestUICrossOrigin(t *testing.T) {

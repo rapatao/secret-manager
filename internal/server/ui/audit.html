@@ -27,10 +27,10 @@
 <td data-label="Result">{{if .Error}}<span class="change del">failed</span> {{.Error}}{{else}}<span class="muted">ok</span>{{end}}</td>
 </tr>
 {{else}}
-<tr><td colspan="8" class="empty">No events{{if .Filter}} for {{.Filter}}{{end}} since the server started.</td></tr>
+<tr><td colspan="8" class="empty">No events{{if .Filter}} for {{.Filter}}{{end}}{{if not $.Saved}} since the server started{{end}}.</td></tr>
 {{end}}
 </tbody>
 </table>
-<p class="body muted">Shows the newest {{.Kept}} events since the server started. The JSON log on stderr holds every event.</p>
+<p class="body muted">Shows the newest {{.Kept}} events{{if not .Saved}} since the server started{{end}}. The JSON log on stderr holds every event.</p>
 </div>
 {{end}}

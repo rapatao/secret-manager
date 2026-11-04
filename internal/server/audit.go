@@ -132,5 +132,6 @@ func (s *Server) uiAudit(w http.ResponseWriter, r *http.Request) {
 		"Integrations": names,
 		"Filter":       filter,
 		"Kept":         auditKept,
+		"Saved":        s.auditStore != nil,
 	})
 }
