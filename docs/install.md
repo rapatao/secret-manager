@@ -12,7 +12,7 @@ helm install secret-manager oci://ghcr.io/rapatao/charts/secret-manager -n secre
   --set ingress.enabled=true --set ingress.host=secrets.example.com
 ```
 
-Add `--version 1.2.0` to pin a release. Set `historyLimit` (default `10`, `0` disables history) to change how many versions are kept per path. From a checkout, use `charts/secret-manager` instead of the `oci://` reference.
+Add `--version 1.2.0` to pin a release. Set `historyLimit` (default `10`, `0` disables history) to change how many versions are kept per path, `events` to choose which [audit events](observability.md#event-categories) are logged or kept, and `revisionHistoryLimit` (default `10`) to change how many old ReplicaSets the Deployment keeps for `kubectl rollout undo`. From a checkout, use `charts/secret-manager` instead of the `oci://` reference.
 
 The chart installs the `SecretSync` CRD. Helm does not upgrade CRDs, so apply them after upgrading:
 
