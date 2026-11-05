@@ -64,6 +64,8 @@ const Usage = `Client commands:
                                                --recursive, as PATH KEY for every
                                                nested path
   get     --path P [--recursive] [KEY]         print one value, or all as dotenv
+  get     --path P [--recursive] --clip KEY    copy one value to the clipboard,
+                                               cleared after 60s if unchanged
   set     --path P [--env-file F|- | --json-file F|-] [--generate KEY[:LEN]...] [K=V...] [K...]
                                                merge keys into a path; a K without =V is
                                                prompted for without echo; --env-file reads
@@ -133,6 +135,9 @@ type CLI struct {
 	OpenBrowser func(string) error
 	// Prompt, when set, replaces reading hidden input from the terminal.
 	Prompt func(label string) (string, error)
+	// Clip copies a value to the clipboard for get --clip and clears it
+	// after ClipClearAfter.
+	Clip func(value string) error
 	// Dir is the directory searched for ProjectFile, default the current
 	// directory.
 	Dir string
@@ -148,6 +153,7 @@ func Default() *CLI {
 		Environ:     os.Environ,
 		ConfigDir:   DefaultConfigDir(),
 		OpenBrowser: openBrowser,
+		Clip:        copyToClipboard,
 	}
 }
 
@@ -170,6 +176,9 @@ func (c *CLI) Run(ctx context.Context, args []string) int {
 		"backup":   c.backup,
 		"restore":  c.restore,
 		"ui":       c.ui,
+		clipClearCommand: func(_ context.Context, args []string) error {
+			return c.clipClear(args)
+		},
 	}
 	if len(args) == 0 {
 		fmt.Fprint(c.Stderr, Usage)
@@ -631,6 +640,7 @@ func (c *CLI) keys(ctx context.Context, args []string) error {
 
 func (c *CLI) get(ctx context.Context, args []string) error {
 	f := c.flags("get", true, true)
+	clip := f.fs.Bool("clip", false, "copy the value of KEY to the clipboard instead of printing it")
 	api, err := f.parse(args)
 	if err != nil {
 		return err
@@ -639,6 +649,9 @@ func (c *CLI) get(ctx context.Context, args []string) error {
 		return fmt.Errorf("%w: get takes at most one KEY", errUsage)
 	}
 	key := f.fs.Arg(0)
+	if *clip && key == "" {
+		return fmt.Errorf("%w: get --clip needs a KEY", errUsage)
+	}
 	data, err := c.getSecrets(ctx, f, api, key)
 	if err != nil {
 		return err
@@ -649,6 +662,13 @@ func (c *CLI) get(ctx context.Context, args []string) error {
 	v, ok := data[key]
 	if !ok {
 		return fmt.Errorf("key %s not found in %s", key, f.path)
+	}
+	if *clip {
+		if err := c.Clip(v); err != nil {
+			return err
+		}
+		fmt.Fprintf(c.Stderr, "Copied %s to the clipboard, cleared in %s\n", key, ClipClearAfter)
+		return nil
 	}
 	_, err = fmt.Fprintln(c.Stdout, v)
 	return err

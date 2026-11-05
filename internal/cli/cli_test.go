@@ -55,6 +55,7 @@ type harness struct {
 	stdin    string
 	browser  func(string) error
 	prompts  map[string]string
+	clipped  []string
 }
 
 func (h *harness) prompt(label string) (string, error) {
@@ -100,6 +101,7 @@ func (h *harness) run(args ...string) int {
 		OpenBrowser: h.browser,
 		Prompt:      h.prompt,
 		Dir:         h.workdir,
+		Clip:        h.clip,
 	}
 	return c.Run(context.Background(), args)
 }
@@ -1063,5 +1065,45 @@ func TestProjectFile(t *testing.T) {
 	write("path=/tools\nproject=x\n")
 	if code := h.run("list"); code != 1 || !strings.Contains(h.stderr.String(), `unknown key "project"`) {
 		t.Fatalf("unknown key: exit %d, stderr: %s", code, h.stderr.String())
+	}
+}
+
+func (h *harness) clip(v string) error {
+	h.clipped = append(h.clipped, v)
+	return nil
+}
+
+func TestGetClip(t *testing.T) {
+	h := newHarness(t)
+	h.mustRun("set", "--path", "/tools", "A=secret")
+	if got := h.mustRun("get", "--path", "/tools", "--clip", "A"); got != "" {
+		t.Fatalf("stdout: %q", got)
+	}
+	if !slices.Equal(h.clipped, []string{"secret"}) {
+		t.Fatalf("clipped: %q", h.clipped)
+	}
+	if !strings.Contains(h.stderr.String(), "Copied A to the clipboard, cleared in 1m0s") {
+		t.Fatalf("stderr: %q", h.stderr.String())
+	}
+	if code := h.run("get", "--path", "/tools", "--clip"); code != 2 {
+		t.Fatalf("--clip without KEY: exit %d", code)
+	}
+}
+
+func TestClearIfUnchanged(t *testing.T) {
+	for _, tc := range []struct{ current, want string }{
+		{"secret", ""},
+		{"secret\n", ""},
+		{"other", "other"},
+	} {
+		board := tc.current
+		get := func() (string, error) { return board, nil }
+		set := func(v string) error { board = v; return nil }
+		if err := clearIfUnchanged(get, set, clipSum("secret")); err != nil {
+			t.Fatal(err)
+		}
+		if board != tc.want {
+			t.Fatalf("clipboard %q: got %q, want %q", tc.current, board, tc.want)
+		}
 	}
 }

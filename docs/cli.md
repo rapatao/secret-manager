@@ -20,6 +20,7 @@ secret-manager set --path /db --generate PIN:6         # 6 random letters and di
 secret-manager keys --path /tools                      # key names, no values
 secret-manager keys --path /tools --recursive          # PATH KEY for every nested path
 secret-manager get --path /tools GITHUB_TOKEN          # only this key leaves the server
+secret-manager get --path /tools --clip GITHUB_TOKEN   # copy to the clipboard, cleared after 60s
 secret-manager get --path /tools --recursive           # dotenv output
 secret-manager export --path /tools --format json
 secret-manager delete --path /tools OTHER
@@ -82,6 +83,10 @@ server=https://secrets.example.com
 Both lines are optional. Only the current directory is read, not its parents, and without the file `--path` is required as usual. Each command prints the values it takes from the file on stderr, like `using path /kubernetes/app from .secret-manager`. `delete --all` never uses the path from the file and needs `--path`. `servers login` and `servers logout` ignore the file.
 
 The file holds no secrets. To keep it out of a repository without changing its `.gitignore`, list it in `.git/info/exclude` or in a global gitignore.
+
+## Clipboard
+
+`get --clip KEY` copies one value to the clipboard instead of printing it. After 60 seconds a background process clears the clipboard, unless it holds something else by then. It uses `pbcopy` on macOS, `clip` on Windows, and `wl-copy` (Wayland) or `xclip` on Linux.
 
 ## Resolution order
 
