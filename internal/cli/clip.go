@@ -45,13 +45,13 @@ func systemClipboard() (clipboard, error) {
 }
 
 func (c clipboard) set(value string) error {
-	cmd := exec.Command(c.copy[0], c.copy[1:]...)
+	cmd := exec.Command(c.copy[0], c.copy[1:]...) //nolint:gosec // fixed commands from systemClipboard
 	cmd.Stdin = strings.NewReader(value)
 	return cmd.Run()
 }
 
 func (c clipboard) get() (string, error) {
-	out, err := exec.Command(c.paste[0], c.paste[1:]...).Output()
+	out, err := exec.Command(c.paste[0], c.paste[1:]...).Output() //nolint:gosec // fixed commands from systemClipboard
 	return string(out), err
 }
 
