@@ -69,9 +69,23 @@ A `file://` server URL is a [local vault](local-vault.md), used without a runnin
 
 Tokens are stored in the OS keychain (macOS Keychain, Linux Secret Service, Windows Credential Manager) under the service `secretmanager.rapatao.com`, one entry per server. Without a usable keychain, as on headless Linux, they fall back to `~/.config/secretmanager.rapatao.com/credentials.json` with `0600` permissions and a warning is printed. The list of servers and the default are kept in `config.json` in the same directory (`$XDG_CONFIG_HOME` is honored).
 
+## Project file
+
+A `.secret-manager` file in the directory a command runs in sets a default path and server, so commands in that directory need no `--path` or `--server`:
+
+```sh
+# .secret-manager
+path=/kubernetes/app
+server=https://secrets.example.com
+```
+
+Both lines are optional. Only the current directory is read, not its parents, and without the file `--path` is required as usual. Each command prints the values it takes from the file on stderr, like `using path /kubernetes/app from .secret-manager`. `delete --all` never uses the path from the file and needs `--path`. `servers login` and `servers logout` ignore the file.
+
+The file holds no secrets. To keep it out of a repository without changing its `.gitignore`, list it in `.git/info/exclude` or in a global gitignore.
+
 ## Resolution order
 
-The server is `--server`, then `SECRET_MANAGER_URL`, then the default from `servers`.
+The server is `--server`, then `SECRET_MANAGER_URL`, then `server=` in the [project file](#project-file), then the default from `servers`. The path is `--path`, then `path=` in the project file.
 
 `SECRET_MANAGER_TOKEN` belongs to `SECRET_MANAGER_URL` and is only sent to that server. Any other server, chosen with `--server` or as the default, uses its token stored by `servers login`. Setting `SECRET_MANAGER_TOKEN` without `SECRET_MANAGER_URL` is an error.
 
@@ -79,6 +93,7 @@ The server is `--server`, then `SECRET_MANAGER_URL`, then the default from `serv
 |---|---|---|
 | `SECRET_MANAGER_URL` + `SECRET_MANAGER_TOKEN` | env URL | env token |
 | `--server X` (X is not the env URL) | X | stored token for X |
+| `server=X` in `.secret-manager` | X | stored token for X |
 | nothing | default | stored token for default |
 | `SECRET_MANAGER_TOKEN` only | - | error |
 

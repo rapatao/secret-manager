@@ -49,6 +49,7 @@ type harness struct {
 	envURL   string
 	envToken string
 	dir      string
+	workdir  string
 	stdout   bytes.Buffer
 	stderr   bytes.Buffer
 	stdin    string
@@ -98,6 +99,7 @@ func (h *harness) run(args ...string) int {
 		Version:     "1.5.0",
 		OpenBrowser: h.browser,
 		Prompt:      h.prompt,
+		Dir:         h.workdir,
 	}
 	return c.Run(context.Background(), args)
 }
@@ -1008,5 +1010,58 @@ func TestUIOpensRemoteServer(t *testing.T) {
 	}
 	if code := h.run("ui", "--server", "https://secrets.example.com", "--addr", "127.0.0.1:0"); code != 2 {
 		t.Fatalf("--addr with a remote server: exit %d", code)
+	}
+}
+
+func TestProjectFile(t *testing.T) {
+	h := newHarness(t)
+	h.workdir = t.TempDir()
+	write := func(content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(h.workdir, ProjectFile), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if code := h.run("get"); code != 2 || !strings.Contains(h.stderr.String(), "--path is required") {
+		t.Fatalf("no file: exit %d, stderr: %s", code, h.stderr.String())
+	}
+
+	write("# defaults\npath=/tools\n")
+	h.mustRun("set", "A=1", "B=2")
+	if got := h.stderr.String(); got != "using path /tools from .secret-manager\n" {
+		t.Fatalf("notice: %q", got)
+	}
+	if got := h.mustRun("get", "A"); got != "1\n" {
+		t.Fatalf("get from file path: %q", got)
+	}
+	h.mustRun("set", "--path", "/other", "C=3")
+	if h.stderr.Len() != 0 {
+		t.Fatalf("--path given, notice printed: %q", h.stderr.String())
+	}
+	if got := h.mustRun("keys"); got != "A\nB\n" {
+		t.Fatalf("keys: %q", got)
+	}
+
+	h.mustRun("delete", "B")
+	if code := h.run("delete", "--all"); code != 2 || !strings.Contains(h.stderr.String(), "delete --all needs --path") {
+		t.Fatalf("delete --all from file: exit %d, stderr: %s", code, h.stderr.String())
+	}
+	h.mustRun("delete", "--path", "/tools", "--all")
+
+	write("path=/tools\nserver=https://other.example.com\n")
+	h.mustRun("set", "A=1")
+	if got := h.stderr.String(); got != "using path /tools from .secret-manager\n" {
+		t.Fatalf("env URL wins over file server: %q", got)
+	}
+	h.envURL, h.envToken = "", ""
+	if code := h.run("list"); code != 2 || !strings.Contains(h.stderr.String(), "using server https://other.example.com from .secret-manager") ||
+		!strings.Contains(h.stderr.String(), "no token for https://other.example.com") {
+		t.Fatalf("file server: exit %d, stderr: %s", code, h.stderr.String())
+	}
+
+	write("path=/tools\nproject=x\n")
+	if code := h.run("list"); code != 1 || !strings.Contains(h.stderr.String(), `unknown key "project"`) {
+		t.Fatalf("unknown key: exit %d, stderr: %s", code, h.stderr.String())
 	}
 }

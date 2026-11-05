@@ -40,6 +40,9 @@ const (
 	EnvToken = "SECRET_MANAGER_TOKEN"
 	// EnvBackupPassphrase holds the passphrase encrypting backups.
 	EnvBackupPassphrase = "SECRET_MANAGER_BACKUP_PASSPHRASE"
+	// ProjectFile, in the directory a command runs in, holds a default path
+	// and server as path= and server= lines.
+	ProjectFile = ".secret-manager"
 )
 
 // Usage lists the client commands.
@@ -103,8 +106,10 @@ as long as the server allows (default 168h), when the server is unreachable.
 $` + EnvCacheMaxAge + ` can only lower that, 0 disables. servers logout
 removes them.
 
-Every command accepts --server URL. Without it, $` + EnvURL + ` or the
-default server is used. $` + EnvToken + ` is only sent to $` + EnvURL + `;
+Every command accepts --server URL. Without it, $` + EnvURL + `, the
+server= line of a ` + ProjectFile + ` file in the current directory, or the
+default server is used. Without --path, commands taking it use the path=
+line of that file; delete --all always needs --path. $` + EnvToken + ` is only sent to $` + EnvURL + `;
 any other server uses the token stored by servers login.
 `
 
@@ -128,6 +133,9 @@ type CLI struct {
 	OpenBrowser func(string) error
 	// Prompt, when set, replaces reading hidden input from the terminal.
 	Prompt func(label string) (string, error)
+	// Dir is the directory searched for ProjectFile, default the current
+	// directory.
+	Dir string
 }
 
 // Default returns a CLI bound to the process stdio and environment.
@@ -203,12 +211,15 @@ func (e *exitError) Error() string { return fmt.Sprintf("exit status %d", e.code
 type flags struct {
 	fs        *flag.FlagSet
 	store     store
+	noFile    bool
+	fromFile  bool
 	envURL    string
 	envToken  string
 	server    string
 	path      string
 	recursive bool
 	needPath  bool
+	cli       *CLI
 	version   string
 }
 
@@ -221,6 +232,7 @@ func (c *CLI) flags(name string, withPath, recursive bool) *flags {
 		envURL:   normalizeServer(c.Getenv(EnvURL)),
 		envToken: c.Getenv(EnvToken),
 		needPath: withPath,
+		cli:      c,
 		version:  c.Version,
 	}
 	f.fs.SetOutput(io.Discard)
@@ -234,8 +246,9 @@ func (c *CLI) flags(name string, withPath, recursive bool) *flags {
 	return f
 }
 
-// parseFlags parses args and resolves the server: --server, then
-// $SECRET_MANAGER_URL, then the default server.
+// parseFlags parses args and resolves the path, --path then ProjectFile,
+// and the server: --server, then $SECRET_MANAGER_URL, then ProjectFile, then
+// the default server.
 func (f *flags) parseFlags(args []string) error {
 	if err := f.fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -243,10 +256,29 @@ func (f *flags) parseFlags(args []string) error {
 		}
 		return fmt.Errorf("%w: %s: %w", errUsage, f.fs.Name(), err)
 	}
-	if f.needPath && f.path == "" {
-		return fmt.Errorf("%w: --path is required", errUsage)
-	}
 	f.server = cmp.Or(normalizeServer(f.server), f.envURL)
+	var file projectFile
+	if !f.noFile && (f.server == "" || f.needPath && f.path == "") {
+		var err error
+		if file, err = readProjectFile(filepath.Join(f.cli.Dir, ProjectFile)); err != nil {
+			return err
+		}
+	}
+	var from []string
+	if f.needPath && f.path == "" && file.path != "" {
+		f.path, f.fromFile = file.path, true
+		from = append(from, "path "+f.path)
+	}
+	if f.needPath && f.path == "" {
+		return fmt.Errorf("%w: --path is required without a %s file", errUsage, ProjectFile)
+	}
+	if f.server == "" && file.server != "" {
+		f.server = normalizeServer(file.server)
+		from = append(from, "server "+f.server)
+	}
+	if len(from) > 0 {
+		fmt.Fprintf(f.cli.Stderr, "using %s from %s\n", strings.Join(from, " and "), ProjectFile)
+	}
 	if f.server == "" {
 		cfg, err := f.store.config()
 		if err != nil {
@@ -385,6 +417,7 @@ func (c *CLI) serversUse(args []string) error {
 
 func (c *CLI) serversLogin(ctx context.Context, args []string) error {
 	f := c.flags("servers login", false, false)
+	f.noFile = true
 	fromStdin := f.fs.Bool("token-stdin", false, "read the token from stdin")
 	device := f.fs.Bool("device", false, "approve the login from another device instead of a browser on this computer")
 	if err := f.parseFlags(args); err != nil {
@@ -488,6 +521,7 @@ func (c *CLI) readToken() (string, error) {
 
 func (c *CLI) serversLogout(args []string) error {
 	f := c.flags("servers logout", false, false)
+	f.noFile = true
 	if err := f.parseFlags(args); err != nil {
 		return err
 	}
@@ -712,6 +746,9 @@ func (c *CLI) delete(ctx context.Context, args []string) error {
 	if *all {
 		if f.fs.NArg() > 0 {
 			return fmt.Errorf("%w: --all takes no keys", errUsage)
+		}
+		if f.fromFile {
+			return fmt.Errorf("%w: delete --all needs --path, not the path in %s", errUsage, ProjectFile)
 		}
 		return api.DeletePath(ctx, f.path)
 	}
@@ -1144,4 +1181,35 @@ func mergeEnv(environ []string, secrets map[string]string) []string {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+type projectFile struct{ path, server string }
+
+func readProjectFile(name string) (projectFile, error) {
+	var p projectFile
+	r, err := os.Open(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return p, nil
+	}
+	if err != nil {
+		return p, err
+	}
+	defer r.Close()
+	values, err := dotenv.Parse(r)
+	if err != nil {
+		return p, fmt.Errorf("%s: %w", name, err)
+	}
+	for k, v := range values {
+		switch {
+		case v == "":
+			return p, fmt.Errorf("%s: %s is empty", name, k)
+		case k == "path":
+			p.path = v
+		case k == "server":
+			p.server = v
+		default:
+			return p, fmt.Errorf("%s: unknown key %q, want path or server", name, k)
+		}
+	}
+	return p, nil
 }
