@@ -60,8 +60,9 @@ const Usage = `Client commands:
                                                --recursive, as PATH KEY for every
                                                nested path
   get     --path P [--recursive] [KEY]         print one value, or all as dotenv
-  set     --path P [--env-file F|- | --json-file F|-] [--generate KEY[:LEN]...] [K=V...]
-                                               merge keys into a path; --env-file reads
+  set     --path P [--env-file F|- | --json-file F|-] [--generate KEY[:LEN]...] [K=V...] [K...]
+                                               merge keys into a path; a K without =V is
+                                               prompted for without echo; --env-file reads
                                                KEY=VALUE lines, --json-file a JSON
                                                object of string values; --generate sets
                                                KEY to LEN (default 32) random letters
@@ -119,6 +120,8 @@ type CLI struct {
 	Version string
 	// OpenBrowser opens a URL for servers login.
 	OpenBrowser func(string) error
+	// Prompt, when set, replaces reading hidden input from the terminal.
+	Prompt func(label string) (string, error)
 }
 
 // Default returns a CLI bound to the process stdio and environment.
@@ -645,16 +648,37 @@ func (c *CLI) set(ctx context.Context, args []string) error {
 		}
 		values = parsed
 	}
+	var prompted []string
 	for _, kv := range f.fs.Args() {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok {
-			return fmt.Errorf("%w: %q is not KEY=VALUE", errUsage, kv)
+			if err := secrets.ValidateKey(k); err != nil {
+				return fmt.Errorf("%w: %w", errUsage, err)
+			}
+			prompted = append(prompted, k)
+			continue
 		}
 		values[k] = v
 	}
 	for k, v := range generated {
 		if _, ok := values[k]; ok {
 			return fmt.Errorf("%w: %s is both given and generated", errUsage, k)
+		}
+		values[k] = v
+	}
+	for _, k := range prompted {
+		if _, ok := values[k]; ok {
+			return fmt.Errorf("%w: %s is both prompted for and given", errUsage, k)
+		}
+		values[k] = ""
+	}
+	for _, k := range prompted {
+		v, err := c.prompt(k + ": ")
+		if errors.Is(err, errNoTerminal) {
+			err = fmt.Errorf("%w; give %s=VALUE, --env-file or --json-file", err, k)
+		}
+		if err != nil {
+			return err
 		}
 		values[k] = v
 	}

@@ -12,6 +12,7 @@ secret-manager servers login --server https://secrets.example.com   # approve in
 secret-manager list
 secret-manager list --deleted                          # deleted paths that still have versions
 secret-manager set --path /tools GITHUB_TOKEN=abc OTHER=1
+secret-manager set --path /tools GITHUB_TOKEN          # prompts for the value, not echoed
 secret-manager set --path /tools --env-file .env       # or --env-file - for stdin
 secret-manager set --path /tools --json-file keys.json # JSON object of string values, or --json-file - for stdin
 secret-manager set --path /db --generate PASSWORD      # 32 random letters and digits

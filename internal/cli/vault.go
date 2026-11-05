@@ -29,6 +29,9 @@ func (c *CLI) unlockVault(path string, fromStdin bool) (key []byte, created bool
 		}
 	} else {
 		if passphrase, err = c.prompt("Passphrase for " + path + ": "); err != nil {
+			if errors.Is(err, errNoTerminal) {
+				err = fmt.Errorf("%w; give --token-stdin and the passphrase on stdin", err)
+			}
 			return nil, false, err
 		}
 		if create {
@@ -49,11 +52,22 @@ func (c *CLI) unlockVault(path string, fromStdin bool) (key []byte, created bool
 	return key, false, err
 }
 
-// prompt reads a line from the terminal on stdin without echoing it.
+var errNoTerminal = fmt.Errorf("%w: no terminal to prompt on", errUsage)
+
+// prompt reads a line without echoing it, with c.Prompt when set, else from
+// the terminal on stdin or, when stdin is not one, /dev/tty.
 func (c *CLI) prompt(label string) (string, error) {
+	if c.Prompt != nil {
+		return c.Prompt(label)
+	}
 	f, ok := c.Stdin.(*os.File)
 	if !ok || !term.IsTerminal(int(f.Fd())) {
-		return "", fmt.Errorf("%w: stdin is not a terminal; give --token-stdin and the passphrase on stdin", errUsage)
+		tty, err := os.Open("/dev/tty")
+		if err != nil {
+			return "", errNoTerminal
+		}
+		defer tty.Close()
+		f = tty
 	}
 	fmt.Fprint(c.Stderr, label)
 	b, err := term.ReadPassword(int(f.Fd()))

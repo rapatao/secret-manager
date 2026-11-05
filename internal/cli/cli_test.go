@@ -53,6 +53,15 @@ type harness struct {
 	stderr   bytes.Buffer
 	stdin    string
 	browser  func(string) error
+	prompts  map[string]string
+}
+
+func (h *harness) prompt(label string) (string, error) {
+	v, ok := h.prompts[label]
+	if !ok {
+		return "", errNoTerminal
+	}
+	return v, nil
 }
 
 func newHarness(t *testing.T) *harness {
@@ -88,6 +97,7 @@ func (h *harness) run(args ...string) int {
 		ConfigDir:   h.dir,
 		Version:     "1.5.0",
 		OpenBrowser: h.browser,
+		Prompt:      h.prompt,
 	}
 	return c.Run(context.Background(), args)
 }
@@ -557,6 +567,34 @@ func TestSetGenerate(t *testing.T) {
 		if code := h.run(args...); code != 2 {
 			t.Errorf("%v: exit %d, want 2", args, code)
 		}
+	}
+}
+
+func TestSetPrompted(t *testing.T) {
+	h := newHarness(t)
+	h.prompts = map[string]string{"PASS: ": "s3cr=t", "PIN: ": ""}
+	h.stdin = "USER=app\n"
+	h.mustRun("set", "--path", "/db", "--env-file", "-", "PASS", "PIN", "HOST=db")
+	data, err := client.New(h.url, token).Get(context.Background(), "/db", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"PASS": "s3cr=t", "PIN": "", "USER": "app", "HOST": "db"}; !maps.Equal(data, want) {
+		t.Fatalf("set prompted: %v", data)
+	}
+	for _, args := range [][]string{
+		{"set", "--path", "/db", "PASS", "PASS=1"},
+		{"set", "--path", "/db", "PASS", "PASS"},
+		{"set", "--path", "/db", "--generate", "PASS", "PASS"},
+		{"set", "--path", "/db", "BAD KEY"},
+		{"set", "--path", "/db", "OTHER"},
+	} {
+		if code := h.run(args...); code != 2 {
+			t.Errorf("%v: exit %d, want 2", args, code)
+		}
+	}
+	if !strings.Contains(h.stderr.String(), "no terminal to prompt on; give OTHER=VALUE") {
+		t.Fatalf("no terminal: %q", h.stderr.String())
 	}
 }
 
