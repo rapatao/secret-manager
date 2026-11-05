@@ -40,8 +40,8 @@ const (
 	EnvToken = "SECRET_MANAGER_TOKEN"
 	// EnvBackupPassphrase holds the passphrase encrypting backups.
 	EnvBackupPassphrase = "SECRET_MANAGER_BACKUP_PASSPHRASE"
-	// ProjectFile, in the directory a command runs in, holds a default path
-	// and server as path= and server= lines.
+	// ProjectFile is the file, in the directory a command runs in, holding a
+	// default path and server as path= and server= lines.
 	ProjectFile = ".secret-manager"
 )
 
