@@ -136,6 +136,47 @@ document.addEventListener("submit", (e) => {
   if (form.matches("form.export-keys") && e.submitter?.getAttribute("formmethod") !== "dialog") setTimeout(() => form.closest("dialog").close());
 });
 
+document.addEventListener("submit", async (e) => {
+  const form = e.target;
+  if (!form.matches("form.download-backup") || e.submitter?.getAttribute("formmethod") === "dialog") return;
+  e.preventDefault();
+  const error = form.querySelector(".backup-error");
+  error.hidden = true;
+  const res = await fetch(form.action, { method: "POST", body: new URLSearchParams(new FormData(form)) });
+  if (res.redirected) {
+    location.href = res.url;
+    return;
+  }
+  if (!res.ok) {
+    error.textContent = (await res.text()).trim();
+    error.hidden = false;
+    return;
+  }
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(await res.blob());
+  link.download = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") ?? "")?.[1] ?? "backup.json";
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href));
+  form.closest("dialog").close();
+});
+
+document.getElementById("download-backup")?.addEventListener("close", (e) => {
+  const form = e.target.querySelector("form");
+  form.reset();
+  for (const input of form.querySelectorAll("input[type=password]")) input.disabled = false;
+  form.querySelector(".backup-error").hidden = true;
+});
+
+document.addEventListener("input", (e) => {
+  const form = e.target.closest("form.download-backup");
+  if (!form) return;
+  const plain = form.elements.plain;
+  if (!plain) return;
+  const { passphrase, confirm } = form.elements;
+  for (const input of [passphrase, confirm]) input.disabled = plain.checked;
+  confirm.setCustomValidity(confirm.value === passphrase.value ? "" : "Passphrases do not match");
+});
+
 document.addEventListener("change", async (e) => {
   if (!e.target.matches(".import-file")) return;
   const file = e.target.files[0];

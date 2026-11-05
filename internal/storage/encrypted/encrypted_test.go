@@ -156,19 +156,34 @@ func TestMigratePreviousKey(t *testing.T) {
 
 func TestBackupEnvelope(t *testing.T) {
 	doc := []byte(`{"format":1,"paths":[]}`)
-	sealed, err := SealBackup(key, doc)
+	sealed, err := SealBackup("correct horse", doc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !IsEncryptedBackup(sealed) || IsEncryptedBackup(doc) || bytes.Contains(sealed, []byte("paths")) {
+	if !IsEncryptedBackup(sealed) || IsEncryptedBackup(doc) || bytes.Contains(sealed, []byte("paths")) || !bytes.Contains(sealed, []byte(`"encryption":"argon2id+aes-256-gcm"`)) {
 		t.Fatalf("envelope %s", sealed)
 	}
-	got, err := OpenBackup(key, sealed)
+	got, err := OpenBackup("correct horse", sealed)
 	if err != nil || !bytes.Equal(got, doc) {
 		t.Fatalf("OpenBackup = %s, %v", got, err)
 	}
-	if _, err := OpenBackup(bytes.Repeat([]byte{8}, KeySize), sealed); !errors.Is(err, ErrBackupKey) {
-		t.Fatalf("OpenBackup with wrong key: %v", err)
+	if _, err := SealBackup("1234567", doc); err == nil {
+		t.Fatal("SealBackup accepted a 7-byte passphrase")
+	}
+	if _, err := OpenBackup("wrong", sealed); !errors.Is(err, ErrBackupPassphrase) {
+		t.Fatalf("OpenBackup with wrong passphrase: %v", err)
+	}
+	if again, _ := SealBackup("correct horse", doc); bytes.Equal(again, sealed) {
+		t.Fatal("two backups share a salt and nonce")
+	}
+	for _, raw := range []string{
+		`{"encryption":"aes-256-gcm","data":"AAAA"}`,
+		strings.Replace(string(sealed), `"memory":65536`, `"memory":4294967295`, 1),
+		strings.Replace(string(sealed), `"time":3`, `"time":0`, 1),
+	} {
+		if _, err := OpenBackup("correct horse", []byte(raw)); err == nil || errors.Is(err, ErrBackupPassphrase) {
+			t.Errorf("OpenBackup(%s) = %v, want a format error", raw, err)
+		}
 	}
 }
 

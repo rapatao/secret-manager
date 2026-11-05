@@ -155,7 +155,7 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /secrets/copy", s.ui(s.session(s.uiCopyPath)))
 	s.mux.Handle("POST /secrets/rollback", s.ui(s.session(s.uiRollback)))
 	s.mux.Handle("POST /secrets/versions/delete", s.ui(s.session(s.uiDeleteVersion)))
-	s.mux.Handle("GET /backup", s.ui(s.session(s.uiBackup)))
+	s.mux.Handle("POST /backup", s.ui(s.session(s.uiBackup)))
 	s.mux.Handle("GET /audit", s.ui(s.session(s.uiAudit)))
 	s.mux.Handle("GET /integrations", s.ui(s.session(s.uiIntegrations)))
 	s.mux.Handle("POST /integrations", s.ui(s.session(s.uiCreateIntegration)))

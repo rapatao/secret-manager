@@ -61,8 +61,8 @@ spec:
                   key: {{ . }}
             {{- end }}
             {{- end }}
-            {{- if and .Values.backup.enabled .Values.backup.encryption.existingSecret }}
-            - name: SECRET_MANAGER_BACKUP_KEY
+            {{- if .Values.backup.encryption.existingSecret }}
+            - name: SECRET_MANAGER_BACKUP_PASSPHRASE
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.backup.encryption.existingSecret }}

@@ -516,15 +516,36 @@ func (s *Server) uiExport(w http.ResponseWriter, r *http.Request) {
 }
 
 // uiBackup downloads a backup of every path, encrypted with the server's
-// backup key when it has one.
+// backup passphrase when it has one, else with the passphrase in the form,
+// else, when the form says plain, in plain text.
 func (s *Server) uiBackup(w http.ResponseWriter, r *http.Request) {
-	doc, err := s.backup(r.Context(), r.URL.Query().Get("history") == "true")
+	var err error
+	passphrase := s.Settings.Backups.Passphrase
+	if passphrase == "" {
+		passphrase = r.PostFormValue("passphrase")
+		plain := r.PostFormValue("plain") == "true"
+		switch {
+		case plain && passphrase != "":
+			err = errors.New("give a passphrase or choose not to encrypt, not both")
+		case !plain && passphrase == "":
+			err = errors.New("give a passphrase or choose not to encrypt")
+		case passphrase != r.PostFormValue("confirm"):
+			err = errors.New("passphrases do not match")
+		case passphrase != "":
+			err = encrypted.CheckBackupPassphrase(passphrase)
+		}
+	}
+	if err != nil {
+		s.uiError(w, r, fmt.Errorf("%w: %w", secrets.ErrInvalid, err))
+		return
+	}
+	doc, err := s.backup(r.Context(), r.PostFormValue("history") == "true")
 	var raw []byte
 	if err == nil {
 		raw, err = json.Marshal(doc)
 	}
-	if err == nil && s.Settings.Backups.Key != nil {
-		raw, err = encrypted.SealBackup(s.Settings.Backups.Key, raw)
+	if err == nil && passphrase != "" {
+		raw, err = encrypted.SealBackup(passphrase, raw)
 	}
 	s.auditAt(s.Events.Backups, r, "ui", "backup", "", nil, err)
 	if err != nil {

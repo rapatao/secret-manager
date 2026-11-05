@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -51,8 +50,7 @@ func TestBackupToDir(t *testing.T) {
 		t.Fatalf("backup document %s: %v", raw, err)
 	}
 
-	key := bytes.Repeat([]byte{7}, encrypted.KeySize)
-	sealed, err := s.BackupToDir(ctx, BackupSchedule{Dir: t.TempDir(), Interval: time.Hour, Keep: 1, Key: key})
+	sealed, err := s.BackupToDir(ctx, BackupSchedule{Dir: t.TempDir(), Interval: time.Hour, Keep: 1, Passphrase: "schedule-pw"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +58,7 @@ func TestBackupToDir(t *testing.T) {
 	if !encrypted.IsEncryptedBackup(raw) {
 		t.Fatalf("backup with a key not encrypted: %s", raw)
 	}
-	if plain, err := encrypted.OpenBackup(key, raw); err != nil || json.Unmarshal(plain, &doc) != nil || len(doc.Paths) != 1 {
+	if plain, err := encrypted.OpenBackup("schedule-pw", raw); err != nil || json.Unmarshal(plain, &doc) != nil || len(doc.Paths) != 1 {
 		t.Fatalf("encrypted backup %s: %v", plain, err)
 	}
 

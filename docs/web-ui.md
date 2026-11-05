@@ -8,7 +8,7 @@ Summary
 - It lists the 10 latest versions across every path, deleted paths included, with the keys each one added (`+`), changed (`~`) or deleted (`-`).
 - It shows the server settings: version, storage backend, encryption, SecretSync controller, history limit, offline cache default, scheduled backups and the result of the last scheduled backup since the server started.
 - It reads every path and its history on each view.
-- Download backup saves a [backup](backup.md) of every path, with its versions when With history is checked, as `secret-manager backup` does. It is encrypted when the server has `SECRET_MANAGER_BACKUP_KEY`, and the page says whether it is. Restoring a backup needs `secret-manager restore`.
+- Download backup saves a [backup](backup.md) of every path, with its versions when With history is checked, as `secret-manager backup` does. A dialog confirms the download. It is encrypted with the server's `SECRET_MANAGER_BACKUP_PASSPHRASE` passphrase when set; otherwise the dialog asks for a passphrase twice, or for Do not encrypt to be checked to download plain text. Restoring a backup needs `secret-manager restore`.
 
 Secrets
 - The Secrets page lists every path; each one opens at `/secrets/path?path=<path>`.

@@ -498,11 +498,11 @@ func TestBackupRestore(t *testing.T) {
 	src.mustRun("set", "--path", "/tools", "A=1")
 	src.mustRun("set", "--path", "/tools", "A=2")
 	file := filepath.Join(src.dir, "backup.json")
-	src.mustRun("backup", "--history", "--output", file)
+	src.mustRun("backup", "--no-encrypt", "--history", "--output", file)
 	if fi, err := os.Stat(file); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("backup file: %v %v", fi, err)
 	}
-	if out := src.mustRun("backup"); !strings.Contains(out, `"path":"/tools"`) || strings.Contains(out, `"versions"`) {
+	if out := src.mustRun("backup", "--no-encrypt"); !strings.Contains(out, `"path":"/tools"`) || strings.Contains(out, `"versions"`) {
 		t.Fatalf("backup to stdout: %s", out)
 	}
 
@@ -524,25 +524,68 @@ func TestBackupRestore(t *testing.T) {
 }
 
 func TestBackupEncrypted(t *testing.T) {
-	const backupKey = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
 	src := newHarness(t)
 	src.mustRun("set", "--path", "/tools", "A=s3cret")
-	src.env[EnvBackupKey] = backupKey
+	src.env[EnvBackupPassphrase] = "env-passphrase"
 	out := src.mustRun("backup")
-	if strings.Contains(out, "s3cret") || !strings.Contains(out, `"encryption":"aes-256-gcm"`) {
+	if strings.Contains(out, "s3cret") || !strings.Contains(out, `"encryption":"argon2id+aes-256-gcm"`) {
 		t.Fatalf("encrypted backup: %s", out)
+	}
+	if plain := src.mustRun("backup", "--no-encrypt"); !strings.Contains(plain, "s3cret") {
+		t.Fatalf("backup --no-encrypt: %s", plain)
 	}
 
 	dst := newHarness(t)
 	dst.stdin = out
-	if code := dst.run("restore", "-"); code != 1 || !strings.Contains(dst.stderr.String(), "is encrypted; set "+EnvBackupKey) {
-		t.Fatalf("restore without key: %d %s", code, dst.stderr.String())
+	if code := dst.run("restore", "-"); code != 1 || !strings.Contains(dst.stderr.String(), "is encrypted; set "+EnvBackupPassphrase+" to its passphrase") {
+		t.Fatalf("restore without passphrase: %d %s", code, dst.stderr.String())
 	}
-	dst.env[EnvBackupKey] = "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg="
-	if code := dst.run("restore", "-"); code != 1 || !strings.Contains(dst.stderr.String(), "wrong backup key") {
-		t.Fatalf("restore with wrong key: %d %s", code, dst.stderr.String())
+	dst.env[EnvBackupPassphrase] = "other"
+	if code := dst.run("restore", "-"); code != 1 || !strings.Contains(dst.stderr.String(), "wrong passphrase") {
+		t.Fatalf("restore with wrong passphrase: %d %s", code, dst.stderr.String())
 	}
-	dst.env[EnvBackupKey] = backupKey
+	dst.env[EnvBackupPassphrase] = "env-passphrase"
+	dst.mustRun("restore", "-")
+	if got := dst.mustRun("get", "--path", "/tools", "A"); got != "s3cret\n" {
+		t.Fatalf("restored value: %q", got)
+	}
+}
+
+func TestBackupPrompted(t *testing.T) {
+	src := newHarness(t)
+	src.mustRun("set", "--path", "/tools", "A=s3cret")
+	if code := src.run("backup"); code != 2 || !strings.Contains(src.stderr.String(), "set "+EnvBackupPassphrase+" or give --no-encrypt") {
+		t.Fatalf("backup without terminal: %d %s", code, src.stderr.String())
+	}
+
+	src.prompts = map[string]string{"Backup passphrase, empty for none: ": "prompt-pw", "Repeat the passphrase: ": "prompt-px"}
+	if code := src.run("backup"); code != 1 || !strings.Contains(src.stderr.String(), "passphrases do not match") {
+		t.Fatalf("backup with mismatched passphrases: %d %s", code, src.stderr.String())
+	}
+	src.prompts["Repeat the passphrase: "] = "prompt-pw"
+	out := src.mustRun("backup")
+	if strings.Contains(out, "s3cret") || !strings.Contains(out, `"encryption":"argon2id+aes-256-gcm"`) {
+		t.Fatalf("prompted backup: %s", out)
+	}
+
+	src.prompts = map[string]string{"Backup passphrase, empty for none: ": "short"}
+	if code := src.run("backup"); code != 1 || !strings.Contains(src.stderr.String(), "at least 8 characters") {
+		t.Fatalf("backup with short passphrase: %d %s", code, src.stderr.String())
+	}
+	src.env[EnvBackupPassphrase] = "short"
+	if code := src.run("backup"); code != 1 || !strings.Contains(src.stderr.String(), EnvBackupPassphrase+": backup passphrase must have at least 8") {
+		t.Fatalf("backup with short env passphrase: %d %s", code, src.stderr.String())
+	}
+	delete(src.env, EnvBackupPassphrase)
+
+	src.prompts = map[string]string{"Backup passphrase, empty for none: ": ""}
+	if plain := src.mustRun("backup"); !strings.Contains(plain, "s3cret") || !strings.Contains(src.stderr.String(), "warning: the backup holds every value in plain text") {
+		t.Fatalf("backup with empty passphrase: %s %s", plain, src.stderr.String())
+	}
+
+	dst := newHarness(t)
+	dst.stdin = out
+	dst.prompts = map[string]string{"Backup passphrase: ": "prompt-pw"}
 	dst.mustRun("restore", "-")
 	if got := dst.mustRun("get", "--path", "/tools", "A"); got != "s3cret\n" {
 		t.Fatalf("restored value: %q", got)

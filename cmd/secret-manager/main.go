@@ -57,8 +57,8 @@ Server:
                                                ` + envEncryptionKey + `, the key it
                                                replaces from
                                                ` + envPreviousEncryptionKey + `, and
-                                               scheduled backup key from
-                                               ` + cli.EnvBackupKey + `)
+                                               backup passphrase from
+                                               ` + cli.EnvBackupPassphrase + `)
 
 `
 
@@ -172,8 +172,10 @@ func runServer(args []string) error {
 	if err != nil {
 		return err
 	}
-	if sched.Key, err = envKey(cli.EnvBackupKey); err != nil {
-		return err
+	if sched.Passphrase = os.Getenv(cli.EnvBackupPassphrase); sched.Passphrase != "" {
+		if err := encrypted.CheckBackupPassphrase(sched.Passphrase); err != nil {
+			return fmt.Errorf("%s: %w", cli.EnvBackupPassphrase, err)
+		}
 	}
 	enc, err := encrypted.New(backend, key, previous)
 	if err != nil {

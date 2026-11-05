@@ -51,17 +51,32 @@
 <tr><td>History limit</td><td>{{if .HistoryLimit}}{{.HistoryLimit}} versions per path{{else}}disabled{{end}}</td></tr>
 <tr><td>Offline cache default</td><td>{{.CacheMaxAge}}</td></tr>
 {{with .Settings.Backups}}
-<tr><td>Scheduled backups</td><td>{{if .Dir}}every {{$.BackupEvery}}, keeps {{.Keep}}{{if .History}}, with history{{end}}{{if .Key}}, encrypted{{end}}{{else}}disabled{{end}}</td></tr>
+<tr><td>Scheduled backups</td><td>{{if .Dir}}every {{$.BackupEvery}}, keeps {{.Keep}}{{if .History}}, with history{{end}}{{if .Passphrase}}, encrypted{{end}}{{else}}disabled{{end}}</td></tr>
 {{end}}
 {{with .LastBackup}}
 <tr><td>Last backup</td><td>{{time .Time}} {{if .Err}}<span class="badge">failed</span> {{.Err}}{{else}}<span class="muted mono">{{.File}}</span>{{end}}</td></tr>
 {{end}}
 </tbody>
 </table>
-<form class="body row" method="get" action="/backup">
-<label class="check"><input type="checkbox" name="history" value="true"> With history</label>
-<button type="submit">Download backup</button>
-<span class="muted">{{if .Settings.Backups.Key}}Encrypted with the server's backup key.{{else}}Every value in plain text.{{end}}</span>
+<div class="body row">
+<button type="button" commandfor="download-backup" command="show-modal">Download backup</button>
+{{if .Settings.Backups.Passphrase}}<span class="muted">Encrypted with the server's backup passphrase.</span>{{end}}
+</div>
+<dialog id="download-backup">
+<form method="post" action="/backup" class="stack download-backup">
+<h3>Download backup</h3>
+{{if .Settings.Backups.Passphrase}}<p>Download every path, encrypted with the server's backup passphrase. Restore it with <code>secret-manager restore</code> and that passphrase.</p>
+{{else}}<p>Choose a passphrase to encrypt the backup, or choose to download every value in plain text. Restore it with <code>secret-manager restore</code>.</p>
+<label>Passphrase <input type="password" name="passphrase" autocomplete="new-password" minlength="8"></label>
+<label>Repeat passphrase <input type="password" name="confirm" autocomplete="new-password" minlength="8"></label>
+<label class="check"><input type="checkbox" name="plain" value="true"> Do not encrypt, every value in plain text</label>
+{{end}}<label class="check"><input type="checkbox" name="history" value="true"> With history</label>
+<p class="error backup-error" role="alert" hidden></p>
+<div class="dialog-actions">
+<button type="submit" formmethod="dialog" formnovalidate>Cancel</button>
+<button type="submit" class="primary">Download</button>
+</div>
 </form>
+</dialog>
 </div>
 {{end}}

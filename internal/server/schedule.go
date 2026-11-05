@@ -25,8 +25,9 @@ type BackupSchedule struct {
 	// Keep is the number of newest backup files kept in Dir.
 	Keep    int
 	History bool
-	// Key, when set, encrypts every backup file; see encrypted.SealBackup.
-	Key []byte
+	// Passphrase, when set, encrypts every backup file and backup downloaded
+	// from the Web UI; see encrypted.SealBackup.
+	Passphrase string
 }
 
 // RunBackups writes a backup to sched.Dir every sched.Interval until ctx is
@@ -67,8 +68,8 @@ func (s *Server) BackupToDir(ctx context.Context, sched BackupSchedule) (string,
 	if err != nil {
 		return "", err
 	}
-	if sched.Key != nil {
-		if raw, err = encrypted.SealBackup(sched.Key, raw); err != nil {
+	if sched.Passphrase != "" {
+		if raw, err = encrypted.SealBackup(sched.Passphrase, raw); err != nil {
 			return "", err
 		}
 	}
