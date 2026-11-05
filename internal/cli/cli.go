@@ -100,10 +100,17 @@ const Usage = `Client commands:
                                                decrypting it with the passphrase in
                                                $` + EnvBackupPassphrase + `
                                                or prompted for
-  run     --path P [--recursive] [--no-mask] -- CMD [ARGS...]
+  run     --path P [--recursive] [--no-mask] [--min-length 1] -- CMD [ARGS...]
                                                run CMD with secrets as env vars; secret
                                                values in its output print as ***
-                                               unless --no-mask
+                                               unless --no-mask; values shorter than
+                                               --min-length print unmasked
+  scan    --path P [--recursive] [--history] [--json] [--min-length 8] [FILE|DIR...]
+                                               report files, and with --history git
+                                               commits, holding a secret value as
+                                               FILE:LINE: PATH KEY, skipping values
+                                               shorter than --min-length; exit 1 when
+                                               any is found
   ui      [--addr 127.0.0.1:0] [--no-browser]  serve the Web UI of a local vault on
                                                loopback and open a one-time sign-in link;
                                                for a remote server, open its Web UI
@@ -177,6 +184,7 @@ func (c *CLI) Run(ctx context.Context, args []string) int {
 		"move":     c.copyPath(true),
 		"export":   c.export,
 		"run":      c.run,
+		"scan":     c.scan,
 		"history":  c.history,
 		"rollback": c.rollback,
 		"version":  c.version,
@@ -657,6 +665,39 @@ func (c *CLI) list(ctx context.Context, args []string) error {
 	return nil
 }
 
+type pathData struct {
+	path string
+	data map[string]string
+}
+
+// pathsUnder returns root and every path nested under it with its data, in
+// path order, failing when there is none.
+func pathsUnder(ctx context.Context, api *client.Client, root string) ([]pathData, error) {
+	paths, err := api.Paths(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []pathData
+	for _, p := range paths {
+		if !storage.Under(p, root) {
+			continue
+		}
+		data, err := api.Get(ctx, p, false)
+		var apiErr *client.Error
+		if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, pathData{p, data})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no paths under %s", root)
+	}
+	return out, nil
+}
+
 func (c *CLI) keys(ctx context.Context, args []string) error {
 	f := c.flags("keys", true, true)
 	api, err := f.parse(args)
@@ -680,31 +721,15 @@ func (c *CLI) keys(ctx context.Context, args []string) error {
 		}
 		return nil
 	}
-	paths, err := api.Paths(ctx)
+	all, err := pathsUnder(ctx, api, root)
 	if err != nil {
 		return err
 	}
 	w := tabwriter.NewWriter(c.Stdout, 0, 4, 2, ' ', 0)
-	found := false
-	for _, p := range paths {
-		if !storage.Under(p, root) {
-			continue
+	for _, p := range all {
+		for _, k := range slices.Sorted(maps.Keys(p.data)) {
+			fmt.Fprintf(w, "%s\t%s\n", p.path, k)
 		}
-		data, err := api.Get(ctx, p, false)
-		var apiErr *client.Error
-		if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		found = true
-		for _, k := range slices.Sorted(maps.Keys(data)) {
-			fmt.Fprintf(w, "%s\t%s\n", p, k)
-		}
-	}
-	if !found {
-		return fmt.Errorf("no paths under %s", root)
 	}
 	return w.Flush()
 }
@@ -1213,12 +1238,16 @@ func parseVersion(s string) (int, error) {
 func (c *CLI) run(ctx context.Context, args []string) error {
 	f := c.flags("run", true, true)
 	noMask := f.fs.Bool("no-mask", false, "print secret values in the command's output instead of "+maskText)
+	minLength := f.fs.Int("min-length", 1, "print values shorter than this many characters instead of "+maskText)
 	api, err := f.parse(args)
 	if err != nil {
 		return err
 	}
 	if f.fs.NArg() == 0 {
 		return fmt.Errorf("%w: missing command", errUsage)
+	}
+	if *minLength < 1 {
+		return fmt.Errorf("%w: --min-length must be at least 1", errUsage)
 	}
 	data, err := c.getSecrets(ctx, f, api, "")
 	if err != nil {
@@ -1228,7 +1257,7 @@ func (c *CLI) run(ctx context.Context, args []string) error {
 	cmd := exec.Command(f.fs.Arg(0), f.fs.Args()[1:]...) //nolint:gosec // running the user-given command is the purpose of run
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = c.Stdin, c.Stdout, c.Stderr
 	if !*noMask {
-		stdout, stderr := newMaskWriter(c.Stdout, data), newMaskWriter(c.Stderr, data)
+		stdout, stderr := newMaskWriter(c.Stdout, data, *minLength), newMaskWriter(c.Stderr, data, *minLength)
 		defer stdout.Flush() //nolint:errcheck // nothing left to report a failed terminal write to
 		defer stderr.Flush() //nolint:errcheck // nothing left to report a failed terminal write to
 		cmd.Stdout, cmd.Stderr = stdout, stderr
