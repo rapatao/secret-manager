@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/zalando/go-keyring"
 
@@ -29,6 +30,49 @@ type configFile struct {
 	Server string `json:"server,omitempty"`
 	// Servers lists every server with a stored token, sorted.
 	Servers []string `json:"servers,omitempty"`
+	// Locks holds, by server, when each logged-in local vault locks.
+	Locks map[string]vaultLock `json:"locks,omitempty"`
+}
+
+// vaultLock is how long a local vault stays unlocked after its passphrase is
+// given, and until when the current unlock lasts.
+type vaultLock struct {
+	// After is a Go duration, or "never".
+	After string    `json:"after"`
+	Until time.Time `json:"until,omitzero"`
+}
+
+// DefaultLockAfter is how long a local vault stays unlocked when no
+// --lock-after was given.
+const DefaultLockAfter = 8 * time.Hour
+
+const lockNever = "never"
+
+// parseLockAfter returns the duration in s, or 0 for "never".
+func parseLockAfter(s string) (time.Duration, error) {
+	if s == lockNever {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("%w: --lock-after %q is not a positive duration or never", errUsage, s)
+	}
+	return d, nil
+}
+
+// lock returns the lock settings of server, the default when none are stored.
+func (c *configFile) lock(server string) vaultLock {
+	if l, ok := c.Locks[server]; ok {
+		return l
+	}
+	return vaultLock{After: DefaultLockAfter.String()}
+}
+
+func (c *configFile) setLock(server string, l vaultLock) {
+	if c.Locks == nil {
+		c.Locks = map[string]vaultLock{}
+	}
+	c.Locks[server] = l
 }
 
 func (c *configFile) add(server string) {
@@ -40,6 +84,7 @@ func (c *configFile) add(server string) {
 
 func (c *configFile) remove(server string) {
 	c.Servers = slices.DeleteFunc(c.Servers, func(s string) bool { return s == server })
+	delete(c.Locks, server)
 	if c.Server == server {
 		c.Server = ""
 	}

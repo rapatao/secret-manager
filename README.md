@@ -11,7 +11,7 @@ A small, self-hosted key-value secret manager for Kubernetes.
 - `secret-manager backup` and `restore` copy every path, optionally with its versions, to and from a JSON file, optionally encrypted.
 - Stored values can be encrypted with AES-256-GCM, and the key can be rotated.
 - Changes, sign-ins and failed authentications are written to an audit log and kept on the Web UI Audit page; reads and listings can be logged too, per [event category](docs/observability.md#event-categories).
-- A [local vault](docs/local-vault.md) keeps secrets in an encrypted file on your machine, used by the CLI and Web UI without running a server.
+- A [local vault](docs/local-vault.md) keeps secrets in an encrypted file on your machine, used by the CLI and Web UI without running a server. It locks 8 hours after it is unlocked, and asks for the passphrase again.
 
 One binary contains the controller, the REST API, the Web UI and the CLI. The controller is optional, with the `file` storage backend the server runs without Kubernetes, and with a local vault no server runs at all.
 
