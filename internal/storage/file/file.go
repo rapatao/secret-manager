@@ -110,7 +110,8 @@ func (b *Backend) save() error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(b.path), filepath.Base(b.path)+".tmp*")
+	target := resolveLink(b.path)
+	tmp, err := os.CreateTemp(filepath.Dir(target), filepath.Base(target)+".tmp*")
 	if err != nil {
 		return err
 	}
@@ -125,7 +126,17 @@ func (b *Backend) save() error {
 	if err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), b.path)
+	return os.Rename(tmp.Name(), target)
+}
+
+// resolveLink returns the file path points to, so a symlinked store is
+// rewritten in place instead of being replaced by a regular file. A missing or
+// dangling path is returned unchanged.
+func resolveLink(path string) string {
+	if p, err := filepath.EvalSymlinks(path); err == nil {
+		return p
+	}
+	return path
 }
 
 // Get implements storage.Backend.

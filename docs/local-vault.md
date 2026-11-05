@@ -30,4 +30,4 @@ Every command works on a vault, run in-process: values are encrypted with AES-25
 
 A vault can be used by several commands at once, including while `ui` runs: each request takes a lock on `<file>.lock` next to the vault and reads the file again. Local vaults need macOS, Linux or another Unix system. To use a vault without a stored login, set `SECRET_MANAGER_URL` to its `file://` URL and `SECRET_MANAGER_TOKEN` to the base64 vault key.
 
-The file can be copied to another machine and unlocked there with the same passphrase. A lost passphrase loses the data; there is no way to change it.
+The vault path can be a symlink, as made by dotfile managers such as yadm alternates: writes replace the file it points to and keep the link. The file can be copied to another machine and unlocked there with the same passphrase. A lost passphrase loses the data; there is no way to change it.

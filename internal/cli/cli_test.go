@@ -1186,3 +1186,23 @@ func TestVaultLock(t *testing.T) {
 		t.Fatalf("logout keeps the lock: %+v", cfg.Locks)
 	}
 }
+
+func TestWriteAtomicKeepsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "config.json##class.work")
+	if err := os.WriteFile(target, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Base(target), filepath.Join(dir, "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAtomic(dir, "config.json", []byte("new\n")); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Lstat(filepath.Join(dir, "config.json")); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("link replaced: %v, %v", info, err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "new\n" {
+		t.Fatalf("target = %q, %v", got, err)
+	}
+}

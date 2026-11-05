@@ -204,10 +204,14 @@ func (s store) write(name string, v any) error {
 }
 
 // writeAtomic replaces dir/name with b, 0600 permissions, creating dir with
-// 0700 when missing.
+// 0700 when missing. When dir/name is a symlink, the file it points to is
+// replaced and the link is kept.
 func writeAtomic(dir, name string, b []byte) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
+	}
+	if p, err := filepath.EvalSymlinks(filepath.Join(dir, name)); err == nil {
+		dir, name = filepath.Split(p)
 	}
 	tmp, err := os.CreateTemp(dir, name+".*")
 	if err != nil {
