@@ -6,6 +6,7 @@ import (
 	"io"
 	"maps"
 	"slices"
+	"unicode/utf8"
 )
 
 const maskText = "***"
@@ -19,10 +20,12 @@ type maskWriter struct {
 	buf     []byte
 }
 
-func newMaskWriter(w io.Writer, secrets map[string]string) *maskWriter {
+// newMaskWriter masks the values of secrets that have at least minLength
+// characters; shorter ones pass through.
+func newMaskWriter(w io.Writer, secrets map[string]string, minLength int) *maskWriter {
 	m := &maskWriter{w: w}
 	for _, v := range slices.Sorted(maps.Values(secrets)) {
-		if v != "" {
+		if v != "" && utf8.RuneCountInString(v) >= minLength {
 			m.secrets = append(m.secrets, []byte(v))
 		}
 	}

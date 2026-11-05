@@ -250,11 +250,20 @@ func TestRunInjectsEnvAndForwardsExitCode(t *testing.T) {
 	if got := h.stdout.String() + "|" + h.stderr.String(); got != "t0k|new t0k" {
 		t.Fatalf("unmasked output %q", got)
 	}
+
+	h.mustRun("set", "--path", "/tools", "LONG=long-value")
+	h.mustRun("run", "--path", "/tools", "--min-length", "4", "--", "sh", "-c", `printf '%s %s' "$TOKEN" "$LONG"`)
+	if got := h.stdout.String(); got != "t0k ***" {
+		t.Fatalf("--min-length 4 output %q", got)
+	}
+	if code := h.run("run", "--path", "/tools", "--min-length", "0", "--", "true"); code != 2 {
+		t.Fatalf("--min-length 0: exit %d", code)
+	}
 }
 
 func TestMaskWriterSplitWrites(t *testing.T) {
 	var out strings.Builder
-	m := newMaskWriter(&out, map[string]string{"A": "abc", "B": "abcd", "C": "bcx", "D": ""})
+	m := newMaskWriter(&out, map[string]string{"A": "abc", "B": "abcd", "C": "bcx", "D": ""}, 1)
 	for _, p := range []string{"Pass: ", "ab", "c", "d ab", "cx a", "bc b"} {
 		if _, err := m.Write([]byte(p)); err != nil {
 			t.Fatal(err)
@@ -268,6 +277,20 @@ func TestMaskWriterSplitWrites(t *testing.T) {
 	}
 	if got := out.String(); got != "Pass: *** ***x *** b" {
 		t.Fatalf("after flush %q", got)
+	}
+}
+
+func TestMaskWriterMinLength(t *testing.T) {
+	var out strings.Builder
+	m := newMaskWriter(&out, map[string]string{"USER": "bob", "TOKEN": "t0k3n-value", "PIN": "ção1"}, 4)
+	if _, err := m.Write([]byte("bob t0k3n-value ção1 ção")); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); got != "bob *** *** ção" {
+		t.Fatalf("got %q", got)
 	}
 }
 

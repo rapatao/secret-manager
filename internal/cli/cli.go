@@ -100,10 +100,11 @@ const Usage = `Client commands:
                                                decrypting it with the passphrase in
                                                $` + EnvBackupPassphrase + `
                                                or prompted for
-  run     --path P [--recursive] [--no-mask] -- CMD [ARGS...]
+  run     --path P [--recursive] [--no-mask] [--min-length 1] -- CMD [ARGS...]
                                                run CMD with secrets as env vars; secret
                                                values in its output print as ***
-                                               unless --no-mask
+                                               unless --no-mask; values shorter than
+                                               --min-length print unmasked
   scan    --path P [--recursive] [--history] [--json] [--min-length 8] [FILE|DIR...]
                                                report files, and with --history git
                                                commits, holding a secret value as
@@ -1237,12 +1238,16 @@ func parseVersion(s string) (int, error) {
 func (c *CLI) run(ctx context.Context, args []string) error {
 	f := c.flags("run", true, true)
 	noMask := f.fs.Bool("no-mask", false, "print secret values in the command's output instead of "+maskText)
+	minLength := f.fs.Int("min-length", 1, "print values shorter than this many characters instead of "+maskText)
 	api, err := f.parse(args)
 	if err != nil {
 		return err
 	}
 	if f.fs.NArg() == 0 {
 		return fmt.Errorf("%w: missing command", errUsage)
+	}
+	if *minLength < 1 {
+		return fmt.Errorf("%w: --min-length must be at least 1", errUsage)
 	}
 	data, err := c.getSecrets(ctx, f, api, "")
 	if err != nil {
@@ -1252,7 +1257,7 @@ func (c *CLI) run(ctx context.Context, args []string) error {
 	cmd := exec.Command(f.fs.Arg(0), f.fs.Args()[1:]...) //nolint:gosec // running the user-given command is the purpose of run
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = c.Stdin, c.Stdout, c.Stderr
 	if !*noMask {
-		stdout, stderr := newMaskWriter(c.Stdout, data), newMaskWriter(c.Stderr, data)
+		stdout, stderr := newMaskWriter(c.Stdout, data, *minLength), newMaskWriter(c.Stderr, data, *minLength)
 		defer stdout.Flush() //nolint:errcheck // nothing left to report a failed terminal write to
 		defer stderr.Flush() //nolint:errcheck // nothing left to report a failed terminal write to
 		cmd.Stdout, cmd.Stderr = stdout, stderr

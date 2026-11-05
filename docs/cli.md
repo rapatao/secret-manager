@@ -29,6 +29,7 @@ secret-manager copy --path /tools --to /tools-backup   # data and history, see H
 secret-manager move --path /tools --to /shared/tools
 secret-manager run --path /tools -- make updates
 secret-manager run --path /tools --no-mask -- vim     # output not masked, see below
+secret-manager run --path /tools --min-length 8 -- make   # values under 8 characters not masked
 secret-manager history --path /tools                   # list versions
 secret-manager history --path /tools 3                 # print version 3 as dotenv
 secret-manager history --path /tools --delete 3        # delete version 3, see History
@@ -124,7 +125,7 @@ No command accepts the token as a flag.
 
 `run` adds the secrets to the current environment, overriding variables with the same name, and exits with the command's exit code.
 
-`run` replaces every secret value in the command's stdout and stderr with `***`, so `run --path /tools -- env` does not print them. The command's output goes through a pipe, not your terminal, so programs that check for a terminal (colors, progress bars, `less`, editors) behave as when piped. `--no-mask` passes stdout and stderr through unchanged.
+`run` replaces every secret value in the command's stdout and stderr with `***`, so `run --path /tools -- env` does not print them. The command's output goes through a pipe, not your terminal, so programs that check for a terminal (colors, progress bars, `less`, editors) behave as when piped. `--no-mask` passes stdout and stderr through unchanged. `--min-length N` masks only values of at least N characters and prints shorter ones, like a short user name, unchanged; the default, 1, masks every value.
 
 ## Offline cache
 
