@@ -47,7 +47,8 @@ const Usage = `Client commands:
   servers [list]                               list logged-in servers, marking the default
   servers login --server URL [--device | --token-stdin]
                                                approve a new integration in the browser,
-                                               or read a token from stdin; store the
+                                               or read a token from stdin, prompted
+                                               for without echo on a terminal; store the
                                                token and make URL the default; with a
                                                file:///PATH URL, create or unlock
                                                the local vault at PATH with a passphrase
@@ -466,8 +467,16 @@ func describeLogin(l client.Login) string {
 	return fmt.Sprintf(" as integration %s (%s, %s, %s)", l.Name, l.Path, access, expires)
 }
 
+// readToken reads the token from the first line of stdin, without echo when
+// stdin is a terminal.
 func (c *CLI) readToken() (string, error) {
-	line, err := bufio.NewReader(c.Stdin).ReadString('\n')
+	var line string
+	var err error
+	if c.stdinIsTerminal() {
+		line, err = c.prompt("Token: ")
+	} else {
+		line, err = bufio.NewReader(c.Stdin).ReadString('\n')
+	}
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}

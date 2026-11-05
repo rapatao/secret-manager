@@ -61,7 +61,7 @@ secret-manager servers logout --server https://secrets.example.com
 
 With `--device`, over SSH (`SSH_CONNECTION` is set) or when no browser can be opened, the CLI prints the approval page URL and a code like `ABCD-2345` instead. Open the URL in any browser, check that the page shows the same code, and approve; the CLI polls the server and picks up the token. A login not approved within 5 minutes fails.
 
-`--token-stdin` stores an existing token instead, such as one created in the Web UI, after checking it against the server. Either way the server becomes the default. You can be logged in to several servers at once: `servers use` switches the default, and `--server` picks one for a single command. A request with an expired or revoked token fails with `401` and a hint to run `servers login` again.
+`--token-stdin` stores an existing token instead, such as one created in the Web UI, after checking it against the server. On a terminal it prompts for the token without echo; otherwise it reads the first line of stdin. Either way the server becomes the default. You can be logged in to several servers at once: `servers use` switches the default, and `--server` picks one for a single command. A request with an expired or revoked token fails with `401` and a hint to run `servers login` again.
 
 Without a login, set `SECRET_MANAGER_URL` and `SECRET_MANAGER_TOKEN` to a server and an integration token, as in CI.
 
