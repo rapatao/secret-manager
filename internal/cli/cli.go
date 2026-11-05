@@ -38,8 +38,8 @@ const (
 	EnvURL = "SECRET_MANAGER_URL"
 	// EnvToken holds an integration token.
 	EnvToken = "SECRET_MANAGER_TOKEN"
-	// EnvBackupKey holds the base64 AES-256 key encrypting backups.
-	EnvBackupKey = "SECRET_MANAGER_BACKUP_KEY"
+	// EnvBackupPassphrase holds the passphrase encrypting backups.
+	EnvBackupPassphrase = "SECRET_MANAGER_BACKUP_PASSPHRASE"
 )
 
 // Usage lists the client commands.
@@ -77,11 +77,16 @@ const Usage = `Client commands:
                                                VERSION2 or the current data
   history --path P --delete VERSION...         delete versions, keeping the current data
   rollback --path P VERSION                    restore a version
-  backup  [--history] [--output F]             print or write (0600) every path as JSON,
-                                               encrypted when $` + EnvBackupKey + `
-                                               is set
+  backup  [--history] [--output F] [--no-encrypt]
+                                               print or write (0600) every path as JSON,
+                                               encrypted with the passphrase in
+                                               $` + EnvBackupPassphrase + `
+                                               or prompted for; an empty passphrase
+                                               or --no-encrypt writes plain text
   restore FILE|-                               replace the paths held in a backup,
-                                               decrypting it with $` + EnvBackupKey + `
+                                               decrypting it with the passphrase in
+                                               $` + EnvBackupPassphrase + `
+                                               or prompted for
   run     --path P [--recursive] [--no-mask] -- CMD [ARGS...]
                                                run CMD with secrets as env vars; secret
                                                values in its output print as ***
@@ -897,6 +902,7 @@ func (c *CLI) backup(ctx context.Context, args []string) error {
 	f := c.flags("backup", false, false)
 	withHistory := f.fs.Bool("history", false, "include the versions of every path")
 	output := f.fs.String("output", "", "file to write with 0600 permissions, default stdout")
+	noEncrypt := f.fs.Bool("no-encrypt", false, "write every value in plain text")
 	api, err := f.parse(args)
 	if err != nil {
 		return err
@@ -907,16 +913,18 @@ func (c *CLI) backup(ctx context.Context, args []string) error {
 	if err := api.Require(ctx, "backup"); err != nil {
 		return err
 	}
-	key, err := c.backupKey()
-	if err != nil {
-		return err
+	var passphrase string
+	if !*noEncrypt {
+		if passphrase, err = c.newBackupPassphrase(); err != nil {
+			return err
+		}
 	}
 	data, err := api.Backup(ctx, *withHistory)
 	if err != nil {
 		return err
 	}
-	if key != nil {
-		if data, err = encrypted.SealBackup(key, data); err != nil {
+	if passphrase != "" {
+		if data, err = encrypted.SealBackup(passphrase, data); err != nil {
 			return err
 		}
 	}
@@ -962,14 +970,17 @@ func (c *CLI) restore(ctx context.Context, args []string) error {
 		return fmt.Errorf("%s is not a JSON backup", name)
 	}
 	if encrypted.IsEncryptedBackup(data) {
-		key, err := c.backupKey()
-		if err != nil {
-			return err
+		passphrase := c.Getenv(EnvBackupPassphrase)
+		if passphrase == "" {
+			passphrase, err = c.prompt("Backup passphrase: ")
+			if errors.Is(err, errNoTerminal) {
+				return fmt.Errorf("%s is encrypted; set %s to its passphrase", name, EnvBackupPassphrase)
+			}
+			if err != nil {
+				return err
+			}
 		}
-		if key == nil {
-			return fmt.Errorf("%s is encrypted; set %s to its backup key", name, EnvBackupKey)
-		}
-		if data, err = encrypted.OpenBackup(key, data); err != nil {
+		if data, err = encrypted.OpenBackup(passphrase, data); err != nil {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 	}
@@ -984,17 +995,37 @@ func (c *CLI) restore(ctx context.Context, args []string) error {
 	return nil
 }
 
-// backupKey returns the key in $SECRET_MANAGER_BACKUP_KEY, nil when unset.
-func (c *CLI) backupKey() ([]byte, error) {
-	v := c.Getenv(EnvBackupKey)
-	if v == "" {
-		return nil, nil
+// newBackupPassphrase returns the passphrase in $SECRET_MANAGER_BACKUP_PASSPHRASE,
+// else one prompted for twice; empty means no encryption.
+func (c *CLI) newBackupPassphrase() (string, error) {
+	if v := c.Getenv(EnvBackupPassphrase); v != "" {
+		if err := encrypted.CheckBackupPassphrase(v); err != nil {
+			return "", fmt.Errorf("%s: %w", EnvBackupPassphrase, err)
+		}
+		return v, nil
 	}
-	key, err := encrypted.ParseKey(v)
+	passphrase, err := c.prompt("Backup passphrase, empty for none: ")
+	if errors.Is(err, errNoTerminal) {
+		return "", fmt.Errorf("%w; set %s or give --no-encrypt", err, EnvBackupPassphrase)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", EnvBackupKey, err)
+		return "", err
 	}
-	return key, nil
+	if passphrase == "" {
+		fmt.Fprintln(c.Stderr, "warning: the backup holds every value in plain text")
+		return "", nil
+	}
+	if err := encrypted.CheckBackupPassphrase(passphrase); err != nil {
+		return "", err
+	}
+	confirm, err := c.prompt("Repeat the passphrase: ")
+	if err != nil {
+		return "", err
+	}
+	if confirm != passphrase {
+		return "", errors.New("passphrases do not match")
+	}
+	return passphrase, nil
 }
 
 const (

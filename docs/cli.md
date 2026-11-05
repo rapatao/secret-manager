@@ -32,9 +32,10 @@ secret-manager history --path /tools                   # list versions
 secret-manager history --path /tools 3                 # print version 3 as dotenv
 secret-manager history --path /tools --delete 3        # delete version 3, see History
 secret-manager rollback --path /tools 3
-secret-manager backup --history --output backup.json  # every path and its versions, see Backup
-secret-manager restore backup.json
-SECRET_MANAGER_BACKUP_KEY=... secret-manager backup    # encrypted backup, see Backup
+secret-manager backup --history --output backup.json  # every path and its versions, prompts for a passphrase, see Backup
+secret-manager restore backup.json                     # prompts for the passphrase of an encrypted backup
+SECRET_MANAGER_BACKUP_PASSPHRASE=... secret-manager backup    # passphrase from the environment, no prompt
+secret-manager backup --no-encrypt                     # every value in plain text
 secret-manager version                                 # client and server versions, server capabilities
 secret-manager ui                                      # open the Web UI of the default server
 ```

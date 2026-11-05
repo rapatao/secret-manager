@@ -1270,43 +1270,61 @@ func TestUIExport(t *testing.T) {
 }
 
 func TestUIBackup(t *testing.T) {
-	key := bytes.Repeat([]byte{7}, encrypted.KeySize)
-	for _, sealed := range []bool{false, true} {
-		ts, logs := newLoggedServer(t, func(s *Server) {
-			if sealed {
-				s.Settings.Backups.Key = key
-			}
-		})
+	for _, tc := range []struct {
+		name, server, form, plain, open string
+	}{
+		{name: "plain", plain: "true"},
+		{name: "server passphrase", server: "server-pw", form: "ignored", open: "server-pw"},
+		{name: "form passphrase", form: "form-passphrase", open: "form-passphrase"},
+	} {
+		ts, logs := newLoggedServer(t, func(s *Server) { s.Settings.Backups.Passphrase = tc.server })
 		c := uiClient(t, ts)
 		postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL)
 		do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"A":"1"}`)
 		do(t, ts, "PUT", "/api/v1/secrets?path=/app", apiToken, `{"A":"2"}`)
 
-		if _, body := get(t, c, ts.URL+"/"); !strings.Contains(body, `action="/backup"`) {
-			t.Fatalf("summary lacks backup download:\n%s", body)
+		_, body := get(t, c, ts.URL+"/")
+		if !strings.Contains(body, `commandfor="download-backup"`) || !strings.Contains(body, `action="/backup"`) || strings.Contains(body, `name="plain"`) != (tc.server == "") {
+			t.Fatalf("%s: summary backup form:\n%s", tc.name, body)
 		}
-		res, err := c.Get(ts.URL + "/backup?history=true")
+		form := url.Values{"history": {"true"}, "passphrase": {tc.form}, "confirm": {tc.form}, "plain": {tc.plain}}
+		req, _ := http.NewRequest(http.MethodPost, ts.URL+"/backup", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Origin", ts.URL)
+		res, err := c.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
 		raw, _ := io.ReadAll(res.Body)
 		res.Body.Close()
 		if res.StatusCode != http.StatusOK || !strings.HasPrefix(res.Header.Get("Content-Disposition"), `attachment; filename="backup-`) {
-			t.Fatalf("backup: %d %v", res.StatusCode, res.Header)
+			t.Fatalf("%s: backup: %d %v", tc.name, res.StatusCode, res.Header)
 		}
-		if sealed {
+		if tc.open != "" {
 			if bytes.Contains(raw, []byte(`"A"`)) {
-				t.Fatalf("backup not encrypted: %s", raw)
+				t.Fatalf("%s: backup not encrypted: %s", tc.name, raw)
 			}
-			if raw, err = encrypted.OpenBackup(key, raw); err != nil {
-				t.Fatal(err)
+			if raw, err = encrypted.OpenBackup(tc.open, raw); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
 			}
 		}
 		if strings.Count(string(raw), `{"version":`) != 2 || !strings.Contains(string(raw), `"data":{"A":"2"}`) {
-			t.Fatalf("backup with history: %s", raw)
+			t.Fatalf("%s: backup with history: %s", tc.name, raw)
 		}
 		if !strings.Contains(logs.String(), `"source":"ui","op":"backup"`) {
-			t.Fatalf("backup not audited: %s", logs)
+			t.Fatalf("%s: backup not audited: %s", tc.name, logs)
+		}
+		if tc.server == "" {
+			for _, bad := range []url.Values{
+				{"passphrase": {"a"}, "confirm": {"b"}},
+				{},
+				{"passphrase": {"a"}, "confirm": {"a"}, "plain": {"true"}},
+				{"passphrase": {"short"}, "confirm": {"short"}},
+			} {
+				if code, _ := postForm(t, c, ts, "/backup", bad, ts.URL); code != http.StatusBadRequest {
+					t.Fatalf("%s: backup form %v: %d", tc.name, bad, code)
+				}
+			}
 		}
 	}
 }

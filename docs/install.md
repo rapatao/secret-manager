@@ -57,4 +57,4 @@ The chart sets these; set them yourself when running `secret-manager server` out
 | `--backup-history` | `false` | Include versions in scheduled backups |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error` |
 
-The Web UI admin token is read from `SECRET_MANAGER_TOKEN`, the optional [encryption](storage.md#encryption) key from `SECRET_MANAGER_ENCRYPTION_KEY`, the key being rotated out from `SECRET_MANAGER_PREVIOUS_ENCRYPTION_KEY`, and the optional [scheduled backup](backup.md#scheduled-backups) key from `SECRET_MANAGER_BACKUP_KEY`.
+The Web UI admin token is read from `SECRET_MANAGER_TOKEN`, the optional [encryption](storage.md#encryption) key from `SECRET_MANAGER_ENCRYPTION_KEY`, the key being rotated out from `SECRET_MANAGER_PREVIOUS_ENCRYPTION_KEY`, and the optional [backup](backup.md#scheduled-backups) passphrase from `SECRET_MANAGER_BACKUP_PASSPHRASE`.

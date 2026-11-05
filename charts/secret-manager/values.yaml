@@ -82,16 +82,16 @@ cacheMaxAge: 168h
 
 # Writes a backup of every path to a PersistentVolume every interval and keeps
 # the newest files. Backups hold secret values in plain JSON unless
-# encryption.existingSecret is set.
+# encryption.existingSecret is set, which also encrypts Web UI downloads.
 backup:
   enabled: false
   interval: 24h
   keep: 7
   # Include the versions of every path.
   history: false
-  # Secret holding a base64 AES-256 key that encrypts backup files. Keep a copy
-  # outside the cluster: restoring an encrypted backup needs it in
-  # SECRET_MANAGER_BACKUP_KEY.
+  # Secret holding the passphrase that encrypts backup files. Keep a copy
+  # outside the cluster: restoring an encrypted backup needs it, typed at the
+  # prompt or in SECRET_MANAGER_BACKUP_PASSPHRASE.
   encryption:
     existingSecret: ""
     key: key
