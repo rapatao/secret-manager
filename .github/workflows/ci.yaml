@@ -29,7 +29,7 @@ jobs:
         run: make build
 
   # The binary is installed directly instead of through golangci-lint-action,
-  # which depends on the Actions cache service that Gitea runners may lack.
+  # which depends on the Actions cache service that self-hosted runners may lack.
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 15

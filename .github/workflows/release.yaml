@@ -1,7 +1,7 @@
 name: release
 
-# Runs on both forges: git.rapatao.com (Gitea Actions) pushes the image and
-# chart to its own registry, the GitHub mirror pushes them to ghcr.io.
+# Runs on GitHub, which pushes the image and chart to ghcr.io, and on a
+# self-hosted forge, which pushes them to its own registry.
 on:
   push:
     tags: ["v*"]
@@ -20,13 +20,13 @@ jobs:
       - name: Select registry
         id: registry
         env:
-          GITEA_REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
         run: |
           if [ "$GITHUB_SERVER_URL" = "https://github.com" ]; then
             host=ghcr.io
           else
             host="${GITHUB_SERVER_URL#*://}"
-            if [ -z "$GITEA_REGISTRY_TOKEN" ]; then
+            if [ -z "$REGISTRY_TOKEN" ]; then
               echo "::error::REGISTRY_TOKEN secret (token with write:package) is required on $host"
               exit 1
             fi
@@ -90,7 +90,7 @@ jobs:
           fetch-depth: 0
 
       # GITHUB_API_URL is api.github.com on GitHub and <instance>/api/v1 on
-      # Gitea; both accept the same release payload.
+      # self-hosted forges; both accept the same release payload.
       - name: Create release
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
