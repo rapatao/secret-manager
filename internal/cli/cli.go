@@ -56,6 +56,13 @@ const Usage = `Client commands:
                                                file:///PATH URL, create or unlock
                                                the local vault at PATH with a passphrase
                                                prompted for, or read from stdin
+  servers login --server file:///PATH [--lock-after 8h|never]
+                                               a local vault stays unlocked for
+                                               --lock-after (default 8h, kept on
+                                               later logins); then the next command
+                                               prompts for the passphrase, or fails
+                                               without a terminal
+  servers lock [--server URL]                  lock a local vault now
   servers logout [--server URL]                remove the stored token
   servers use URL                              make a logged-in server the default
   list    [--deleted]                          list paths, or deleted paths that still
@@ -341,6 +348,11 @@ func (f *flags) token() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if path, ok := local.Path(f.server); ok {
+		if token, err = f.cli.checkVaultLock(f.store, f.server, path, token); err != nil {
+			return "", err
+		}
+	}
 	if token == "" {
 		return "", fmt.Errorf("%w: no token for %s; run servers login --server %s", errUsage, f.server, f.server)
 	}
@@ -380,6 +392,8 @@ func (c *CLI) servers(ctx context.Context, args []string) error {
 		return c.serversLogout(rest)
 	case "use":
 		return c.serversUse(rest)
+	case "lock":
+		return c.serversLock(rest)
 	default:
 		return fmt.Errorf("%w: unknown servers command %q", errUsage, sub)
 	}
@@ -400,6 +414,38 @@ func (c *CLI) serversList(args []string) error {
 			fmt.Fprintln(c.Stdout, server)
 		}
 	}
+	return nil
+}
+
+func (c *CLI) serversLock(args []string) error {
+	f := c.flags("servers lock", false, false)
+	f.noFile = true
+	if err := f.parseFlags(args); err != nil {
+		return err
+	}
+	if f.fs.NArg() > 0 {
+		return fmt.Errorf("%w: servers lock takes no arguments", errUsage)
+	}
+	if _, ok := local.Path(f.server); !ok {
+		return fmt.Errorf("%w: servers lock only applies to a local vault", errUsage)
+	}
+	cfg, err := f.store.config()
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(cfg.Servers, f.server) {
+		return fmt.Errorf("not logged in to %s", f.server)
+	}
+	if err := f.store.removeToken(f.server); err != nil {
+		return err
+	}
+	lock := cfg.lock(f.server)
+	lock.Until = time.Now()
+	cfg.setLock(f.server, lock)
+	if err := f.store.saveConfig(cfg); err != nil {
+		return err
+	}
+	fmt.Fprintf(c.Stdout, "Locked %s\n", f.server)
 	return nil
 }
 
@@ -429,8 +475,18 @@ func (c *CLI) serversLogin(ctx context.Context, args []string) error {
 	f.noFile = true
 	fromStdin := f.fs.Bool("token-stdin", false, "read the token from stdin")
 	device := f.fs.Bool("device", false, "approve the login from another device instead of a browser on this computer")
+	lockAfter := f.fs.String("lock-after", "", "how long a local vault stays unlocked, a duration or never")
 	if err := f.parseFlags(args); err != nil {
 		return err
+	}
+	_, isVault := local.Path(f.server)
+	if *lockAfter != "" && !isVault {
+		return fmt.Errorf("%w: --lock-after only applies to a local vault", errUsage)
+	}
+	if *lockAfter != "" {
+		if _, err := parseLockAfter(*lockAfter); err != nil {
+			return err
+		}
 	}
 	if f.fs.NArg() > 0 {
 		return fmt.Errorf("%w: servers login takes no arguments", errUsage)
@@ -486,6 +542,21 @@ func (c *CLI) serversLogin(ctx context.Context, args []string) error {
 	}
 	cfg.add(f.server)
 	cfg.Server = f.server
+	if isVault {
+		lock := cfg.lock(f.server)
+		lock.After = cmp.Or(*lockAfter, lock.After)
+		after, err := parseLockAfter(lock.After)
+		if err != nil {
+			return err
+		}
+		lock.Until = unlockedUntil(after)
+		cfg.setLock(f.server, lock)
+		if after == 0 {
+			granted += ", never locks"
+		} else {
+			granted += ", locks at " + lock.Until.UTC().Format(time.RFC3339)
+		}
+	}
 	if err := f.store.saveConfig(cfg); err != nil {
 		return err
 	}

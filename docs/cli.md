@@ -52,6 +52,7 @@ echo "$TOKEN" | secret-manager servers login --server https://secrets.example.co
 secret-manager servers                                # list logged-in servers, marks the default
 secret-manager servers use https://secrets.example.com
 secret-manager servers logout --server https://secrets.example.com
+secret-manager servers lock                           # lock the default local vault now, see Local vault
 ```
 
 `servers login` creates an [integration](integrations.md) approved in the Web UI:

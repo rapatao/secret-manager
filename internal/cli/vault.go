@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"time"
 
 	"golang.org/x/term"
@@ -151,4 +153,60 @@ func (c *CLI) remoteUI(f *flags, noBrowser bool) error {
 		}
 	}
 	return nil
+}
+
+// checkVaultLock returns key, the stored key of the logged-in vault at path,
+// while its unlock lasts. Once it ends, the stored key is removed and the
+// passphrase is prompted for to unlock the vault again. A vault without an
+// unlock time, such as one logged in before locks existed, starts one now.
+func (c *CLI) checkVaultLock(st store, server, path, key string) (string, error) {
+	cfg, err := st.config()
+	if err != nil || !slices.Contains(cfg.Servers, server) {
+		return key, err
+	}
+	lock := cfg.lock(server)
+	after, err := parseLockAfter(lock.After)
+	if err != nil || key != "" && after == 0 {
+		return key, err
+	}
+	now := time.Now()
+	if key != "" && lock.Until.IsZero() {
+		lock.Until = now.Add(after)
+		cfg.setLock(server, lock)
+		return key, st.saveConfig(cfg)
+	}
+	if key != "" && now.Before(lock.Until) {
+		return key, nil
+	}
+	if key != "" {
+		if err := st.removeToken(server); err != nil {
+			return "", err
+		}
+	}
+	if !local.Exists(path) {
+		return "", fmt.Errorf("vault %s not found", path)
+	}
+	b, _, err := c.unlockVault(path, false)
+	if errors.Is(err, errNoTerminal) {
+		return "", fmt.Errorf("vault %s is locked; run servers login --server %s", path, server)
+	}
+	if err != nil {
+		return "", err
+	}
+	key = base64.StdEncoding.EncodeToString(b)
+	if _, err := st.saveToken(server, key); err != nil {
+		return "", err
+	}
+	lock.Until = unlockedUntil(after)
+	cfg.setLock(server, lock)
+	return key, st.saveConfig(cfg)
+}
+
+// unlockedUntil returns when an unlock starting now ends, zero when after is
+// 0 (never).
+func unlockedUntil(after time.Duration) time.Time {
+	if after == 0 {
+		return time.Time{}
+	}
+	return time.Now().Add(after)
 }

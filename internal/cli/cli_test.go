@@ -1107,3 +1107,82 @@ func TestClearIfUnchanged(t *testing.T) {
 		}
 	}
 }
+
+func TestVaultLock(t *testing.T) {
+	h := newHarness(t)
+	h.envURL, h.envToken = "", ""
+	path := filepath.Join(t.TempDir(), "vault.json")
+	vault := "file://" + path
+	pass := map[string]string{"Passphrase for " + path + ": ": "vault-passphrase", "Repeat the passphrase: ": "vault-passphrase"}
+	locked := func(args ...string) {
+		t.Helper()
+		h.prompts = nil
+		if code := h.run(args...); code != 1 || !strings.Contains(h.stderr.String(), "is locked; run servers login --server "+vault) {
+			t.Fatalf("%v: want locked, exit %d, stderr: %s", args, code, h.stderr.String())
+		}
+	}
+	unlocked := func(args ...string) {
+		t.Helper()
+		h.prompts = nil
+		h.mustRun(args...)
+	}
+
+	h.prompts = pass
+	if got := h.mustRun("servers", "login", "--server", vault); !strings.Contains(got, ", locks at ") {
+		t.Fatalf("login: %q", got)
+	}
+	unlocked("set", "--path", "/tools", "A=1")
+
+	h.prompts = pass
+	h.mustRun("servers", "login", "--server", vault, "--lock-after", "1ns")
+	locked("get", "--path", "/tools", "A")
+	locked("get", "--path", "/tools", "A")
+	h.prompts = pass
+	if got := h.mustRun("get", "--path", "/tools", "A"); got != "1\n" {
+		t.Fatalf("get after unlock prompt: %q", got)
+	}
+
+	h.prompts = pass
+	if got := h.mustRun("servers", "login", "--server", vault, "--lock-after", "never"); !strings.Contains(got, ", never locks") {
+		t.Fatalf("login never: %q", got)
+	}
+	unlocked("get", "--path", "/tools", "A")
+	h.prompts = pass
+	h.mustRun("servers", "login", "--server", vault)
+	unlocked("get", "--path", "/tools", "A")
+	h.mustRun("servers", "lock")
+	locked("get", "--path", "/tools", "A")
+	h.prompts = pass
+	h.mustRun("get", "--path", "/tools", "A")
+
+	st := store{dir: h.dir}
+	cfg, err := st.config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Locks[vault].After; got != "never" {
+		t.Fatalf("lock-after kept on later logins: %q", got)
+	}
+	cfg.Locks = nil
+	if err := st.saveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	unlocked("get", "--path", "/tools", "A")
+	if cfg, _ = st.config(); cfg.Locks[vault].After != "8h0m0s" || cfg.Locks[vault].Until.IsZero() {
+		t.Fatalf("login from before locks gets the default: %+v", cfg.Locks[vault])
+	}
+
+	if code := h.run("servers", "login", "--server", vault, "--lock-after", "soon"); code != 2 {
+		t.Fatalf("bad --lock-after: exit %d", code)
+	}
+	if code := h.run("servers", "login", "--server", h.url, "--lock-after", "1h"); code != 2 || !strings.Contains(h.stderr.String(), "only applies to a local vault") {
+		t.Fatalf("--lock-after on a remote server: exit %d, stderr: %s", code, h.stderr.String())
+	}
+	if code := h.run("servers", "lock", "--server", h.url); code != 2 {
+		t.Fatalf("servers lock on a remote server: exit %d", code)
+	}
+	h.mustRun("servers", "logout")
+	if cfg, _ = st.config(); len(cfg.Locks) != 0 {
+		t.Fatalf("logout keeps the lock: %+v", cfg.Locks)
+	}
+}
