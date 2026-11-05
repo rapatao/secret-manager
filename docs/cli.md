@@ -37,6 +37,8 @@ secret-manager backup --history --output backup.json  # every path and its versi
 secret-manager restore backup.json                     # prompts for the passphrase of an encrypted backup
 SECRET_MANAGER_BACKUP_PASSPHRASE=... secret-manager backup    # passphrase from the environment, no prompt
 secret-manager backup --no-encrypt                     # every value in plain text
+secret-manager scan --path /tools                      # files in the current directory holding a value, see Scan
+secret-manager scan --path /tools --history src        # also lines added under src in every git commit
 secret-manager version                                 # client and server versions, server capabilities
 secret-manager ui                                      # open the Web UI of the default server
 ```
@@ -88,6 +90,21 @@ The file holds no secrets. To keep it out of a repository without changing its `
 ## Clipboard
 
 `get --clip KEY` copies one value to the clipboard instead of printing it. After 60 seconds a background process clears the clipboard, unless it holds something else by then. It uses `pbcopy` on macOS, `clip` on Windows, and `wl-copy` (Wayland) or `xclip` on Linux.
+
+## Scan
+
+`scan [FILE|DIR...]` reports every file holding a secret value of `--path`, with `--recursive` of every path under it, each value checked under its own path. It reads the current directory when no file or directory is given, walks directories without following symlinks, and skips `.git` directories and binary files (a NUL byte in the first 8000 bytes). Values with a line break match across lines.
+
+```sh
+$ secret-manager scan --path /tools
+deploy/values.yaml:12: /tools GITHUB_TOKEN
+$ secret-manager scan --path /tools --history
+3f2a9c1e07b4:deploy/values.yaml:12: /tools GITHUB_TOKEN
+```
+
+Each finding prints as `FILE:LINE: PATH KEY`; values are never printed. `--history` also runs `git log --all -p` in the current directory and checks the lines each commit added, printed as `COMMIT:FILE:LINE: PATH KEY` with the first 12 characters of the commit hash; given files and directories limit it to those paths. `--json` prints the findings as a JSON array of objects with `file`, `line`, `path`, `key` and, for commits, `commit`, `[]` when none are found.
+
+Values shorter than `--min-length` characters (default 8) are not looked for, and their paths and keys are listed on stderr; `--min-length 1` checks every value, including ones like `1` or `true` that match most files. `scan` exits with 1 when it finds a value, 0 otherwise, so it can run in a pre-commit hook or CI. A value found in history stays in the repository until the history is rewritten; rotate it with `set`.
 
 ## Resolution order
 

@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -1204,5 +1205,113 @@ func TestWriteAtomicKeepsSymlink(t *testing.T) {
 	}
 	if got, err := os.ReadFile(target); err != nil || string(got) != "new\n" {
 		t.Fatalf("target = %q, %v", got, err)
+	}
+}
+
+func TestScanFiles(t *testing.T) {
+	h := newHarness(t)
+	h.workdir = t.TempDir()
+	h.mustRun("set", "--path", "/app", "TOKEN=s3cr3t-token-value", "PEM=line-one\nline-two", "FLAG=1")
+	write := func(name, content string) {
+		t.Helper()
+		p := filepath.Join(h.workdir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("clean.txt", "nothing here 1\n")
+	write("src/config.yaml", "a: 1\ntoken: s3cr3t-token-value\nkey: |\nline-one\nline-two\n")
+	write("bin.dat", "\x00s3cr3t-token-value")
+	write(".git/config", "s3cr3t-token-value")
+
+	if code := h.run("scan", "--path", "/app"); code != 1 {
+		t.Fatalf("exit %d, stderr: %s", code, h.stderr.String())
+	}
+	want := "src/config.yaml:2: /app TOKEN\nsrc/config.yaml:4: /app PEM\n"
+	if got := h.stdout.String(); got != want {
+		t.Fatalf("stdout:\n%s\nwant:\n%s", got, want)
+	}
+	if !strings.Contains(h.stderr.String(), "not scanning values shorter than 8 characters (--min-length):\n  /app FLAG\n") {
+		t.Fatalf("stderr: %q", h.stderr.String())
+	}
+
+	write("flag.txt", "enabled: 1\n")
+	if code := h.run("scan", "--path", "/app", "--min-length", "1", "flag.txt"); code != 1 || h.stdout.String() != "flag.txt:1: /app FLAG\n" {
+		t.Fatalf("--min-length 1: exit %d, stdout %q", code, h.stdout.String())
+	}
+	if code := h.run("scan", "--path", "/app", "--min-length", "0"); code != 2 {
+		t.Fatalf("--min-length 0: exit %d", code)
+	}
+
+	if code := h.run("scan", "--path", "/app", "--json", "src"); code != 1 {
+		t.Fatalf("json exit %d", code)
+	}
+	if !strings.Contains(h.stdout.String(), `"file": "src/config.yaml"`) || strings.Contains(h.stdout.String(), "s3cr3t") {
+		t.Fatalf("json: %s", h.stdout.String())
+	}
+
+	if got := h.mustRun("scan", "--path", "/app", "clean.txt"); got != "" {
+		t.Fatalf("clean stdout: %q", got)
+	}
+	if got := h.mustRun("scan", "--path", "/app", "--json", "clean.txt"); got != "[]\n" {
+		t.Fatalf("clean json: %q", got)
+	}
+}
+
+func TestScanRecursiveNamesPaths(t *testing.T) {
+	h := newHarness(t)
+	h.workdir = t.TempDir()
+	h.mustRun("set", "--path", "/app", "TOKEN=parent-token-value", "USER=bob")
+	h.mustRun("set", "--path", "/app/db", "TOKEN=nested-token-value")
+	if err := os.WriteFile(filepath.Join(h.workdir, "a.txt"), []byte("parent-token-value\nnested-token-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := h.run("scan", "--path", "/app", "--recursive"); code != 1 {
+		t.Fatalf("exit %d, stderr: %s", code, h.stderr.String())
+	}
+	if got, want := h.stdout.String(), "a.txt:1: /app TOKEN\na.txt:2: /app/db TOKEN\n"; got != want {
+		t.Fatalf("stdout:\n%s\nwant:\n%s", got, want)
+	}
+	if !strings.Contains(h.stderr.String(), "  /app USER\n") {
+		t.Fatalf("stderr: %q", h.stderr.String())
+	}
+}
+
+func TestScanHistory(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	h := newHarness(t)
+	h.workdir = t.TempDir()
+	h.mustRun("set", "--path", "/app", "TOKEN=s3cr3t-token-value")
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", h.workdir, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	if err := os.WriteFile(filepath.Join(h.workdir, "app.env"), []byte("A=x\nB=y\nTOKEN=s3cr3t-token-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
+	git("commit", "-qm", "leak")
+	if err := os.WriteFile(filepath.Join(h.workdir, "app.env"), []byte("A=x\nB=y\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git("commit", "-qam", "remove")
+
+	if got := h.mustRun("scan", "--path", "/app"); got != "" {
+		t.Fatalf("tree stdout: %q", got)
+	}
+	if code := h.run("scan", "--path", "/app", "--history"); code != 1 {
+		t.Fatalf("history exit %d, stderr: %s", code, h.stderr.String())
+	}
+	if got := h.stdout.String(); !strings.HasSuffix(got, ":app.env:3: /app TOKEN\n") || strings.Count(got, "\n") != 1 {
+		t.Fatalf("history stdout: %q", got)
 	}
 }

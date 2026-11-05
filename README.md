@@ -6,6 +6,7 @@ A small, self-hosted key-value secret manager for Kubernetes.
 - A `SecretSync` resource syncs one or more paths into Kubernetes Secrets, in any namespace, optionally shaped with Go templates.
 - Deployments, StatefulSets and DaemonSets that opt in are restarted when a Secret they use changes.
 - `secret-manager run` injects secrets as environment variables into local commands, masks their values in the command's output, and keeps working from an encrypted cache while the server is unreachable.
+- `secret-manager scan` finds secret values leaked into files and, optionally, into git history.
 - A `.secret-manager` file in a directory sets the default path and server for commands run there, and `get --clip` copies a value to the clipboard, cleared after 60 seconds.
 - Every write is kept as a version, so a path can be inspected or rolled back, even after it is deleted. A version holding a leaked value can be deleted.
 - `secret-manager backup` and `restore` copy every path, optionally with its versions, to and from a JSON file, optionally encrypted.
