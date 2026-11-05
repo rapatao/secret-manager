@@ -18,12 +18,12 @@ import (
 )
 
 // unlockVault returns the key of the vault at path, creating the vault when
-// missing. The passphrase is read from the first line of stdin when fromStdin,
-// else prompted for on the terminal.
+// missing. The passphrase is read from the first line of stdin when fromStdin
+// and stdin is not a terminal, else prompted for on the terminal.
 func (c *CLI) unlockVault(path string, fromStdin bool) (key []byte, created bool, err error) {
 	create := !local.Exists(path)
 	var passphrase string
-	if fromStdin {
+	if fromStdin && !c.stdinIsTerminal() {
 		if passphrase, err = c.readToken(); err != nil {
 			return nil, false, err
 		}
@@ -60,8 +60,8 @@ func (c *CLI) prompt(label string) (string, error) {
 	if c.Prompt != nil {
 		return c.Prompt(label)
 	}
-	f, ok := c.Stdin.(*os.File)
-	if !ok || !term.IsTerminal(int(f.Fd())) {
+	f, _ := c.Stdin.(*os.File)
+	if !c.stdinIsTerminal() {
 		tty, err := os.Open("/dev/tty")
 		if err != nil {
 			return "", errNoTerminal
@@ -73,6 +73,11 @@ func (c *CLI) prompt(label string) (string, error) {
 	b, err := term.ReadPassword(int(f.Fd()))
 	fmt.Fprintln(c.Stderr)
 	return string(b), err
+}
+
+func (c *CLI) stdinIsTerminal() bool {
+	f, ok := c.Stdin.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd()))
 }
 
 func (c *CLI) ui(ctx context.Context, args []string) error {
