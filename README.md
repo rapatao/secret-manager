@@ -1,9 +1,13 @@
 # secret-manager
 
-A small, self-hosted key-value secret manager for Kubernetes.
+A small, self-hosted key-value secret manager. It runs in three modes:
+
+- **Kubernetes**: the server stores secrets as Kubernetes Secrets and its controller syncs them into your workloads. See [Install](docs/install.md).
+- **Standalone server**: the server runs anywhere with the `file` storage backend, without Kubernetes. See [Without Kubernetes](docs/install.md#without-kubernetes).
+- **Local vault**: the CLI and Web UI read an encrypted file on your machine, with no server. See [Local vault](docs/local-vault.md).
 
 - Secrets are organized by path (`/kubernetes/app`, `/tools`) and managed with a CLI or a Web UI.
-- A `SecretSync` resource syncs one or more paths into Kubernetes Secrets, in any namespace, optionally shaped with Go templates.
+- On Kubernetes, a `SecretSync` resource syncs one or more paths into Kubernetes Secrets, in any namespace, optionally shaped with Go templates.
 - Deployments, StatefulSets and DaemonSets that opt in are restarted when a Secret they use changes.
 - `secret-manager run` injects secrets as environment variables into local commands, masks their values in the command's output, and keeps working from an encrypted cache while the server is unreachable.
 - `secret-manager scan` finds secret values leaked into files and, optionally, into git history.
@@ -14,27 +18,27 @@ A small, self-hosted key-value secret manager for Kubernetes.
 - Changes, sign-ins and failed authentications are written to an audit log and kept on the Web UI Audit page; reads and listings can be logged too, per [event category](docs/observability.md#event-categories).
 - A [local vault](docs/local-vault.md) keeps secrets in an encrypted file on your machine, used by the CLI and Web UI without running a server. It locks 8 hours after it is unlocked, and asks for the passphrase again.
 
-One binary contains the controller, the REST API, the Web UI and the CLI. The controller is optional, with the `file` storage backend the server runs without Kubernetes, and with a local vault no server runs at all.
+One binary contains the controller, the REST API, the Web UI and the CLI.
 
 ## Compared to other tools
 
 | | secret-manager | [External Secrets Operator](https://external-secrets.io) | [Infisical](https://infisical.com) | [Sealed Secrets](https://github.com/bitnami-labs/sealed-secrets) |
 |---|---|---|---|---|
-| Stores secrets | Yes, as Kubernetes Secrets | No, reads an external store (Vault, cloud providers, ...) | Yes, in PostgreSQL | Encrypted in git |
+| Stores secrets | Yes, as Kubernetes Secrets or in a JSON file | No, reads an external store (Vault, cloud providers, ...) | Yes, in PostgreSQL | Encrypted in git |
 | Extra components | None | The external store | PostgreSQL and Redis | None |
 | Web UI and CLI | Yes | No | Yes | CLI to encrypt (`kubeseal`) |
 | Users, roles, environments | No, one admin token for the Web UI plus integration tokens scoped to a path | From the external store | Yes | Git permissions |
 | Secret history | Yes, last N versions per path | From the external store | Yes | Git history |
 | Restarts workloads on change | Yes | No, needs a tool like Reloader | Yes | No |
 
-Choose secret-manager for a small cluster where one person or a small team manages the secrets and running a database for them is not worth it. Choose External Secrets Operator if you already have a secret store, Infisical if you need users and environments, and Sealed Secrets if secrets must live in git.
+Choose secret-manager for a small cluster or a single machine where one person or a small team manages the secrets and running a database for them is not worth it. Choose External Secrets Operator if you already have a secret store, Infisical if you need users and environments, and Sealed Secrets if secrets must live in git.
 
 ## How it works
 
 ```
-CLI / Web UI --HTTP--> secret-manager server --> storage backend (Kubernetes Secrets)
+CLI / Web UI --HTTP--> secret-manager server --> storage backend (Kubernetes Secrets or file)
                               |
-                              +--> controller --> target Secrets --> workload restarts
+                              +--> controller (Kubernetes only) --> target Secrets --> workload restarts
 ```
 
 Writes made through the API reach target Secrets immediately. Every `SecretSync` also resyncs on its `refreshInterval`, which repairs drift and picks up changes made directly on the store.
