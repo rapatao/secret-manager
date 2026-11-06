@@ -1,6 +1,6 @@
 # CLI
 
-Install the CLI with Go, or build it with `make build`. A `go install` build reports its version as `dev`; `make build` uses `git describe`:
+Install the CLI with Go, or build it with `make build`. A `go install` build reports the module version it installed; `make build` uses `git describe`:
 
 ```sh
 go install github.com/rapatao/secret-manager/cmd/secret-manager@latest
