@@ -1,5 +1,9 @@
 # Install
 
+The server runs on Kubernetes with the Helm chart, or [without Kubernetes](#without-kubernetes) from the binary or the container image. A [local vault](local-vault.md) needs only the CLI and no server.
+
+## Kubernetes
+
 Create the admin token (at least 32 characters) that signs in to the Web UI, then install the chart:
 
 ```sh
@@ -32,7 +36,9 @@ export SECRET_MANAGER_TOKEN="$(openssl rand -base64 36)"
 secret-manager server --storage=file --file=/var/lib/secret-manager/store.json --controller=false
 ```
 
-The CLI, Web UI, history and backups work the same; `SecretSync` is not available.
+Install the binary as described in [CLI](cli.md), or run the image `ghcr.io/rapatao/secret-manager` with the same arguments after its `server` command. The image runs as user `65532`, so the directory holding `--file` must be writable by that user. See [Storage](storage.md#storage) for the `file` backend.
+
+The CLI, Web UI, history and backups work the same; `SecretSync` and workload restarts are not available. The Web UI session cookie is `Secure`, so serve the server over HTTPS, through a reverse proxy with TLS, or open it on `localhost`.
 
 ## Server flags
 

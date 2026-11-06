@@ -42,6 +42,6 @@ Audit
 
 The server rejects every change made without its confirmation, or with one that does not match. Filtering paths, editing keys, the copy button and the integration dialogs need JavaScript; browsers without invoker commands (`commandfor`) also use it to open the dialogs.
 
-After 5 failed sign-ins from one address, each further attempt from it must wait 1 second, then 2, 4 and so on up to 1 minute, and gets `429` with `too many failed sign-ins, try again in Ns` until then. A successful sign-in, or 15 minutes without a failure, resets the count. The address is the [client address](client-address.md): without trusted proxies, every client behind an Ingress shares the Ingress address, so the wait never exceeds 1 minute. The counts live in the server's memory.
+After 5 failed sign-ins from one address, each further attempt from it must wait 1 second, then 2, 4 and so on up to 1 minute, and gets `429` with `too many failed sign-ins, try again in Ns` until then. A successful sign-in, or 15 minutes without a failure, resets the count. The address is the [client address](client-address.md): without trusted proxies, every client behind a reverse proxy or Ingress shares the proxy address, so the wait never exceeds 1 minute. The counts live in the server's memory.
 
-Sessions last 12 hours and survive server restarts; changing the admin token signs every session out. Signing out deletes the session cookie in the browser. The session cookie is `Secure`: use HTTPS (an Ingress with TLS) or `localhost`.
+Sessions last 12 hours and survive server restarts; changing the admin token signs every session out. Signing out deletes the session cookie in the browser. The session cookie is `Secure`: use HTTPS (a reverse proxy or Ingress with TLS) or `localhost`.

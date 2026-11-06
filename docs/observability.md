@@ -2,7 +2,7 @@
 
 ## Metrics
 
-Prometheus metrics are served on `:8081/metrics` (`--metrics-addr`, `0` disables them) and exposed on the Service port `metrics`. Besides the controller-runtime and Go runtime metrics (`controller_runtime_reconcile_total`, `workqueue_depth`, ...), the server exports:
+Prometheus metrics are served on `:8081/metrics` (`--metrics-addr`, `0` disables them) and, in the chart, exposed on the Service port `metrics`. Besides the controller-runtime and Go runtime metrics (`controller_runtime_reconcile_total`, `workqueue_depth`, ...), the server exports:
 
 | Metric | Description |
 |--------|-------------|
@@ -24,7 +24,7 @@ Changes, backups, sign-ins, CLI logins and failed authentications are logged as 
 {"level":"WARN","msg":"audit","source":"ui","op":"login","remote":"10.42.0.7:51240","error":"invalid token"}
 ```
 
-Requests made with an integration token carry its name in `token`. `client` is the [client address](client-address.md) when trusted proxies resolve one that differs from `remote`. Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your Ingress. Audited events are also kept on the Web UI [Audit](web-ui.md) page, which shows the newest 500, and saved in storage.
+Requests made with an integration token carry its name in `token`. `client` is the [client address](client-address.md) when trusted proxies resolve one that differs from `remote`. Key names are logged, values never are. Failed operations are logged at `WARN` with `error`. `forwarded_for` is the client supplied `X-Forwarded-For` header and is only as trustworthy as your reverse proxy or Ingress. Audited events are also kept on the Web UI [Audit](web-ui.md) page, which shows the newest 500, and saved in storage.
 
 ### Event categories
 

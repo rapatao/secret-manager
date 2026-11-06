@@ -19,7 +19,7 @@ kubectl -n secret-manager create secret generic secret-manager-encryption \
   --from-literal=key="$(openssl rand -base64 32)"
 ```
 
-The API, the Web UI, `SecretSync` targets and backups still see plain values. On start, the server encrypts every path and version still holding a plaintext value. Values written with a key cannot be read without it: a server started without the key, or with another one, answers `500` for them and logs the path and key. Keep a copy of the key outside the cluster; losing it loses the data.
+The API, the Web UI, `SecretSync` targets and backups still see plain values. On start, the server encrypts every path and version still holding a plaintext value. Values written with a key cannot be read without it: a server started without the key, or with another one, answers `500` for them and logs the path and key. Keep a copy of the key apart from the stored data; losing it loses the data.
 
 To rotate the key, set the new key in `SECRET_MANAGER_ENCRYPTION_KEY` and the old one in `SECRET_MANAGER_PREVIOUS_ENCRYPTION_KEY`, then restart the server. Reads accept values encrypted with either key. On start, the server rewrites every path and version encrypted with the previous key, or still plaintext, with the new key, and logs them as `encrypted stored values with the current key`. Values that neither key decrypts are left as they are and logged as `stored values not readable with the encryption keys`. Once the server has started with both keys and that warning is absent, remove the previous key. In the chart, add the old key to the same Secret and set `encryption.previousKey` to its key name:
 
