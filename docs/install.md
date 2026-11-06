@@ -38,6 +38,15 @@ secret-manager server --storage=file --file=/var/lib/secret-manager/store.json -
 
 Install the binary as described in [CLI](cli.md), or run the image `ghcr.io/rapatao/secret-manager` with the same arguments after its `server` command. The image runs as user `65532`, so the directory holding `--file` must be writable by that user. See [Storage](storage.md#storage) for the `file` backend.
 
+To store secrets in PostgreSQL instead of a file:
+
+```sh
+export SECRET_MANAGER_DATABASE_URL="postgres://secret-manager:PASSWORD@db.example.com:5432/secrets?sslmode=verify-full"
+secret-manager server --storage=postgres --controller=false
+```
+
+See [Storage](storage.md#storage) for the `postgres` backend.
+
 The CLI, Web UI, history and backups work the same; `SecretSync` and workload restarts are not available. The Web UI session cookie is `Secure`, so serve the server over HTTPS, through a reverse proxy with TLS, or open it on `localhost`.
 
 ## Server flags
@@ -48,7 +57,7 @@ The chart sets these; set them yourself when running `secret-manager server` out
 |------|---------|-------------|
 | `--addr` | `:8080` | Listen address of the API and Web UI |
 | `--metrics-addr` | `:8081` | Listen address of the Prometheus metrics, `0` disables them |
-| `--storage` | `kubernetes` | Storage backend: `kubernetes` or `file` |
+| `--storage` | `kubernetes` | Storage backend: `kubernetes`, `file` or `postgres` |
 | `--namespace` | `$POD_NAMESPACE` | Namespace holding the stored secrets and their versions (`kubernetes` storage) |
 | `--file` | `secret-manager.json` | File holding the stored secrets and their versions (`file` storage) |
 | `--controller` | `true` | Run the `SecretSync` controller. Requires access to a cluster |
@@ -63,4 +72,4 @@ The chart sets these; set them yourself when running `secret-manager server` out
 | `--backup-history` | `false` | Include versions in scheduled backups |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error` |
 
-The Web UI admin token is read from `SECRET_MANAGER_TOKEN`, the optional [encryption](storage.md#encryption) key from `SECRET_MANAGER_ENCRYPTION_KEY`, the key being rotated out from `SECRET_MANAGER_PREVIOUS_ENCRYPTION_KEY`, and the optional [backup](backup.md#scheduled-backups) passphrase from `SECRET_MANAGER_BACKUP_PASSPHRASE`.
+The Web UI admin token is read from `SECRET_MANAGER_TOKEN`, the optional [encryption](storage.md#encryption) key from `SECRET_MANAGER_ENCRYPTION_KEY`, the key being rotated out from `SECRET_MANAGER_PREVIOUS_ENCRYPTION_KEY`, the optional [backup](backup.md#scheduled-backups) passphrase from `SECRET_MANAGER_BACKUP_PASSPHRASE`, and the `postgres` storage connection URL from `SECRET_MANAGER_DATABASE_URL`.

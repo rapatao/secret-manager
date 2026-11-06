@@ -4,6 +4,7 @@ go 1.27.3
 
 require (
 	github.com/go-logr/logr v1.4.3
+	github.com/jackc/pgx/v5 v5.12.0
 	github.com/prometheus/client_golang v1.24.0
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/crypto v0.58.0
@@ -43,6 +44,9 @@ require (
 	github.com/google/gnostic-models v0.7.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/jackc/puddle/v2 v2.2.3 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
