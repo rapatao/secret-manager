@@ -3,7 +3,7 @@
 A small, self-hosted key-value secret manager. It runs in three modes:
 
 - **Kubernetes**: the server stores secrets as Kubernetes Secrets and its controller syncs them into your workloads. See [Install](docs/install.md).
-- **Standalone server**: the server runs anywhere with the `file` storage backend, without Kubernetes. See [Without Kubernetes](docs/install.md#without-kubernetes).
+- **Standalone server**: the server runs anywhere with the `file` or `postgres` storage backend, without Kubernetes. See [Without Kubernetes](docs/install.md#without-kubernetes).
 - **Local vault**: the CLI and Web UI read an encrypted file on your machine, with no server. See [Local vault](docs/local-vault.md).
 
 - Secrets are organized by path (`/kubernetes/app`, `/tools`) and managed with a CLI or a Web UI.
@@ -24,7 +24,7 @@ One binary contains the controller, the REST API, the Web UI and the CLI.
 
 | | secret-manager | [External Secrets Operator](https://external-secrets.io) | [Infisical](https://infisical.com) | [Sealed Secrets](https://github.com/bitnami-labs/sealed-secrets) |
 |---|---|---|---|---|
-| Stores secrets | Yes, as Kubernetes Secrets or in a JSON file | No, reads an external store (Vault, cloud providers, ...) | Yes, in PostgreSQL | Encrypted in git |
+| Stores secrets | Yes, as Kubernetes Secrets, in a JSON file or in PostgreSQL | No, reads an external store (Vault, cloud providers, ...) | Yes, in PostgreSQL | Encrypted in git |
 | Extra components | None | The external store | PostgreSQL and Redis | None |
 | Web UI and CLI | Yes | No | Yes | CLI to encrypt (`kubeseal`) |
 | Users, roles, environments | No, one admin token for the Web UI plus integration tokens scoped to a path | From the external store | Yes | Git permissions |
@@ -36,7 +36,7 @@ Choose secret-manager for a small cluster or a single machine where one person o
 ## How it works
 
 ```
-CLI / Web UI --HTTP--> secret-manager server --> storage backend (Kubernetes Secrets or file)
+CLI / Web UI --HTTP--> secret-manager server --> storage backend (Kubernetes Secrets, file or PostgreSQL)
                               |
                               +--> controller (Kubernetes only) --> target Secrets --> workload restarts
 ```
