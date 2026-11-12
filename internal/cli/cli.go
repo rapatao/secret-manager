@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -70,7 +71,8 @@ const Usage = `Client commands:
   keys    --path P [--recursive]               list key names, without values; with
                                                --recursive, as PATH KEY for every
                                                nested path
-  get     --path P [--recursive] [KEY]         print one value, or all as dotenv
+  get     --path P [--recursive] [--prefer-cache] [KEY]
+                                               print one value, or all as dotenv
   get     --path P [--recursive] --clip KEY    copy one value to the clipboard,
                                                cleared after 60s if unchanged
   set     --path P [--env-file F|- | --json-file F|-] [--generate KEY[:LEN]...] [K=V...] [K...]
@@ -83,7 +85,9 @@ const Usage = `Client commands:
   delete  --path P (KEY... | --all)            delete keys, or the whole path
   copy    --path P --to Q                      copy a path and its history to a new path
   move    --path P --to Q                      move a path and its history to a new path
-  export  --path P [--recursive] [--format dotenv|json]
+  export  --path P [--recursive] [--prefer-cache] [--format dotenv|json|shell]
+                                               shell prints export lines for
+                                               eval "$(secret-manager export ...)"
   history --path P [VERSION]                   list versions, or print one as dotenv
   history --path P --diff VERSION [VERSION2]   list keys added (+), removed (-) or
                                                changed (~) since VERSION, up to
@@ -100,7 +104,7 @@ const Usage = `Client commands:
                                                decrypting it with the passphrase in
                                                $` + EnvBackupPassphrase + `
                                                or prompted for
-  run     --path P [--recursive] [--no-mask] [--min-length 1] -- CMD [ARGS...]
+  run     --path P [--recursive] [--prefer-cache] [--no-mask] [--min-length 1] -- CMD [ARGS...]
                                                run CMD with secrets as env vars; secret
                                                values in its output print as ***
                                                unless --no-mask; values shorter than
@@ -120,7 +124,9 @@ const Usage = `Client commands:
 get, export and run fall back to the last secrets read, kept encrypted for
 as long as the server allows (default 168h), when the server is unreachable.
 $` + EnvCacheMaxAge + ` can only lower that, 0 disables. servers logout
-removes them.
+removes them. With --prefer-cache they use cached secrets without waiting
+for the server and update the cache in the background; without a cached
+entry they read the server.
 
 Every command accepts --server URL. Without it, $` + EnvURL + `, the
 server= line of a ` + ProjectFile + ` file in the current directory, or the
@@ -152,6 +158,9 @@ type CLI struct {
 	// Clip copies a value to the clipboard for get --clip and clears it
 	// after ClipClearAfter.
 	Clip func(value string) error
+	// Refresh starts a detached secret-manager process with args, used by
+	// --prefer-cache to update the cache after printing cached secrets.
+	Refresh func(args []string) error
 	// Dir is the directory searched for ProjectFile, default the current
 	// directory.
 	Dir string
@@ -168,6 +177,7 @@ func Default() *CLI {
 		ConfigDir:   DefaultConfigDir(),
 		OpenBrowser: openBrowser,
 		Clip:        copyToClipboard,
+		Refresh:     startDetached,
 	}
 }
 
@@ -242,6 +252,7 @@ type flags struct {
 	server    string
 	path      string
 	recursive bool
+	cached    bool
 	needPath  bool
 	cli       *CLI
 	version   string
@@ -736,6 +747,7 @@ func (c *CLI) keys(ctx context.Context, args []string) error {
 
 func (c *CLI) get(ctx context.Context, args []string) error {
 	f := c.flags("get", true, true)
+	f.fs.BoolVar(&f.cached, "prefer-cache", false, preferCacheUsage)
 	clip := f.fs.Bool("clip", false, "copy the value of KEY to the clipboard instead of printing it")
 	api, err := f.parse(args)
 	if err != nil {
@@ -903,24 +915,47 @@ func (c *CLI) copyPath(move bool) func(context.Context, []string) error {
 
 func (c *CLI) export(ctx context.Context, args []string) error {
 	f := c.flags("export", true, true)
-	format := f.fs.String("format", "dotenv", "dotenv or json")
+	f.fs.BoolVar(&f.cached, "prefer-cache", false, preferCacheUsage)
+	format := f.fs.String("format", "dotenv", "dotenv, json or shell")
 	api, err := f.parse(args)
 	if err != nil {
 		return err
 	}
-	if *format != "dotenv" && *format != "json" {
+	if !slices.Contains([]string{"dotenv", "json", "shell"}, *format) {
 		return fmt.Errorf("%w: unknown format %q", errUsage, *format)
 	}
 	data, err := c.getSecrets(ctx, f, api, "")
 	if err != nil {
 		return err
 	}
-	if *format == "dotenv" {
+	switch *format {
+	case "dotenv":
 		return dotenv.Format(c.Stdout, data)
+	case "shell":
+		return c.formatShell(data)
 	}
 	enc := json.NewEncoder(c.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(data)
+}
+
+var shellName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// formatShell writes export lines for eval in a POSIX shell. Values are
+// single-quoted, where the shell expands nothing; a single quote in a value
+// ends the quoting, is escaped, and starts it again.
+// Keys that are not valid variable names are skipped with a warning.
+func (c *CLI) formatShell(data map[string]string) error {
+	for _, k := range slices.Sorted(maps.Keys(data)) {
+		if !shellName.MatchString(k) {
+			fmt.Fprintf(c.Stderr, "warning: skipping %s: not a valid shell variable name\n", k)
+			continue
+		}
+		if _, err := fmt.Fprintf(c.Stdout, "export %s='%s'\n", k, strings.ReplaceAll(data[k], "'", `'\''`)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *CLI) history(ctx context.Context, args []string) error {
@@ -1237,6 +1272,7 @@ func parseVersion(s string) (int, error) {
 
 func (c *CLI) run(ctx context.Context, args []string) error {
 	f := c.flags("run", true, true)
+	f.fs.BoolVar(&f.cached, "prefer-cache", false, preferCacheUsage)
 	noMask := f.fs.Bool("no-mask", false, "print secret values in the command's output instead of "+maskText)
 	minLength := f.fs.Int("min-length", 1, "print values shorter than this many characters instead of "+maskText)
 	api, err := f.parse(args)

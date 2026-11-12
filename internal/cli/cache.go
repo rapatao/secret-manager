@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -30,6 +31,8 @@ const (
 	defaultCacheMaxAge = 7 * 24 * time.Hour
 	cacheKeyAccount    = "offline-cache-key"
 )
+
+const preferCacheUsage = "use cached secrets without waiting for the server and update the cache in the background"
 
 // cache keeps the last secrets read from each server, path and recursive
 // flag, encrypted with AES-256-GCM. The key lives only in the OS keychain;
@@ -114,13 +117,10 @@ func (ch cache) save(server, path string, recursive bool, e cacheEntry, serverMa
 	if serverMaxAge != nil {
 		maxAge = min(maxAge, *serverMaxAge)
 	}
-	file, id := ch.entry(server, path, recursive)
 	if maxAge <= 0 {
-		if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		return nil
+		return ch.remove(server, path, recursive)
 	}
+	file, id := ch.entry(server, path, recursive)
 	aead, err := cacheAEAD(true)
 	if err != nil {
 		return nil //nolint:nilerr // no usable keychain disables the cache
@@ -167,6 +167,27 @@ func (ch cache) load(server, path string, recursive bool) (cacheEntry, bool) {
 	return e, true
 }
 
+func (ch cache) remove(server, path string, recursive bool) error {
+	file, _ := ch.entry(server, path, recursive)
+	if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// covers reports whether e, found by load, holds key, or the whole path when
+// key is empty.
+func (e cacheEntry) covers(found bool, key string) bool {
+	if !found {
+		return false
+	}
+	if key == "" {
+		return !e.Partial
+	}
+	_, ok := e.Data[key]
+	return ok
+}
+
 // clear removes every entry of server.
 func (ch cache) clear(server string) error {
 	return os.RemoveAll(ch.serverDir(server))
@@ -192,11 +213,21 @@ func unreachable(ctx context.Context, err error) bool {
 // getSecrets reads the secrets of f.path, or only key when it is not empty,
 // from the server and caches them. A key is merged into the cached path,
 // which keeps its read time so older values expire on schedule. When the
-// server is unreachable it falls back to the cache with a warning.
+// server is unreachable it falls back to the cache with a warning. With
+// --prefer-cache a cached entry is returned first and refreshed by a
+// background process.
 func (c *CLI) getSecrets(ctx context.Context, f *flags, api *client.Client, key string) (map[string]string, error) {
 	ch, err := c.cache()
 	if err != nil {
 		return nil, err
+	}
+	if f.cached {
+		if e, ok := ch.load(f.server, f.path, f.recursive); e.covers(ok, key) {
+			if err := c.Refresh(refreshArgs(f, key)); err != nil {
+				fmt.Fprintln(c.Stderr, "warning: cache not refreshed:", err)
+			}
+			return e.Data, nil
+		}
 	}
 	data, serverMaxAge, err := api.Read(ctx, f.path, key, f.recursive)
 	if err == nil {
@@ -216,10 +247,38 @@ func (c *CLI) getSecrets(ctx context.Context, f *flags, api *client.Client, key 
 		return nil, err
 	}
 	e, ok := ch.load(f.server, f.path, f.recursive)
-	if _, has := e.Data[key]; !ok || (key == "" && e.Partial) || (key != "" && !has) {
+	if !e.covers(ok, key) {
 		return nil, err
 	}
 	fmt.Fprintf(c.Stderr, "warning: %s unreachable (%v); using secrets cached at %s\n",
 		f.server, err, e.Time.Format(time.RFC3339))
 	return e.Data, nil
+}
+
+// refreshArgs is the get command that reads what f and key read from the
+// server, so its successful read updates the cache.
+func refreshArgs(f *flags, key string) []string {
+	args := []string{"get", "--server", f.server, "--path", f.path}
+	if f.recursive {
+		args = append(args, "--recursive")
+	}
+	if key != "" {
+		args = append(args, "--", key)
+	}
+	return args
+}
+
+// startDetached starts secret-manager with args and does not wait for it.
+// Its stdio is the null device, so a shell reading the parent's output
+// through a pipe does not wait for it either.
+func startDetached(args []string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(exe, args...) //nolint:gosec // re-runs this binary with arguments it built
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
 }
