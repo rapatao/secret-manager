@@ -57,6 +57,7 @@ type harness struct {
 	browser  func(string) error
 	prompts  map[string]string
 	clipped  []string
+	refresh  [][]string
 }
 
 func (h *harness) prompt(label string) (string, error) {
@@ -103,6 +104,7 @@ func (h *harness) run(args ...string) int {
 		Prompt:      h.prompt,
 		Dir:         h.workdir,
 		Clip:        h.clip,
+		Refresh:     func(args []string) error { h.refresh = append(h.refresh, args); return nil },
 	}
 	return c.Run(context.Background(), args)
 }
@@ -763,6 +765,90 @@ func TestOfflineCache(t *testing.T) {
 	h.env[EnvCacheMaxAge] = "soon"
 	if code := h.run("get", "--path", "/tools", "A"); code != 2 {
 		t.Fatalf("invalid max age: exit %d", code)
+	}
+}
+
+func TestPreferCache(t *testing.T) {
+	keyring.MockInit()
+	h := newHarness(t)
+	h.mustRun("set", "--path", "/tools", "A=1")
+	h.mustRun("set", "--path", "/keys", "A=1", "B=2")
+
+	if got := h.mustRun("get", "--path", "/tools", "--prefer-cache"); got != "A=\"1\"\n" || h.refresh != nil {
+		t.Fatalf("uncached path must read the server without refresh: %q %v", got, h.refresh)
+	}
+	h.mustRun("set", "--path", "/tools", "A=2")
+	if got := h.mustRun("export", "--path", "/tools", "--prefer-cache"); got != "A=\"1\"\n" {
+		t.Fatalf("cached export: %q", got)
+	}
+	if got := h.mustRun("run", "--path", "/tools", "--prefer-cache", "--no-mask", "--", "sh", "-c", "echo $A"); got != "1\n" {
+		t.Fatalf("cached run: %q", got)
+	}
+	want := []string{"get", "--server", h.url, "--path", "/tools"}
+	if len(h.refresh) != 2 || !slices.Equal(h.refresh[0], want) {
+		t.Fatalf("refresh args: %q", h.refresh)
+	}
+	h.mustRun(h.refresh[0]...)
+	if got := h.mustRun("get", "--path", "/tools", "--prefer-cache", "A"); got != "2\n" {
+		t.Fatalf("after refresh: %q", got)
+	}
+	if want := append(want, "--", "A"); !slices.Equal(h.refresh[2], want) {
+		t.Fatalf("key refresh args: %q", h.refresh[2])
+	}
+
+	h.refresh = nil
+	h.mustRun("get", "--path", "/keys", "A")
+	h.mustRun("set", "--path", "/keys", "A=3")
+	if got := h.mustRun("get", "--path", "/keys", "--prefer-cache"); got != "A=\"3\"\nB=\"2\"\n" || h.refresh != nil {
+		t.Fatalf("partial entry used for whole path: %q %v", got, h.refresh)
+	}
+	if code := h.run("get", "--path", "/keys", "--prefer-cache", "C"); code != 1 || h.refresh != nil {
+		t.Fatalf("uncached key must read the server: exit %d, refresh %v", code, h.refresh)
+	}
+}
+
+func TestExportShell(t *testing.T) {
+	h := newHarness(t)
+	values := map[string]string{
+		"BACKTICK":  "`touch pwned`",
+		"DOLLAR":    "$(touch pwned) $HOME ${HOME}",
+		"QUOTES":    `it's "quoted" ''`,
+		"SLASH":     `a\b\n\`,
+		"MULTILINE": "one\ntwo\n",
+		"EMPTY":     "",
+	}
+	args := []string{"set", "--path", "/tools", "my-key=x"}
+	for k, v := range values {
+		args = append(args, k+"="+v)
+	}
+	h.mustRun(args...)
+	out := h.mustRun("export", "--path", "/tools", "--format", "shell")
+	if !strings.Contains(h.stderr.String(), "skipping my-key") || strings.Contains(out, "my-key") {
+		t.Fatalf("invalid name not skipped: %q, stderr %q", out, h.stderr.String())
+	}
+
+	keys := slices.Sorted(maps.Keys(values))
+	script := `eval "$1"; shift; for k; do eval "printf '%s\\0' \"\$$k\""; done`
+	for _, sh := range []string{"sh", "zsh", "bash"} {
+		if _, err := exec.LookPath(sh); err != nil {
+			continue
+		}
+		dir := t.TempDir()
+		cmd := exec.Command(sh, append([]string{"-c", script, sh, out}, keys...)...)
+		cmd.Dir = dir
+		got, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("%s: %v", sh, err)
+		}
+		parts := strings.Split(string(got), "\x00")
+		for i, k := range keys {
+			if parts[i] != values[k] {
+				t.Errorf("%s: %s = %q, want %q", sh, k, parts[i], values[k])
+			}
+		}
+		if _, err := os.Stat(filepath.Join(dir, "pwned")); err == nil {
+			t.Fatalf("%s: a value ran as a command", sh)
+		}
 	}
 }
 
