@@ -8,7 +8,9 @@ Storage is pluggable behind a small interface (`internal/storage.Backend`), sele
 
 `file`: every path, version, integration and kept audit event is in one JSON file (`--file`, mode `0600`), loaded into memory at start and rewritten atomically on every write.
 
-To add a backend (SQLite, Postgres, ...), implement `storage.Backend`, run `storagetest.Run` against it in its tests, and add a case to the `--storage` switch in `cmd/secret-manager/main.go`.
+`postgres`: paths, versions, integrations and kept audit events are rows in the tables `sm_paths`, `sm_versions`, `sm_tokens` and `sm_audit`, created on start when missing. Values are stored as `jsonb`, encrypted when an [encryption](#encryption) key is set. The connection URL is read from `SECRET_MANAGER_DATABASE_URL`, for example `postgres://secret-manager:PASSWORD@db.example.com:5432/secrets?sslmode=verify-full`; when it is unset, the standard `PG*` environment variables (`PGHOST`, `PGUSER`, `PGPASSWORD`, ...) are used. To keep the tables apart from other data in a shared database, add `search_path=SCHEMA` to the URL. The database user needs to create tables on the first start, then to read and write them. Back up the database with its own tools (`pg_dump`), or with [secret-manager backups](backup.md). The server still runs as a single replica.
+
+To add a backend, implement `storage.Backend`, run `storagetest.Run` against it in its tests, and add a case to the `--storage` switch in `cmd/secret-manager/main.go`.
 
 ## Encryption
 

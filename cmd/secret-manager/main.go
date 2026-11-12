@@ -33,6 +33,7 @@ import (
 	"github.com/rapatao/secret-manager/internal/storage/encrypted"
 	filestorage "github.com/rapatao/secret-manager/internal/storage/file"
 	k8sstorage "github.com/rapatao/secret-manager/internal/storage/kubernetes"
+	pgstorage "github.com/rapatao/secret-manager/internal/storage/postgres"
 	"github.com/rapatao/secret-manager/internal/tokens"
 )
 
@@ -50,12 +51,13 @@ func init() {
 const (
 	envEncryptionKey         = "SECRET_MANAGER_ENCRYPTION_KEY"
 	envPreviousEncryptionKey = "SECRET_MANAGER_PREVIOUS_ENCRYPTION_KEY"
+	envDatabaseURL           = "SECRET_MANAGER_DATABASE_URL"
 )
 
 const usage = `Usage: secret-manager <command> [flags]
 
 Server:
-  server [--addr :8080] [--metrics-addr :8081] [--storage kubernetes|file]
+  server [--addr :8080] [--metrics-addr :8081] [--storage kubernetes|file|postgres]
          [--namespace NS] [--file secret-manager.json] [--controller=true]
          [--history-limit 10] [--last-used-flush 30m] [--log-level info]
          [--trusted-proxies CIDR,...] [--events CATEGORY=LEVEL,...]
@@ -66,9 +68,11 @@ Server:
                                                optional encryption key from
                                                ` + envEncryptionKey + `, the key it
                                                replaces from
-                                               ` + envPreviousEncryptionKey + `, and
+                                               ` + envPreviousEncryptionKey + `,
                                                backup passphrase from
-                                               ` + cli.EnvBackupPassphrase + `)
+                                               ` + cli.EnvBackupPassphrase + `, and
+                                               postgres connection URL from
+                                               ` + envDatabaseURL + `)
 
 `
 
@@ -101,7 +105,7 @@ func runServer(args []string) error {
 	addr := fs.String("addr", ":8080", "listen address of the API and Web UI")
 	metricsAddr := fs.String("metrics-addr", ":8081", "listen address of the Prometheus metrics, 0 to disable")
 	namespace := fs.String("namespace", os.Getenv("POD_NAMESPACE"), "namespace holding the stored secrets (kubernetes storage)")
-	storageName := fs.String("storage", "kubernetes", "storage backend: kubernetes or file")
+	storageName := fs.String("storage", "kubernetes", "storage backend: kubernetes, file or postgres")
 	filePath := fs.String("file", "secret-manager.json", "file holding the stored secrets (file storage)")
 	runController := fs.Bool("controller", true, "run the SecretSync controller")
 	historyLimit := fs.Int("history-limit", 10, "versions kept per path, current included, 0 to disable history")
@@ -171,6 +175,13 @@ func runServer(args []string) error {
 		if backend, err = filestorage.New(*filePath); err != nil {
 			return fmt.Errorf("file storage: %w", err)
 		}
+	case "postgres":
+		pg, err := pgstorage.New(context.Background(), os.Getenv(envDatabaseURL))
+		if err != nil {
+			return fmt.Errorf("postgres storage: %w", err)
+		}
+		defer pg.Close()
+		backend = pg
 	default:
 		return fmt.Errorf("unknown storage %q", *storageName)
 	}
@@ -309,7 +320,7 @@ func newManager(metricsAddr string) (manager.Manager, error) {
 
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
-		return nil, fmt.Errorf("kubernetes config (run with --storage=file --controller=false to start without a cluster): %w", err)
+		return nil, fmt.Errorf("kubernetes config (run with --storage=file or --storage=postgres, and --controller=false, to start without a cluster): %w", err)
 	}
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:  scheme,
