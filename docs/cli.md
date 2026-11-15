@@ -23,6 +23,8 @@ secret-manager get --path /tools GITHUB_TOKEN          # only this key leaves th
 secret-manager get --path /tools --clip GITHUB_TOKEN   # copy to the clipboard, cleared after 60s
 secret-manager get --path /tools --recursive           # dotenv output
 secret-manager export --path /tools --format json
+secret-manager export --path /tools --format shell     # export lines for eval "$(...)"
+secret-manager export --path /tools --prefer-cache     # cached secrets now, refreshed in the background, see Offline cache
 secret-manager delete --path /tools OTHER
 secret-manager delete --path /tools --all
 secret-manager copy --path /tools --to /tools-backup   # data and history, see History
@@ -132,6 +134,15 @@ No command accepts the token as a flag.
 `get`, `export` and `run` keep the last secrets they read from each server, path and `--recursive` setting. `get KEY` reads only that key and merges it into the cached path, keeping the time the path was cached so older values still expire on time. A path cached only from `get KEY` serves those keys, not `get`, `export` or `run` of the whole path. When the server is unreachable (connection error, or a `502`, `503` or `504` from a reverse proxy or Ingress), they use the cached secrets and print a warning with the time they were read. Any other answer, such as `401` or `404`, is reported as an error and the cache is not used. Writes do not update the cache; the next successful read does.
 
 The server decides how long cached secrets may be used: the integration's offline cache setting, or the server's `--cache-max-age` (default 7 days). Each read returns that max age and the CLI stores it with the entry. A max age of `0` disables the cache for that integration: nothing is written, and the entry of the path read is removed. Servers that send no max age are treated as allowing 7 days.
+
+With `--prefer-cache`, `get`, `export` and `run` use a cached entry without waiting for the server, then start a background `get` of the same server, path and key that updates the cache, so the next call gets fresh secrets. The background process prints nothing; when it fails, the entry stays until its max age. Without a cached entry they read the server as usual. This keeps shell startup fast:
+
+```sh
+# ~/.zshrc or ~/.bashrc
+eval "$(secret-manager export --path /tools --prefer-cache --format shell)"
+```
+
+`--format shell` prints `export KEY='VALUE'` lines for POSIX shells such as sh, bash and zsh. Values are single-quoted, so no value is run as a command. Keys that are not valid variable names, such as `my-key`, are skipped with a warning.
 
 `SECRET_MANAGER_CACHE_MAX_AGE` can only lower the server's max age, as a Go duration (`24h`, `30m`); `0` disables the cache, so nothing is written or read. Expired entries are removed when found.
 
