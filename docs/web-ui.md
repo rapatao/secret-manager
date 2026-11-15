@@ -1,6 +1,6 @@
 # Web UI
 
-Open the server URL, or run `secret-manager ui`, and sign in with the admin token. A [local vault](local-vault.md) has its own Web UI served by `secret-manager ui`. The header shows the server version next to the name, which links to the summary, and links to Secrets (`/secrets`, the path list), Integrations, Audit and Sign out. The UI follows the system light or dark theme and adapts to narrow screens: on phones, the integrations, recent changes, keys and history tables show each row as a list of labeled fields. Every time is shown in UTC as `YYYY-MM-DD HH:MM UTC`.
+Open the server URL, or run `secret-manager ui`, and sign in with the admin token. A [local vault](local-vault.md) has its own Web UI served by `secret-manager ui`. The header shows the server version next to the name, which links to the summary, and links to Secrets (`/secrets`, the path list), Generate, Integrations, Audit and Sign out. The UI follows the system light or dark theme and adapts to narrow screens: on phones, the integrations, recent changes, keys and history tables show each row as a list of labeled fields. Every time is shown in UTC as `YYYY-MM-DD HH:MM UTC`.
 
 Summary
 - The main page counts paths, keys, deleted paths and stored versions.
@@ -32,6 +32,9 @@ History
 - Diff, on every version except the current one and those holding the same data, opens a dialog comparing the current data with that version, values included. Its Compare and with selectors at the top pick any source and target, the current data or a version, and changing either runs the comparison in the dialog: the keys added, changed and deleted between the two with their values. Unsaved key edits on the page are kept, and closing the dialog resets it. Without JavaScript, a Compare button reloads the page with the result above the version list and the pair in the URL (`&from=2&to=current`).
 - Each version can be deleted after a confirmation dialog.
 
+Generate
+- The Generate page (`/generate`) makes random values in the browser without saving them, in the formats of [`secret-manager generate`](cli.md#generating-values): a format, a length (bytes for hex and base64, none for UUID) and a count up to 100. Copy copies every value, one per line.
+
 Integrations and logins
 - The Integrations page manages [integrations](integrations.md). `/authorize` approves or denies CLI logins, see [Servers and login](cli.md#servers-and-login).
 
@@ -40,7 +43,7 @@ Audit
 - A filter shows only the events made with one integration's token or acting on that integration (created, updated, revoked, approved).
 - The server saves them to the storage backend every minute and on shutdown, and loads them on start, so a crash loses at most the last minute of them. The JSON log holds every event.
 
-The server rejects every change made without its confirmation, or with one that does not match. Filtering paths, editing keys, the copy button and the integration dialogs need JavaScript; browsers without invoker commands (`commandfor`) also use it to open the dialogs.
+The server rejects every change made without its confirmation, or with one that does not match. Filtering paths, editing keys, the Generate page, the copy button and the integration dialogs need JavaScript; browsers without invoker commands (`commandfor`) also use it to open the dialogs.
 
 After 5 failed sign-ins from one address, each further attempt from it must wait 1 second, then 2, 4 and so on up to 1 minute, and gets `429` with `too many failed sign-ins, try again in Ns` until then. A successful sign-in, or 15 minutes without a failure, resets the count. The address is the [client address](client-address.md): without trusted proxies, every client behind a reverse proxy or Ingress shares the proxy address, so the wait never exceeds 1 minute. The counts live in the server's memory.
 

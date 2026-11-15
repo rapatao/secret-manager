@@ -41,17 +41,54 @@ function refreshSave() {
   form.querySelector('button[type="submit"]').disabled = pendingChanges().length === 0 || !form.checkValidity();
 }
 
-const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const alnum = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+const alphabets = { alnum, symbols: alnum + "!#$%&*+-.:=?@^_~", digits: "0123456789" };
 
-function randomValue(length = 32) {
+function fromAlphabet(chars, length) {
+  const limit = 256 - (256 % chars.length);
   let out = "";
   while (out.length < length) {
     for (const b of crypto.getRandomValues(new Uint8Array(length))) {
-      if (b < 248 && out.length < length) out += alphabet[b % alphabet.length];
+      if (b < limit && out.length < length) out += chars[b % chars.length];
     }
   }
   return out;
 }
+
+function randomValue(length = 32) {
+  return fromAlphabet(alnum, length);
+}
+
+const toHex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+
+function generateValue(format, length) {
+  if (format in alphabets) return fromAlphabet(alphabets[format], length);
+  if (format === "uuid") {
+    const b = crypto.getRandomValues(new Uint8Array(16));
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    return toHex(b).replace(/^(.{8})(.{4})(.{4})(.{4})/, "$1-$2-$3-$4-");
+  }
+  const bytes = crypto.getRandomValues(new Uint8Array(length));
+  return format === "hex" ? toHex(bytes) : btoa(String.fromCharCode(...bytes));
+}
+
+document.addEventListener("change", (e) => {
+  if (e.target.name !== "format" || !e.target.closest(".generate-form")) return;
+  const length = e.target.form.elements.length;
+  const option = e.target.selectedOptions[0];
+  length.disabled = !option.dataset.length;
+  if (option.dataset.length) length.value = option.dataset.length;
+});
+
+document.addEventListener("submit", (e) => {
+  const form = e.target.closest(".generate-form");
+  if (!form) return;
+  e.preventDefault();
+  const { format, length, count } = form.elements;
+  const values = Array.from({ length: count.valueAsNumber }, () => generateValue(format.value, length.valueAsNumber));
+  document.getElementById("generated").value = values.join("\n");
+});
 
 function addKeyRow() {
   const row = document.getElementById("new-key").content.firstElementChild.cloneNode(true);

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -501,7 +502,7 @@ func TestServersListAndUse(t *testing.T) {
 
 func TestVersion(t *testing.T) {
 	h := newHarness(t)
-	want := "client: 1.5.0\nserver: 1.4.0 (" + h.url + ")\ncapabilities: backup, history, history-delete, integrations, paths, paths-copy, paths-deleted, secrets, secrets-key\n"
+	want := "client: 1.5.0\nserver: 1.4.0 (" + h.url + ")\ncapabilities: backup, generate, history, history-delete, integrations, paths, paths-copy, paths-deleted, secrets, secrets-key\n"
 	if got := h.mustRun("version"); got != want {
 		t.Fatalf("version: %q", got)
 	}
@@ -624,18 +625,58 @@ func TestBackupPrompted(t *testing.T) {
 
 func TestSetGenerate(t *testing.T) {
 	h := newHarness(t)
-	h.mustRun("set", "--path", "/db", "--generate", "PASS", "--generate", "PIN:6", "USER=app")
+	h.mustRun("set", "--path", "/db", "--generate", "PASS", "--generate", "PIN:6", "--generate", "CODE:digits",
+		"--generate", "KEY:hex:16", "--generate", "ID:uuid", "USER=app")
 	data, err := client.New(h.url, token).Get(context.Background(), "/db", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(data["PASS"]) != 32 || len(data["PIN"]) != 6 || data["USER"] != "app" || strings.Trim(data["PASS"], generateAlphabet) != "" {
-		t.Fatalf("generated %v", data)
+	for k, re := range map[string]string{
+		"PASS": `^[A-Za-z0-9]{32}$`,
+		"PIN":  `^[A-Za-z0-9]{6}$`,
+		"CODE": `^[0-9]{6}$`,
+		"KEY":  `^[0-9a-f]{32}$`,
+		"ID":   `^[0-9a-f-]{36}$`,
+		"USER": `^app$`,
+	} {
+		if !regexp.MustCompile(re).MatchString(data[k]) {
+			t.Errorf("%s = %q, want match %s", k, data[k], re)
+		}
 	}
 	for _, args := range [][]string{
 		{"set", "--path", "/db", "--generate", "PASS:0"},
 		{"set", "--path", "/db", "--generate", "BAD KEY"},
 		{"set", "--path", "/db", "--generate", "A", "A=1"},
+		{"set", "--path", "/db", "--generate", "A:nope"},
+		{"set", "--path", "/db", "--generate", "A:uuid:8"},
+		{"set", "--path", "/db", "--generate", "A:hex:8:1"},
+	} {
+		if code := h.run(args...); code != 2 {
+			t.Errorf("%v: exit %d, want 2", args, code)
+		}
+	}
+}
+
+func TestGenerate(t *testing.T) {
+	h := newHarness(t)
+	h.env[EnvURL] = ""
+	out := h.mustRun("generate", "--format", "digits", "--length", "4", "--count", "3")
+	if !regexp.MustCompile(`^([0-9]{4}\n){3}$`).MatchString(out) {
+		t.Fatalf("generate: %q", out)
+	}
+	if out := h.mustRun("generate"); !regexp.MustCompile(`^[A-Za-z0-9]{32}\n$`).MatchString(out) {
+		t.Fatalf("generate default: %q", out)
+	}
+	if out := h.mustRun("generate", "--clip", "--format", "uuid"); out != "" || len(h.clipped) != 1 || len(h.clipped[0]) != 36 {
+		t.Fatalf("generate --clip: %q %q", out, h.clipped)
+	}
+	for _, args := range [][]string{
+		{"generate", "--format", "nope"},
+		{"generate", "--format", "uuid", "--length", "8"},
+		{"generate", "--count", "0"},
+		{"generate", "--count", "101"},
+		{"generate", "--clip", "--count", "2"},
+		{"generate", "extra"},
 	} {
 		if code := h.run(args...); code != 2 {
 			t.Errorf("%v: exit %d, want 2", args, code)

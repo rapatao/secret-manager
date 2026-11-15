@@ -1,0 +1,24 @@
+{{define "title"}}Generate - {{end}}
+{{define "content"}}
+<h1>Generate</h1>
+<div class="card">
+<div class="body">
+<form class="stack generate-form">
+<p class="muted">Values are made in this browser and are not saved.</p>
+<label>Format <select name="format">
+<option value="alnum" data-length="32" selected>Letters and digits</option>
+<option value="symbols" data-length="32">Letters, digits and symbols</option>
+<option value="digits" data-length="6">Digits</option>
+<option value="hex" data-length="32">Hex, length in bytes</option>
+<option value="base64" data-length="32">Base64, length in bytes</option>
+<option value="uuid">UUID v4</option>
+</select></label>
+<label>Length <input type="number" name="length" value="32" min="1" max="4096" required></label>
+<label>Count <input type="number" name="count" value="1" min="1" max="100" required></label>
+<div><button type="submit" class="primary">Generate</button></div>
+<label>Values <textarea id="generated" rows="5" class="mono" readonly></textarea></label>
+<div><button type="button" class="copy" data-copy="generated">Copy</button></div>
+</form>
+</div>
+</div>
+{{end}}

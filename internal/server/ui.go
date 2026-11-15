@@ -55,7 +55,7 @@ var pageFuncs = template.FuncMap{
 }
 
 func init() {
-	for _, name := range []string{"login", "summary", "secrets", "path", "integrations", "authorize", "audit"} {
+	for _, name := range []string{"login", "summary", "secrets", "path", "integrations", "authorize", "audit", "generate"} {
 		pages[name] = template.Must(template.New(name).Funcs(pageFuncs).ParseFS(uiFS, "ui/layout.html", "ui/"+name+".html"))
 	}
 }
