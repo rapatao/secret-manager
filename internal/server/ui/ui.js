@@ -75,7 +75,7 @@ function generateValue(format, length) {
 
 document.addEventListener("change", (e) => {
   if (e.target.name !== "format" || !e.target.closest(".generate-form")) return;
-  const length = e.target.form.elements.length;
+  const length = e.target.form.elements.namedItem("length");
   const option = e.target.selectedOptions[0];
   length.disabled = !option.dataset.length;
   if (option.dataset.length) length.value = option.dataset.length;
@@ -85,7 +85,8 @@ document.addEventListener("submit", (e) => {
   const form = e.target.closest(".generate-form");
   if (!form) return;
   e.preventDefault();
-  const { format, length, count } = form.elements;
+  const { format, count } = form.elements;
+  const length = form.elements.namedItem("length");
   const values = Array.from({ length: count.valueAsNumber }, () => generateValue(format.value, length.valueAsNumber));
   document.getElementById("generated").value = values.join("\n");
 });
