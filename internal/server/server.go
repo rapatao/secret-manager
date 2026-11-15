@@ -303,12 +303,14 @@ func (s *Server) apiGenerate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	values := make([]string, count)
-	for i := range values {
-		if values[i], err = generate.Value(format, length); err != nil {
+	var values []string
+	for range count {
+		v, err := generate.Value(format, length)
+		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		values = append(values, v)
 	}
 	s.auditAt(s.Events.Lists, r, "api", "generate", "", nil, nil)
 	w.Header().Set("Cache-Control", "no-store")
