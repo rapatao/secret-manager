@@ -5,7 +5,6 @@ import (
 	"bufio"
 	"cmp"
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -28,6 +27,7 @@ import (
 
 	"github.com/rapatao/secret-manager/internal/client"
 	"github.com/rapatao/secret-manager/internal/dotenv"
+	"github.com/rapatao/secret-manager/internal/generate"
 	"github.com/rapatao/secret-manager/internal/local"
 	"github.com/rapatao/secret-manager/internal/secrets"
 	"github.com/rapatao/secret-manager/internal/storage"
@@ -75,13 +75,19 @@ const Usage = `Client commands:
                                                print one value, or all as dotenv
   get     --path P [--recursive] --clip KEY    copy one value to the clipboard,
                                                cleared after 60s if unchanged
-  set     --path P [--env-file F|- | --json-file F|-] [--generate KEY[:LEN]...] [K=V...] [K...]
+  set     --path P [--env-file F|- | --json-file F|-] [--generate KEY[:FORMAT][:LEN]...] [K=V...] [K...]
                                                merge keys into a path; a K without =V is
                                                prompted for without echo; --env-file reads
                                                KEY=VALUE lines, --json-file a JSON
                                                object of string values; --generate sets
-                                               KEY to LEN (default 32) random letters
-                                               and digits
+                                               KEY to a random value, as generate does
+  generate [--format F] [--length N] [--count 1] [--clip]
+                                               print random values without saving them,
+                                               no server needed; F is alnum (default),
+                                               symbols, digits, hex, base64 or uuid; N
+                                               counts characters, or random bytes for
+                                               hex and base64 (default 32, digits 6);
+                                               --clip copies one value, cleared after 60s
   delete  --path P (KEY... | --all)            delete keys, or the whole path
   copy    --path P --to Q                      copy a path and its history to a new path
   move    --path P --to Q                      move a path and its history to a new path
@@ -189,6 +195,7 @@ func (c *CLI) Run(ctx context.Context, args []string) int {
 		"keys":     c.keys,
 		"get":      c.get,
 		"set":      c.set,
+		"generate": c.generate,
 		"delete":   c.delete,
 		"copy":     c.copyPath(false),
 		"move":     c.copyPath(true),
@@ -787,13 +794,13 @@ func (c *CLI) set(ctx context.Context, args []string) error {
 	envFile := f.fs.String("env-file", "", "dotenv file to import, - for stdin")
 	jsonFile := f.fs.String("json-file", "", "JSON object of string values to import, - for stdin")
 	generated := map[string]string{}
-	f.fs.Func("generate", "set KEY[:LENGTH] to random letters and digits, LENGTH 32 by default", func(v string) error {
-		key, length, err := parseGenerate(v)
+	f.fs.Func("generate", "set KEY[:FORMAT][:LENGTH] to a random value", func(v string) error {
+		key, format, length, err := parseGenerate(v)
 		if err != nil {
 			return err
 		}
-		generated[key] = randomValue(length)
-		return nil
+		generated[key], err = generate.Value(format, length)
+		return err
 	})
 	api, err := f.parse(args)
 	if err != nil {
@@ -862,6 +869,50 @@ func (c *CLI) set(ctx context.Context, args []string) error {
 		return fmt.Errorf("%w: nothing to set", errUsage)
 	}
 	return api.Set(ctx, f.path, values)
+}
+
+func (c *CLI) generate(_ context.Context, args []string) error {
+	fs := flag.NewFlagSet("generate", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	format := fs.String("format", generate.DefaultFormat, "value format")
+	length := fs.Int("length", 0, "length, default per format")
+	count := fs.Int("count", 1, "number of values")
+	clip := fs.Bool("clip", false, "copy the value to the clipboard instead of printing it")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return err
+		}
+		return fmt.Errorf("%w: generate: %w", errUsage, err)
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("%w: generate takes no arguments", errUsage)
+	}
+	if *count < 1 || *count > generate.MaxCount {
+		return fmt.Errorf("%w: --count must be between 1 and %d", errUsage, generate.MaxCount)
+	}
+	if *clip && *count > 1 {
+		return fmt.Errorf("%w: --clip copies one value; drop --count", errUsage)
+	}
+	if err := generate.Check(*format, *length); err != nil {
+		return fmt.Errorf("%w: %w", errUsage, err)
+	}
+	for range *count {
+		v, err := generate.Value(*format, *length)
+		if err != nil {
+			return err
+		}
+		if *clip {
+			if err := c.Clip(v); err != nil {
+				return err
+			}
+			fmt.Fprintf(c.Stderr, "Copied a generated value to the clipboard, cleared in %s\n", ClipClearAfter)
+			return nil
+		}
+		if _, err := fmt.Fprintln(c.Stdout, v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *CLI) delete(ctx context.Context, args []string) error {
@@ -1225,41 +1276,36 @@ func (c *CLI) newBackupPassphrase() (string, error) {
 	return passphrase, nil
 }
 
-const (
-	generateAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-	generateLength   = 32
-	maxGenerate      = 4096
-)
-
-func parseGenerate(v string) (string, int, error) {
-	key, length, ok := strings.Cut(v, ":")
+// parseGenerate parses KEY, KEY:LENGTH, KEY:FORMAT or KEY:FORMAT:LENGTH.
+func parseGenerate(v string) (key, format string, length int, err error) {
+	parts := strings.Split(v, ":")
+	key, format, rest := parts[0], generate.DefaultFormat, parts[1:]
 	if err := secrets.ValidateKey(key); err != nil {
-		return "", 0, err
+		return "", "", 0, err
 	}
-	if !ok {
-		return key, generateLength, nil
-	}
-	n, err := strconv.Atoi(length)
-	if err != nil || n < 1 || n > maxGenerate {
-		return "", 0, fmt.Errorf("length %q must be between 1 and %d", length, maxGenerate)
-	}
-	return key, n, nil
-}
-
-// randomValue returns n uniformly random letters and digits.
-func randomValue(n int) string {
-	out := make([]byte, 0, n)
-	buf := make([]byte, n)
-	for len(out) < n {
-		_, _ = rand.Read(buf)
-		for _, b := range buf {
-			// 248 is the largest multiple of len(generateAlphabet) below 256.
-			if b < 248 && len(out) < n {
-				out = append(out, generateAlphabet[int(b)%len(generateAlphabet)])
-			}
+	if len(rest) > 0 {
+		if _, numErr := strconv.Atoi(rest[0]); numErr != nil {
+			format, rest = rest[0], rest[1:]
 		}
 	}
-	return string(out)
+	switch len(rest) {
+	case 0:
+	case 1:
+		if length, err = parseLength(rest[0]); err != nil {
+			return "", "", 0, err
+		}
+	default:
+		return "", "", 0, fmt.Errorf("%q must be KEY[:FORMAT][:LENGTH]", v)
+	}
+	return key, format, length, generate.Check(format, length)
+}
+
+func parseLength(s string) (int, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 || n > generate.MaxLength {
+		return 0, fmt.Errorf("length %q must be between 1 and %d", s, generate.MaxLength)
+	}
+	return n, nil
 }
 
 func parseVersion(s string) (int, error) {

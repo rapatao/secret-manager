@@ -12,6 +12,7 @@ A small, self-hosted key-value secret manager. It runs in three modes:
 - `secret-manager run` injects secrets as environment variables into local commands, masks their values in the command's output, and keeps working from an encrypted cache while the server is unreachable.
 - `secret-manager scan` finds secret values leaked into files and, optionally, into git history.
 - A `.secret-manager` file in a directory sets the default path and server for commands run there, and `get --clip` copies a value to the clipboard, cleared after 60 seconds.
+- `secret-manager generate`, the Web UI Generate page and `GET /api/v1/generate` make random values without saving them: letters and digits, symbols, digits, hex, base64 or UUIDs. `set --generate` makes the same values and saves them.
 - Every write is kept as a version, so a path can be inspected or rolled back, even after it is deleted. A version holding a leaked value can be deleted.
 - `secret-manager backup` and `restore` copy every path, optionally with its versions, to and from a JSON file, optionally encrypted.
 - Stored values can be encrypted with AES-256-GCM, and the key can be rotated.

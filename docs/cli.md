@@ -17,6 +17,11 @@ secret-manager set --path /tools --env-file .env       # or --env-file - for std
 secret-manager set --path /tools --json-file keys.json # JSON object of string values, or --json-file - for stdin
 secret-manager set --path /db --generate PASSWORD      # 32 random letters and digits
 secret-manager set --path /db --generate PIN:6         # 6 random letters and digits
+secret-manager set --path /db --generate CODE:digits   # 6 random digits, see Generating values
+secret-manager set --path /db --generate KEY:hex:16    # 16 random bytes as hex
+secret-manager generate                                # print 32 random letters and digits, nothing saved
+secret-manager generate --format uuid --count 3        # three UUIDs, one per line
+secret-manager generate --format symbols --clip        # copy to the clipboard, cleared after 60s
 secret-manager keys --path /tools                      # key names, no values
 secret-manager keys --path /tools --recursive          # PATH KEY for every nested path
 secret-manager get --path /tools GITHUB_TOKEN          # only this key leaves the server
@@ -147,3 +152,20 @@ eval "$(secret-manager export --path /tools --prefer-cache --format shell)"
 `SECRET_MANAGER_CACHE_MAX_AGE` can only lower the server's max age, as a Go duration (`24h`, `30m`); `0` disables the cache, so nothing is written or read. Expired entries are removed when found.
 
 Entries are encrypted with AES-256-GCM and stored in the `cache` directory next to `config.json`, `0600` files in a `0700` directory. The key is kept only in the OS keychain (account `offline-cache-key` under `secretmanager.rapatao.com`), so without a usable keychain nothing is cached. `servers logout` removes the cached secrets of that server; delete the `cache` directory to remove all of them.
+
+## Generating values
+
+`generate` prints random values without saving them. It runs on the client only: it needs no server, login or vault, and the values never leave the machine. `set --generate` makes the same values and saves them.
+
+| Format | Value | Default length |
+|---|---|---|
+| `alnum` (default) | Letters and digits | 32 characters |
+| `symbols` | Letters, digits and `!#$%&*+-.:=?@^_~` | 32 characters |
+| `digits` | Digits | 6 characters |
+| `hex` | Random bytes, hex-encoded | 32 bytes, 64 characters |
+| `base64` | Random bytes, standard base64 with padding | 32 bytes, 44 characters |
+| `uuid` | UUID version 4 | takes no length |
+
+`--length` goes up to 4096 and `--count` up to 100, printed one per line. `--clip` copies a single value to the clipboard, cleared after 60 seconds if unchanged, as `get --clip` does.
+
+`set --generate` takes `KEY`, `KEY:LENGTH`, `KEY:FORMAT` or `KEY:FORMAT:LENGTH`, so `--generate PIN:6` keeps meaning 6 letters and digits.

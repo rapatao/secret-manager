@@ -2,6 +2,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/rapatao/secret-manager/internal/generate"
 	"github.com/rapatao/secret-manager/internal/secrets"
 	"github.com/rapatao/secret-manager/internal/storage"
 	"github.com/rapatao/secret-manager/internal/tokens"
@@ -39,7 +41,7 @@ const BackupFormat = 1
 // GET /api/v1/info. Clients check them before using a feature added after
 // the first release. A shipped capability never changes meaning and is never
 // removed; changed behavior gets a new name.
-var Capabilities = []string{"backup", "history", "history-delete", "integrations", "paths", "paths-copy", "paths-deleted", "secrets", "secrets-key"}
+var Capabilities = []string{"backup", "generate", "history", "history-delete", "integrations", "paths", "paths-copy", "paths-deleted", "secrets", "secrets-key"}
 
 // DefaultCacheMaxAge is the CacheMaxAge of a new Server.
 const DefaultCacheMaxAge = 7 * 24 * time.Hour
@@ -124,6 +126,7 @@ func (s *Server) routes() {
 
 	s.mux.Handle("GET /api/v1/info", s.bearer(anyToken, s.apiInfo))
 	s.mux.Handle("GET /api/v1/paths", s.bearer(anyToken, s.apiListPaths))
+	s.mux.Handle("GET /api/v1/generate", s.bearer(anyToken, s.apiGenerate))
 	s.mux.Handle("DELETE /api/v1/paths", s.bearer(writePath, s.apiDeletePath))
 	s.mux.Handle("POST /api/v1/paths/copy", s.bearer(readPath, s.apiCopyPath(false)))
 	s.mux.Handle("POST /api/v1/paths/move", s.bearer(writePath, s.apiCopyPath(true)))
@@ -157,6 +160,9 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /secrets/versions/delete", s.ui(s.session(s.uiDeleteVersion)))
 	s.mux.Handle("POST /backup", s.ui(s.session(s.uiBackup)))
 	s.mux.Handle("GET /audit", s.ui(s.session(s.uiAudit)))
+	s.mux.Handle("GET /generate", s.ui(s.session(func(w http.ResponseWriter, _ *http.Request) {
+		s.render(w, http.StatusOK, "generate", nil)
+	})))
 	s.mux.Handle("GET /integrations", s.ui(s.session(s.uiIntegrations)))
 	s.mux.Handle("POST /integrations", s.ui(s.session(s.uiCreateIntegration)))
 	s.mux.Handle("POST /integrations/update", s.ui(s.session(s.uiUpdateIntegration)))
@@ -273,6 +279,40 @@ func allowed(t tokens.Token, n need, path string) error {
 func (s *Server) apiInfo(w http.ResponseWriter, r *http.Request) {
 	s.auditAt(s.Events.Lists, r, "api", "info", "", nil, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"version": s.Version, "capabilities": Capabilities})
+}
+
+// apiGenerate returns random values without storing them.
+func (s *Server) apiGenerate(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	format := cmp.Or(q.Get("format"), generate.DefaultFormat)
+	length, count := 0, 1
+	var err error
+	if v := q.Get("length"); v != "" {
+		if length, err = strconv.Atoi(v); err != nil || length < 1 {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("length must be between 1 and %d", generate.MaxLength))
+			return
+		}
+	}
+	if v := q.Get("count"); v != "" {
+		if count, err = strconv.Atoi(v); err != nil || count < 1 || count > generate.MaxCount {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("count must be between 1 and %d", generate.MaxCount))
+			return
+		}
+	}
+	if err := generate.Check(format, length); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	values := make([]string, count)
+	for i := range values {
+		if values[i], err = generate.Value(format, length); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	s.auditAt(s.Events.Lists, r, "api", "generate", "", nil, nil)
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string][]string{"values": values})
 }
 
 // apiListPaths lists the paths under the token's path, or with ?deleted=true

@@ -558,6 +558,7 @@ func TestUIPageTitles(t *testing.T) {
 		"/secrets/path?path=/app": "/app - Secret Manager",
 		"/integrations":           "Integrations - Secret Manager",
 		"/audit":                  "Audit log - Secret Manager",
+		"/generate":               "Generate - Secret Manager",
 	} {
 		if _, body := get(t, c, ts.URL+page); !strings.Contains(body, "<title>"+want+"</title>") {
 			t.Errorf("%s: want title %q", page, want)
@@ -856,8 +857,33 @@ func TestAPIInfo(t *testing.T) {
 		t.Fatalf("info without token: %d", code)
 	}
 	code, body := do(t, ts, "GET", "/api/v1/info", apiToken, "")
-	if code != http.StatusOK || strings.TrimSpace(body) != `{"capabilities":["backup","history","history-delete","integrations","paths","paths-copy","paths-deleted","secrets","secrets-key"],"version":"v9.9.9-test"}` {
+	if code != http.StatusOK || strings.TrimSpace(body) != `{"capabilities":["backup","generate","history","history-delete","integrations","paths","paths-copy","paths-deleted","secrets","secrets-key"],"version":"v9.9.9-test"}` {
 		t.Fatalf("info: %d %s", code, body)
+	}
+}
+
+func TestAPIGenerate(t *testing.T) {
+	ts := newTestServer(t)
+	if code, _ := do(t, ts, "GET", "/api/v1/generate", "", ""); code != http.StatusUnauthorized {
+		t.Fatalf("generate without token: %d", code)
+	}
+	code, body := do(t, ts, "GET", "/api/v1/generate?format=hex&length=4&count=3", apiToken, "")
+	var got struct{ Values []string }
+	if err := json.Unmarshal([]byte(body), &got); code != http.StatusOK || err != nil || len(got.Values) != 3 {
+		t.Fatalf("generate: %d %s", code, body)
+	}
+	for _, v := range got.Values {
+		if len(v) != 8 {
+			t.Fatalf("hex of 4 bytes: %q", v)
+		}
+	}
+	for _, q := range []string{"format=nope", "format=uuid&length=8", "length=0", "length=x", "count=0", "count=101"} {
+		if code, body := do(t, ts, "GET", "/api/v1/generate?"+q, apiToken, ""); code != http.StatusBadRequest {
+			t.Errorf("generate?%s: %d %s", q, code, body)
+		}
+	}
+	if _, body := do(t, ts, "GET", "/api/v1/paths", apiToken, ""); strings.TrimSpace(body) != `{"paths":[]}` {
+		t.Fatalf("generate stored a path: %s", body)
 	}
 }
 
