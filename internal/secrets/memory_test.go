@@ -3,6 +3,7 @@ package secrets
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"sync"
@@ -19,6 +20,7 @@ type memBackend struct {
 	versions map[string][]storage.Version
 	tokens   []storage.Token
 	audit    []storage.AuditEvent
+	policy   storage.SyncPolicy
 	failPut  bool
 }
 
@@ -27,6 +29,9 @@ func newMem() *memBackend {
 }
 
 func (m *memBackend) AddVersion(_ context.Context, path string, at time.Time, data map[string]string, keep int) error {
+	if keep < 1 {
+		return fmt.Errorf("add version of %s: keep must be at least 1, got %d", path, keep)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	vs := m.versions[path]
@@ -72,6 +77,19 @@ func (m *memBackend) PutTokens(_ context.Context, tokens []storage.Token) error 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.tokens = slices.Clone(tokens)
+	return nil
+}
+
+func (m *memBackend) SyncPolicy(_ context.Context) (storage.SyncPolicy, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.policy.Clone(), nil
+}
+
+func (m *memBackend) PutSyncPolicy(_ context.Context, p storage.SyncPolicy) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.policy = p.Clone()
 	return nil
 }
 

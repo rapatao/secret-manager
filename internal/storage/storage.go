@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"slices"
 	"strings"
 	"time"
 )
@@ -26,7 +27,8 @@ type Backend interface {
 
 	// AddVersion stores data as the next version of path, numbered one above
 	// the newest stored version, then deletes all but the newest keep
-	// versions. keep is at least 1.
+	// versions by rank, so numbers may have gaps. keep below 1 is an error and
+	// nothing is written.
 	AddVersion(ctx context.Context, path string, at time.Time, data map[string]string, keep int) error
 	// Versions returns the stored versions of path, newest first. Versions
 	// outlive Delete.
@@ -43,6 +45,12 @@ type Backend interface {
 	Tokens(ctx context.Context) ([]Token, error)
 	// PutTokens replaces every stored access token.
 	PutTokens(ctx context.Context, tokens []Token) error
+
+	// SyncPolicy returns the stored SecretSync policy, or the zero policy
+	// when none was stored.
+	SyncPolicy(ctx context.Context) (SyncPolicy, error)
+	// PutSyncPolicy replaces the stored SecretSync policy.
+	PutSyncPolicy(ctx context.Context, policy SyncPolicy) error
 
 	// AuditEvents returns the stored audit events, oldest first, or none.
 	AuditEvents(ctx context.Context) ([]AuditEvent, error)
@@ -86,11 +94,41 @@ type Token struct {
 	AllowedFrom []netip.Prefix `json:"allowedFrom,omitempty"`
 }
 
-// Version is a snapshot of the data stored at a path.
+// SyncPolicy limits what SecretSyncs may read and write. A disabled policy
+// restricts nothing. When enabled, only the SecretSync namespaces in Namespaces
+// are allowed, each limited by its rule.
+type SyncPolicy struct {
+	Enabled    bool                `json:"enabled"`
+	Namespaces map[string]SyncRule `json:"namespaces,omitempty"`
+}
+
+// SyncRule limits the SecretSyncs of one namespace to the secret paths under
+// Paths and, besides their own namespace, to the target namespaces listed.
+type SyncRule struct {
+	Paths            []string `json:"paths"`
+	TargetNamespaces []string `json:"targetNamespaces,omitempty"`
+}
+
+// Clone returns a copy sharing no memory with p.
+func (p SyncPolicy) Clone() SyncPolicy {
+	if p.Namespaces == nil {
+		return p
+	}
+	ns := make(map[string]SyncRule, len(p.Namespaces))
+	for k, r := range p.Namespaces {
+		ns[k] = SyncRule{Paths: slices.Clone(r.Paths), TargetNamespaces: slices.Clone(r.TargetNamespaces)}
+	}
+	p.Namespaces = ns
+	return p
+}
+
+// Version is a snapshot of the data stored at a path. Unreadable marks a
+// version whose Data could not be decrypted, and is nil. It is never stored.
 type Version struct {
-	Number int
-	Time   time.Time
-	Data   map[string]string
+	Number     int
+	Time       time.Time
+	Data       map[string]string
+	Unreadable bool `json:"-"`
 }
 
 // Under reports whether path equals prefix or is nested below it.

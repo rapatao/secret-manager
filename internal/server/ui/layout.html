@@ -160,7 +160,8 @@ select:focus-visible { outline: 2px solid var(--accent); outline-offset: -1px; b
 <nav class="row"><a class="button small" href="/secrets">Secrets</a>
 <a class="button small" href="/generate">Generate</a>
 <a class="button small" href="/integrations">Integrations</a>
-<a class="button small" href="/audit">Audit</a>
+{{if .SyncPolicyNav}}<a class="button small" href="/sync-policy">Sync policy</a>
+{{end}}<a class="button small" href="/audit">Audit</a>
 <form class="inline" method="post" action="/logout"><button type="submit" class="small">Sign out</button></form></nav>
 </div></header>
 {{end}}

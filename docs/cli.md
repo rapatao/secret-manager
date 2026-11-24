@@ -45,6 +45,8 @@ secret-manager backup --history --output backup.json  # every path and its versi
 secret-manager restore backup.json                     # prompts for the passphrase of an encrypted backup
 SECRET_MANAGER_BACKUP_PASSPHRASE=... secret-manager backup    # passphrase from the environment, no prompt
 secret-manager backup --no-encrypt                     # every value in plain text
+secret-manager sync-policy get                         # the SecretSync policy as JSON, needs a token for /
+secret-manager sync-policy set --file policy.json      # replace it; --file is required, "-" reads stdin, see Sync policy
 secret-manager scan --path /tools                      # files in the current directory holding a value, see Scan
 secret-manager scan --path /tools --history src        # also lines added under src in every git commit
 secret-manager version                                 # client and server versions, server capabilities
@@ -113,6 +115,34 @@ $ secret-manager scan --path /tools --history
 Each finding prints as `FILE:LINE: PATH KEY`; values are never printed. `--history` also runs `git log --all -p` in the current directory and checks the lines each commit added, printed as `COMMIT:FILE:LINE: PATH KEY` with the first 12 characters of the commit hash; given files and directories limit it to those paths. `--json` prints the findings as a JSON array of objects with `file`, `line`, `path`, `key` and, for commits, `commit`, `[]` when none are found.
 
 Values shorter than `--min-length` characters (default 8) are not looked for, and their paths and keys are listed on stderr; `--min-length 1` checks every value, including ones like `1` or `true` that match most files. `scan` exits with 1 when it finds a value, 0 otherwise, so it can run in a pre-commit hook or CI. A value found in history stays in the repository until the history is rewritten; rotate it with `set`.
+
+## Sync policy
+
+`sync-policy get` prints the [sync policy](secretsync.md#sync-policy) as JSON. `sync-policy set` replaces it with the JSON read from `--file`, which is required, or from stdin with `--file -`. The input must be one JSON document: unknown fields and data after it are rejected. `set` prints the stored policy:
+
+```sh
+$ secret-manager sync-policy set --file policy.json
+the policy disallows 2 SecretSyncs, which lose all their target Secrets:
+  team-a/db: denied by sync policy: namespace team-a may not read path /prod/db
+  team-a/web: denied by sync policy: namespace team-a may not write to namespace team-c
+Nothing was saved. Run again with --confirm to save the policy and delete those Secrets.
+$ secret-manager sync-policy set --file policy.json --confirm
+{
+  "enabled": true,
+  "namespaces": {
+    "team-a": {
+      "paths": [
+        "/apps/team-a"
+      ],
+      "targetNamespaces": [
+        "team-b"
+      ]
+    }
+  }
+}
+```
+
+The document has the shape `{"enabled": true, "namespaces": {"team-a": {"paths": ["/apps/team-a"], "targetNamespaces": ["team-b"]}}}`, see [API](api.md). Both commands need a token for `/` (read-write for `set`) and a server with the `sync-policy` capability; a [local vault](local-vault.md) has none. Without `--confirm`, `set` exits with 1 when the new policy disallows SecretSyncs that the stored policy does not already disallow. The list is computed by the server on every call, so `--confirm` applies to the SecretSyncs that exist at that moment.
 
 ## Resolution order
 

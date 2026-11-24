@@ -20,7 +20,7 @@ secret-manager ui --server file://$HOME/.secrets/vault.json --addr 127.0.0.1:809
 
 A vault stays unlocked for 8 hours after its passphrase is given, then locks: the next command removes the stored key and prompts for the passphrase on the terminal, unlocks the vault for another 8 hours and carries on. Without a terminal, as in cron or a pipe with no `/dev/tty`, it fails with `vault ... is locked; run servers login --server file://...`. The time counts from the unlock, not from the last use, and a command already running, such as `run` or `ui`, is not stopped.
 
-`servers login --lock-after` sets how long the vault stays unlocked, as a Go duration (`30m`, `24h`) or `never`. The setting is kept in `config.json` and reused by later logins without `--lock-after`. A vault logged in before locks existed gets the 8 hour default, counted from its next use. `servers lock` removes the stored key now, so the next command prompts. The lock only applies to stored logins: a vault key given in `SECRET_MANAGER_TOKEN` never locks.
+`servers login --lock-after` sets how long the vault stays unlocked, as a Go duration (`30m`, `24h`) or `never`. The setting is kept in `config.json` and reused by later logins without `--lock-after`. A vault without a stored lock setting gets the 8 hour default, counted from its next use. `servers lock` removes the stored key now, so the next command prompts. The lock only applies to stored logins: a vault key given in `SECRET_MANAGER_TOKEN` never locks.
 
 The lock is enforced by the CLI. Until a vault locks, its key stays in the OS keychain or `credentials.json`, readable by anything with access to them, and a locked vault has no key stored.
 

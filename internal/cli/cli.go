@@ -3,6 +3,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/base64"
@@ -110,6 +111,12 @@ const Usage = `Client commands:
                                                decrypting it with the passphrase in
                                                $` + EnvBackupPassphrase + `
                                                or prompted for
+  sync-policy get                              print the SecretSync policy as JSON; needs
+                                               a token for /
+  sync-policy set --file F|- [--confirm]       replace the policy with the JSON in F or stdin;
+                                               when it disallows SecretSyncs, which lose
+                                               their target Secrets, list them, exit 1 and
+                                               save nothing unless --confirm
   run     --path P [--recursive] [--prefer-cache] [--no-mask] [--min-length 1] -- CMD [ARGS...]
                                                run CMD with secrets as env vars; secret
                                                values in its output print as ***
@@ -190,24 +197,25 @@ func Default() *CLI {
 // Run executes args[0] with the remaining args and returns the exit code.
 func (c *CLI) Run(ctx context.Context, args []string) int {
 	cmds := map[string]func(context.Context, []string) error{
-		"servers":  c.servers,
-		"list":     c.list,
-		"keys":     c.keys,
-		"get":      c.get,
-		"set":      c.set,
-		"generate": c.generate,
-		"delete":   c.delete,
-		"copy":     c.copyPath(false),
-		"move":     c.copyPath(true),
-		"export":   c.export,
-		"run":      c.run,
-		"scan":     c.scan,
-		"history":  c.history,
-		"rollback": c.rollback,
-		"version":  c.version,
-		"backup":   c.backup,
-		"restore":  c.restore,
-		"ui":       c.ui,
+		"servers":     c.servers,
+		"list":        c.list,
+		"keys":        c.keys,
+		"get":         c.get,
+		"set":         c.set,
+		"generate":    c.generate,
+		"delete":      c.delete,
+		"copy":        c.copyPath(false),
+		"move":        c.copyPath(true),
+		"export":      c.export,
+		"run":         c.run,
+		"scan":        c.scan,
+		"history":     c.history,
+		"rollback":    c.rollback,
+		"version":     c.version,
+		"backup":      c.backup,
+		"restore":     c.restore,
+		"sync-policy": c.syncPolicy,
+		"ui":          c.ui,
 		clipClearCommand: func(_ context.Context, args []string) error {
 			return c.clipClear(args)
 		},
@@ -1035,7 +1043,11 @@ func (c *CLI) history(ctx context.Context, args []string) error {
 		w := tabwriter.NewWriter(c.Stdout, 0, 4, 2, ' ', 0)
 		fmt.Fprintln(w, "VERSION\tWRITTEN\tKEYS")
 		for _, v := range versions {
-			fmt.Fprintf(w, "%d\t%s\t%s\n", v.Version, v.Time.Format(time.RFC3339), strings.Join(v.Keys, ","))
+			keys := strings.Join(v.Keys, ",")
+			if v.Unreadable {
+				keys = "(unreadable)"
+			}
+			fmt.Fprintf(w, "%d\t%s\t%s\n", v.Version, v.Time.Format(time.RFC3339), keys)
 		}
 		return w.Flush()
 	case 1:
@@ -1193,6 +1205,92 @@ func (c *CLI) backup(ctx context.Context, args []string) error {
 		err = closeErr
 	}
 	return err
+}
+
+func (c *CLI) syncPolicy(ctx context.Context, args []string) error {
+	sub, rest := "", args
+	if len(args) > 0 {
+		sub, rest = args[0], args[1:]
+	}
+	if sub != "get" && sub != "set" {
+		return fmt.Errorf("%w: sync-policy takes get or set", errUsage)
+	}
+	f := c.flags("sync-policy "+sub, false, false)
+	var file *string
+	var confirm *bool
+	if sub == "set" {
+		file = f.fs.String("file", "", "policy JSON file, - for stdin")
+		confirm = f.fs.Bool("confirm", false, "save even when SecretSyncs lose their target Secrets")
+	}
+	api, err := f.parse(rest)
+	if err != nil {
+		return err
+	}
+	if f.fs.NArg() > 0 {
+		return fmt.Errorf("%w: sync-policy %s takes no arguments", errUsage, sub)
+	}
+	if sub == "set" && *file == "" {
+		return fmt.Errorf("%w: sync-policy set needs --file FILE, - for stdin", errUsage)
+	}
+	info, err := api.Info(ctx)
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(info.Capabilities, "sync-policy") {
+		return fmt.Errorf("server %s has no SecretSync policy; it needs the sync-policy capability, which a local vault does not have", f.server)
+	}
+	if sub == "get" {
+		p, err := api.GetSyncPolicy(ctx)
+		if err != nil {
+			return err
+		}
+		return c.printPolicy(p)
+	}
+	var data []byte
+	if *file == "-" {
+		data, err = io.ReadAll(c.Stdin)
+	} else {
+		data, err = os.ReadFile(*file)
+	}
+	if err != nil {
+		return err
+	}
+	source := *file
+	if source == "-" {
+		source = "stdin"
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var p client.SyncPolicy
+	if err := dec.Decode(&p); err != nil {
+		return fmt.Errorf("%w: %s is not a sync policy document: %w", errUsage, source, err)
+	}
+	if dec.Decode(&struct{}{}) != io.EOF {
+		return fmt.Errorf("%w: %s is not a sync policy document: unexpected data after the document", errUsage, source)
+	}
+	saved, err := api.PutSyncPolicy(ctx, p, *confirm)
+	var denied *client.DeniedError
+	if errors.As(err, &denied) {
+		fmt.Fprintf(c.Stderr, "the policy disallows %d SecretSyncs, which lose all their target Secrets:\n", len(denied.Denied))
+		for _, d := range denied.Denied {
+			fmt.Fprintln(c.Stderr, "  "+d)
+		}
+		fmt.Fprintln(c.Stderr, "Nothing was saved. Run again with --confirm to save the policy and delete those Secrets.")
+		return &exitError{code: 1}
+	}
+	if err != nil {
+		return err
+	}
+	return c.printPolicy(saved)
+}
+
+func (c *CLI) printPolicy(p client.SyncPolicy) error {
+	out, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(c.Stdout, "%s\n", out)
+	return nil
 }
 
 func (c *CLI) restore(ctx context.Context, args []string) error {

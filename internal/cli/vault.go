@@ -125,7 +125,7 @@ func (c *CLI) ui(ctx context.Context, args []string) error {
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
 	defer stop()
-	srv := &http.Server{Handler: v, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: v, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 10 * time.Minute, IdleTimeout: 2 * time.Minute}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -166,7 +166,7 @@ func (c *CLI) checkVaultLock(st store, server, path, key string) (string, error)
 	}
 	lock := cfg.lock(server)
 	after, err := parseLockAfter(lock.After)
-	if err != nil || key != "" && after == 0 {
+	if err != nil || (key != "" && after == 0) {
 		return key, err
 	}
 	now := time.Now()

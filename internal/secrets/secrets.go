@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"regexp"
 	"slices"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/rapatao/secret-manager/internal/storage"
+	"github.com/rapatao/secret-manager/internal/storage/encrypted"
 )
 
 var (
@@ -66,8 +68,17 @@ func NormalizePath(path string) (string, error) {
 
 // ValidateKey reports whether key can be used as a secret key.
 func ValidateKey(key string) error {
-	if !keyRe.MatchString(key) {
-		return fmt.Errorf("%w: key %q must match [-._a-zA-Z0-9]+", ErrInvalid, key)
+	if !keyRe.MatchString(key) || key == "." || key == ".." {
+		return fmt.Errorf("%w: key %q must match [-._a-zA-Z0-9]+ and cannot be \".\" or \"..\"", ErrInvalid, key)
+	}
+	return nil
+}
+
+// ValidateValue reports whether value can be stored. The prefix of encrypted
+// values is reserved.
+func ValidateValue(value string) error {
+	if strings.HasPrefix(value, encrypted.Prefix) {
+		return fmt.Errorf("%w: value must not start with %q", ErrInvalid, encrypted.Prefix)
 	}
 	return nil
 }
@@ -124,9 +135,12 @@ func (s *Service) UpdateKeys(ctx context.Context, path string, values map[string
 	if err != nil {
 		return err
 	}
-	for k := range values {
+	for k, v := range values {
 		if err := ValidateKey(k); err != nil {
 			return err
+		}
+		if err := ValidateValue(v); err != nil {
+			return fmt.Errorf("key %q: %w", k, err)
 		}
 	}
 	for _, k := range remove {
@@ -236,6 +250,11 @@ func (s *Service) CopyPath(ctx context.Context, from, to string, move bool) erro
 	if err != nil {
 		return err
 	}
+	for _, v := range versions {
+		if v.Unreadable {
+			return fmt.Errorf("%w: version %d of %s cannot be decrypted; delete it first", ErrInvalid, v.Number, from)
+		}
+	}
 	if _, err := s.backend.Get(ctx, to); err == nil {
 		return fmt.Errorf("%w: %s already exists", ErrInvalid, to)
 	} else if !errors.Is(err, ErrNotFound) {
@@ -287,7 +306,8 @@ func (s *Service) DeletedPaths(ctx context.Context) ([]string, error) {
 }
 
 // History returns the versions of path, newest first. Versions of a deleted
-// path are kept.
+// path are kept. A version that cannot be decrypted is listed with Unreadable
+// set and no data.
 func (s *Service) History(ctx context.Context, path string) ([]Version, error) {
 	path, err := NormalizePath(path)
 	if err != nil {
@@ -296,7 +316,8 @@ func (s *Service) History(ctx context.Context, path string) ([]Version, error) {
 	return s.backend.Versions(ctx, path)
 }
 
-// Version returns version n of path.
+// Version returns version n of path. A version that cannot be decrypted fails
+// with ErrInvalid.
 func (s *Service) Version(ctx context.Context, path string, n int) (Version, error) {
 	versions, err := s.History(ctx, path)
 	if err != nil {
@@ -304,6 +325,9 @@ func (s *Service) Version(ctx context.Context, path string, n int) (Version, err
 	}
 	for _, v := range versions {
 		if v.Number == n {
+			if v.Unreadable {
+				return Version{}, fmt.Errorf("%w: version %d cannot be decrypted", ErrInvalid, n)
+			}
 			return v, nil
 		}
 	}
@@ -395,9 +419,16 @@ func (s *Service) Backup(ctx context.Context, withHistory bool) ([]PathBackup, e
 		}
 		b := PathBackup{Path: p, Data: data}
 		if withHistory {
-			if b.Versions, err = s.backend.Versions(ctx, p); err != nil {
+			versions, err := s.backend.Versions(ctx, p)
+			if err != nil {
 				return nil, err
 			}
+			b.Versions = slices.DeleteFunc(versions, func(v Version) bool {
+				if v.Unreadable {
+					slog.Warn("backup skips a version that cannot be decrypted", "path", p, "version", v.Number)
+				}
+				return v.Unreadable
+			})
 		}
 		out = append(out, b)
 	}
@@ -415,15 +446,21 @@ func (s *Service) Restore(ctx context.Context, backup []PathBackup) error {
 			return err
 		}
 		backup[i].Path = path
-		for k := range b.Data {
+		for k, val := range b.Data {
 			if err := ValidateKey(k); err != nil {
 				return fmt.Errorf("%s: %w", path, err)
 			}
+			if err := ValidateValue(val); err != nil {
+				return fmt.Errorf("%s key %q: %w", path, k, err)
+			}
 		}
 		for _, v := range b.Versions {
-			for k := range v.Data {
+			for k, val := range v.Data {
 				if err := ValidateKey(k); err != nil {
 					return fmt.Errorf("%s version %d: %w", path, v.Number, err)
+				}
+				if err := ValidateValue(val); err != nil {
+					return fmt.Errorf("%s version %d key %q: %w", path, v.Number, k, err)
 				}
 			}
 		}

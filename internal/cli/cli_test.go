@@ -28,6 +28,7 @@ import (
 	"github.com/rapatao/secret-manager/internal/secrets"
 	"github.com/rapatao/secret-manager/internal/server"
 	"github.com/rapatao/secret-manager/internal/storage"
+	"github.com/rapatao/secret-manager/internal/storage/encrypted"
 	k8sstorage "github.com/rapatao/secret-manager/internal/storage/kubernetes"
 	"github.com/rapatao/secret-manager/internal/tokens"
 )
@@ -72,7 +73,12 @@ func (h *harness) prompt(label string) (string, error) {
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	backend := k8sstorage.New(fake.NewClientBuilder().Build(), "sm")
-	svc := secrets.New(backend, nil)
+	return newHarnessOn(t, backend, backend)
+}
+
+func newHarnessOn(t *testing.T, backend *k8sstorage.Backend, store storage.Backend) *harness {
+	t.Helper()
+	svc := secrets.New(store, nil)
 	svc.KeepVersions = 10
 	sum := sha256.Sum256([]byte(token))
 	if err := backend.PutTokens(context.Background(), []storage.Token{{Name: "full", Hash: hex.EncodeToString(sum[:]), Path: "/"}}); err != nil {
@@ -1430,6 +1436,28 @@ func TestScanRecursiveNamesPaths(t *testing.T) {
 	}
 }
 
+func TestFinishGitKillsOnParseError(t *testing.T) {
+	cmd := exec.Command("yes")
+	if _, err := cmd.StdoutPipe(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Skip("yes not available")
+	}
+	want := errors.New("parse failed")
+	done := make(chan error, 1)
+	go func() { done <- finishGit(cmd, want, &bytes.Buffer{}) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, want) {
+			t.Fatalf("err = %v, want %v", err, want)
+		}
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("finishGit did not return")
+	}
+}
+
 func TestScanHistory(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
@@ -1463,5 +1491,36 @@ func TestScanHistory(t *testing.T) {
 	}
 	if got := h.stdout.String(); !strings.HasSuffix(got, ":app.env:3: /app TOKEN\n") || strings.Count(got, "\n") != 1 {
 		t.Fatalf("history stdout: %q", got)
+	}
+}
+
+func TestHistoryUnreadableVersion(t *testing.T) {
+	inner := k8sstorage.New(fake.NewClientBuilder().Build(), "sm")
+	mk := func(b byte) *encrypted.Backend {
+		e, err := encrypted.New(inner, bytes.Repeat([]byte{b}, encrypted.KeySize), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	h := newHarnessOn(t, inner, mk(7))
+	h.mustRun("set", "--path", "/tools", "A=1")
+	if err := mk(9).AddVersion(context.Background(), "/tools", time.Now(), map[string]string{"A": "foreign"}, 10); err != nil {
+		t.Fatal(err)
+	}
+	h.mustRun("set", "--path", "/tools", "A=3")
+
+	lines := strings.Split(strings.TrimSpace(h.mustRun("history", "--path", "/tools")), "\n")
+	if len(lines) != 4 || !strings.HasSuffix(lines[2], "(unreadable)") || strings.Contains(lines[1], "unreadable") || strings.Contains(lines[3], "unreadable") {
+		t.Fatalf("history: %q", lines)
+	}
+	if code := h.run("history", "--path", "/tools", "2"); code != 1 {
+		t.Fatalf("viewing an unreadable version: exit %d", code)
+	}
+	if code := h.run("rollback", "--path", "/tools", "2"); code != 1 {
+		t.Fatalf("rolling back to an unreadable version: exit %d", code)
+	}
+	if got := h.mustRun("history", "--path", "/tools", "--delete", "2"); got != "Deleted version 2 of /tools\n" {
+		t.Fatalf("history --delete: %q", got)
 	}
 }

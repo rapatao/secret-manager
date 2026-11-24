@@ -44,6 +44,10 @@ CREATE TABLE IF NOT EXISTS sm_audit (
 	position integer PRIMARY KEY,
 	doc      jsonb NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sm_sync_policy (
+	id  integer PRIMARY KEY CHECK (id = 1),
+	doc jsonb NOT NULL
+);
 `
 
 // Backend implements storage.Backend on top of PostgreSQL. Every call reads
@@ -137,6 +141,9 @@ func (b *Backend) List(ctx context.Context, prefix string) ([]string, error) {
 
 // AddVersion implements storage.Backend.
 func (b *Backend) AddVersion(ctx context.Context, path string, at time.Time, data map[string]string, keep int) error {
+	if keep < 1 {
+		return fmt.Errorf("add version of %s: keep must be at least 1, got %d", path, keep)
+	}
 	return b.inVersionsTx(ctx, path, func(tx pgx.Tx) error {
 		var n int
 		if err := tx.QueryRow(ctx, `SELECT coalesce(max(number), 0) + 1 FROM sm_versions WHERE path = $1`, path).Scan(&n); err != nil {
@@ -148,7 +155,8 @@ func (b *Backend) AddVersion(ctx context.Context, path string, at time.Time, dat
 		if _, err := tx.Exec(ctx, `INSERT INTO sm_versions (path, number, time, data) VALUES ($1, $2, $3, $4)`, path, n, at, data); err != nil {
 			return fmt.Errorf("add version %d: %w", n, err)
 		}
-		if _, err := tx.Exec(ctx, `DELETE FROM sm_versions WHERE path = $1 AND number <= $2`, path, n-keep); err != nil {
+		if _, err := tx.Exec(ctx, `DELETE FROM sm_versions WHERE path = $1 AND number NOT IN
+			(SELECT number FROM sm_versions WHERE path = $1 ORDER BY number DESC LIMIT $2)`, path, keep); err != nil {
 			return fmt.Errorf("prune versions: %w", err)
 		}
 		return nil
@@ -228,6 +236,29 @@ func (b *Backend) Tokens(ctx context.Context) ([]storage.Token, error) {
 func (b *Backend) PutTokens(ctx context.Context, tokens []storage.Token) error {
 	if err := replaceDocs(ctx, b.pool, "sm_tokens", tokens); err != nil {
 		return fmt.Errorf("put tokens: %w", err)
+	}
+	return nil
+}
+
+// SyncPolicy implements storage.Backend.
+func (b *Backend) SyncPolicy(ctx context.Context) (storage.SyncPolicy, error) {
+	var p storage.SyncPolicy
+	err := b.pool.QueryRow(ctx, `SELECT doc FROM sm_sync_policy WHERE id = 1`).Scan(&p)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return storage.SyncPolicy{}, nil
+	}
+	if err != nil {
+		return storage.SyncPolicy{}, fmt.Errorf("sync policy: %w", err)
+	}
+	return p, nil
+}
+
+// PutSyncPolicy implements storage.Backend.
+func (b *Backend) PutSyncPolicy(ctx context.Context, p storage.SyncPolicy) error {
+	_, err := b.pool.Exec(ctx, `INSERT INTO sm_sync_policy (id, doc) VALUES (1, $1)
+		ON CONFLICT (id) DO UPDATE SET doc = EXCLUDED.doc`, p)
+	if err != nil {
+		return fmt.Errorf("put sync policy: %w", err)
 	}
 	return nil
 }

@@ -93,7 +93,7 @@ func (c *CLI) loopbackLogin(ctx context.Context, api *client.Client) (client.Log
 		err  error
 	}
 	done := make(chan result, 1)
-	srv := &http.Server{ReadHeaderTimeout: 10 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := &http.Server{ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 10 * time.Minute, IdleTimeout: 2 * time.Minute, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		if r.URL.Path != "/callback" || q.Get("state") != state {
 			http.Error(w, "unexpected request", http.StatusBadRequest)

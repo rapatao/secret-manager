@@ -34,6 +34,7 @@ import (
 	filestorage "github.com/rapatao/secret-manager/internal/storage/file"
 	k8sstorage "github.com/rapatao/secret-manager/internal/storage/kubernetes"
 	pgstorage "github.com/rapatao/secret-manager/internal/storage/postgres"
+	"github.com/rapatao/secret-manager/internal/syncpolicy"
 	"github.com/rapatao/secret-manager/internal/tokens"
 )
 
@@ -216,12 +217,15 @@ func runServer(args []string) error {
 
 	var changes controller.Changes
 	var onChange func(string)
+	var onPolicyChange func()
 	if *runController {
 		changes = controller.NewChanges()
 		onChange = changes.Notify
+		onPolicyChange = changes.NotifyAll
 	}
 	svc := secrets.New(backend, onChange)
 	svc.KeepVersions = *historyLimit
+	syncPolicy := syncpolicy.New(backend, onPolicyChange)
 
 	if *runController {
 		reconciler := &controller.SecretSyncReconciler{
@@ -229,6 +233,10 @@ func runServer(args []string) error {
 			Secrets:  svc,
 			Changes:  changes,
 			Recorder: mgr.GetEventRecorder("secret-manager"),
+			Policy:   syncPolicy,
+		}
+		if *storageName == "kubernetes" {
+			reconciler.StorageNamespace = *namespace
 		}
 		if err := reconciler.SetupWithManager(mgr); err != nil {
 			return fmt.Errorf("setup controller: %w", err)
@@ -241,6 +249,10 @@ func runServer(args []string) error {
 		return err
 	}
 	handler.Version = version
+	handler.SyncPolicy = syncPolicy
+	if *runController {
+		handler.PolicyPreview = controller.PolicyPreview(mgr.GetClient())
+	}
 	if *cacheMaxAge < 0 {
 		return errors.New("--cache-max-age must not be negative")
 	}
@@ -253,7 +265,7 @@ func runServer(args []string) error {
 		return fmt.Errorf("load audit events: %w", err)
 	}
 	handler.Settings = server.Settings{Storage: *storageName, Encryption: key != nil, Controller: *runController, Backups: sched}
-	httpServer := &http.Server{Addr: *addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	httpServer := &http.Server{Addr: *addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 10 * time.Minute, IdleTimeout: 2 * time.Minute}
 
 	slog.Info("starting secret-manager", "version", version, "storage", *storageName, "controller", *runController,
 		"encryption", key != nil, "backup_dir", sched.Dir, "events", handler.Events.String())

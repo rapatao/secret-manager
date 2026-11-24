@@ -7,7 +7,7 @@ A small, self-hosted key-value secret manager. It runs in three modes:
 - **Local vault**: the CLI and Web UI read an encrypted file on your machine, with no server. See [Local vault](docs/local-vault.md).
 
 - Secrets are organized by path (`/kubernetes/app`, `/tools`) and managed with a CLI or a Web UI.
-- On Kubernetes, a `SecretSync` resource syncs one or more paths into Kubernetes Secrets, in any namespace, optionally shaped with Go templates.
+- On Kubernetes, a `SecretSync` resource syncs one or more paths into Kubernetes Secrets, in any namespace, optionally shaped with Go templates. An optional sync policy, edited in the Web UI or with the CLI, limits the paths and namespaces a `SecretSync` may use.
 - Deployments, StatefulSets and DaemonSets that opt in are restarted when a Secret they use changes.
 - `secret-manager run` injects secrets as environment variables into local commands, masks their values in the command's output, and keeps working from an encrypted cache while the server is unreachable.
 - `secret-manager scan` finds secret values leaked into files and, optionally, into git history.

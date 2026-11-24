@@ -2,3 +2,8 @@
 bin
 charts
 *.md
+.local
+**/*.env
+**/.env*
+**/vault.json
+**/credentials.json

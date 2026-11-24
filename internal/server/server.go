@@ -21,6 +21,7 @@ import (
 	"github.com/rapatao/secret-manager/internal/generate"
 	"github.com/rapatao/secret-manager/internal/secrets"
 	"github.com/rapatao/secret-manager/internal/storage"
+	"github.com/rapatao/secret-manager/internal/syncpolicy"
 	"github.com/rapatao/secret-manager/internal/tokens"
 )
 
@@ -72,6 +73,12 @@ type Server struct {
 	// PlainHTTP sets Web UI cookies without Secure, for a Web UI served over
 	// plain HTTP on a loopback address.
 	PlainHTTP bool
+	// SyncPolicy holds the SecretSync policy edited on the Web UI. Nil hides
+	// the page.
+	SyncPolicy *syncpolicy.Store
+	// PolicyPreview lists, as "namespace/name: reason", the SecretSyncs a
+	// policy would disallow. Nil skips the preview.
+	PolicyPreview func(ctx context.Context, p storage.SyncPolicy) ([]string, error)
 
 	secrets    *secrets.Service
 	tokens     *tokens.Store
@@ -81,7 +88,10 @@ type Server struct {
 	auditLog   auditLog
 	auditStore AuditStore
 	logins     *loginLimiter
-	links      loginLinks
+	// authorizeLimits throttles the CLI login endpoints apart from the Web UI
+	// sign-in.
+	authorizeLimits *loginLimiter
+	links           loginLinks
 	// lastBackup is the latest scheduled backup run.
 	lastBackup atomic.Pointer[backupRun]
 	mux        *http.ServeMux
@@ -105,6 +115,8 @@ func New(svc *secrets.Service, tks *tokens.Store, token string) (*Server, error)
 		logins:      newLoginLimiter(),
 		mux:         http.NewServeMux(),
 		log:         slog.Default(),
+
+		authorizeLimits: newLoginLimiter(),
 	}
 	s.routes()
 	return s, nil
@@ -136,6 +148,8 @@ func (s *Server) routes() {
 	s.mux.Handle("DELETE /api/v1/secrets/{key}", s.bearer(writePath, s.apiDeleteKey))
 	s.mux.Handle("GET /api/v1/backup", s.bearer(readAll, s.apiBackup))
 	s.mux.Handle("POST /api/v1/restore", s.bearer(writeAll, s.apiRestore))
+	s.mux.Handle("GET /api/v1/sync-policy", s.bearer(readAll, s.apiGetSyncPolicy))
+	s.mux.Handle("PUT /api/v1/sync-policy", s.bearer(writeAll, s.apiPutSyncPolicy))
 	s.mux.Handle("GET /api/v1/history", s.bearer(readPath, s.apiHistory))
 	s.mux.Handle("GET /api/v1/history/{version}", s.bearer(readPath, s.apiVersion))
 	s.mux.Handle("DELETE /api/v1/history/{version}", s.bearer(writePath, s.apiDeleteVersion))
@@ -160,6 +174,8 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /secrets/versions/delete", s.ui(s.session(s.uiDeleteVersion)))
 	s.mux.Handle("POST /backup", s.ui(s.session(s.uiBackup)))
 	s.mux.Handle("GET /audit", s.ui(s.session(s.uiAudit)))
+	s.mux.Handle("GET /sync-policy", s.ui(s.session(s.uiSyncPolicy)))
+	s.mux.Handle("POST /sync-policy", s.ui(s.session(s.uiSaveSyncPolicy)))
 	s.mux.Handle("GET /generate", s.ui(s.session(func(w http.ResponseWriter, _ *http.Request) {
 		s.render(w, http.StatusOK, "generate", nil)
 	})))
@@ -278,7 +294,11 @@ func allowed(t tokens.Token, n need, path string) error {
 
 func (s *Server) apiInfo(w http.ResponseWriter, r *http.Request) {
 	s.auditAt(s.Events.Lists, r, "api", "info", "", nil, nil)
-	writeJSON(w, http.StatusOK, map[string]any{"version": s.Version, "capabilities": Capabilities})
+	caps := Capabilities
+	if s.SyncPolicy != nil {
+		caps = append(slices.Clone(caps), "sync-policy")
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"version": s.Version, "capabilities": caps})
 }
 
 // apiGenerate returns random values without storing them.
@@ -450,6 +470,8 @@ type versionJSON struct {
 	Time    time.Time         `json:"time"`
 	Keys    []string          `json:"keys,omitempty"`
 	Data    map[string]string `json:"data,omitempty"`
+
+	Unreadable bool `json:"unreadable,omitempty"`
 }
 
 type backupJSON struct {
@@ -527,7 +549,7 @@ func (s *Server) apiHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	out := []versionJSON{}
 	for _, v := range versions {
-		out = append(out, versionJSON{Version: v.Number, Time: v.Time, Keys: slices.Sorted(maps.Keys(v.Data))})
+		out = append(out, versionJSON{Version: v.Number, Time: v.Time, Keys: slices.Sorted(maps.Keys(v.Data)), Unreadable: v.Unreadable})
 	}
 	writeJSON(w, http.StatusOK, map[string][]versionJSON{"versions": out})
 }

@@ -18,16 +18,27 @@ helm install secret-manager oci://ghcr.io/rapatao/charts/secret-manager -n secre
 
 Add `--version 1.2.0` to pin a release. Set `historyLimit` (default `10`, `0` disables history) to change how many versions are kept per path, `events` to choose which [audit events](observability.md#event-categories) are logged or kept, and `revisionHistoryLimit` (default `10`) to change how many old ReplicaSets the Deployment keeps for `kubectl rollout undo`. From a checkout, use `charts/secret-manager` instead of the `oci://` reference.
 
-The chart installs the `SecretSync` CRD. Helm does not upgrade CRDs, so apply them after upgrading:
+The chart installs the `SecretSync` CRD, whose validation rule (`refreshInterval` at most 1h) needs Kubernetes 1.25 or later. Helm does not upgrade CRDs, so apply them after upgrading:
 
 ```sh
 helm pull oci://ghcr.io/rapatao/charts/secret-manager --untar --untardir /tmp/sm
 kubectl apply -f /tmp/sm/secret-manager/crds
 ```
 
+Before Kubernetes 1.30, the API server checks the rule on every update of a SecretSync, including the controller's finalizer and status writes. A SecretSync whose `refreshInterval` is above 1h then cannot be updated: its status stops changing and, once deleted, it stays in `Terminating`. Before applying the CRD on such a cluster, list the SecretSyncs and lower every `refreshInterval` above 1h:
+
+```sh
+kubectl get secretsync -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"/"}{.metadata.name}{"\t"}{.spec.refreshInterval}{"\n"}{end}'
+kubectl -n NAMESPACE patch secretsync NAME --type merge -p '{"spec":{"refreshInterval":"1h"}}'
+```
+
+If the CRD is already applied, the same patch recovers a stuck SecretSync. From Kubernetes 1.30, a value that was already stored and did not change is accepted, so existing SecretSyncs keep working and the controller resyncs them every hour at most.
+
 The server runs as a single replica: writes are serialized in process.
 
 Set `controller.enabled=false` to only store secrets: the `SecretSync` controller does not run, no Secret outside the release namespace is written, no workload is restarted, and the chart installs a Role limited to Secrets in the release namespace instead of a ClusterRole. Add `--skip-crds` to `helm install` to leave out the `SecretSync` CRD.
+
+With the controller enabled, the [sync policy](secretsync.md#sync-policy) limits what SecretSyncs may read and write. It lives in the server, is edited in the Web UI and is off by default.
 
 ## Without Kubernetes
 
@@ -71,5 +82,7 @@ The chart sets these; set them yourself when running `secret-manager server` out
 | `--backup-keep` | `7` | Scheduled backup files kept |
 | `--backup-history` | `false` | Include versions in scheduled backups |
 | `--log-level` | `info` | `debug`, `info`, `warn` or `error` |
+
+The API and Web UI listener, the one a [local vault](local-vault.md) serves for `ui`, and the loopback callback a CLI browser login waits on, wait 10 seconds for the request headers, read the whole request within 10 minutes, which bounds the upload of a restore, and close idle connections after 2 minutes. The metrics listener only waits 10 seconds for the headers. None of them sets a write timeout.
 
 The Web UI admin token is read from `SECRET_MANAGER_TOKEN`, the optional [encryption](storage.md#encryption) key from `SECRET_MANAGER_ENCRYPTION_KEY`, the key being rotated out from `SECRET_MANAGER_PREVIOUS_ENCRYPTION_KEY`, the optional [backup](backup.md#scheduled-backups) passphrase from `SECRET_MANAGER_BACKUP_PASSPHRASE`, and the `postgres` storage connection URL from `SECRET_MANAGER_DATABASE_URL`.

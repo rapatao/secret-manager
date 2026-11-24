@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/rapatao/secret-manager/internal/storage"
 	"github.com/rapatao/secret-manager/internal/storage/encrypted"
 )
 
@@ -32,7 +36,7 @@ func TestValidateKey(t *testing.T) {
 			t.Errorf("ValidateKey(%q): %v", k, err)
 		}
 	}
-	for _, k := range []string{"", "a b", "a=b", "a/b"} {
+	for _, k := range []string{"", "a b", "a=b", "a/b", ".", ".."} {
 		if err := ValidateKey(k); !errors.Is(err, ErrInvalid) {
 			t.Errorf("ValidateKey(%q): want ErrInvalid, got %v", k, err)
 		}
@@ -437,6 +441,38 @@ func TestRestoreValidatesBeforeWriting(t *testing.T) {
 	}
 }
 
+func TestRejectsReservedValuePrefix(t *testing.T) {
+	ctx := context.Background()
+	bad := encrypted.Prefix + "x"
+	s := New(newMem(), nil)
+	s.KeepVersions = 5
+
+	if err := s.SetKeys(ctx, "/app", map[string]string{"A": bad}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("SetKeys: want ErrInvalid, got %v", err)
+	}
+	if err := ValidateValue("plain enc:v1:"); err != nil {
+		t.Fatalf("prefix inside value: %v", err)
+	}
+
+	err := s.Restore(ctx, []PathBackup{
+		{Path: "/ok", Data: map[string]string{"A": "1"}},
+		{Path: "/data", Data: map[string]string{"A": bad}},
+	})
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Restore data: want ErrInvalid, got %v", err)
+	}
+	err = s.Restore(ctx, []PathBackup{
+		{Path: "/ok", Data: map[string]string{"A": "1"}},
+		{Path: "/ver", Data: map[string]string{"A": "1"}, Versions: []Version{{Number: 1, Data: map[string]string{"A": bad}}}},
+	})
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Restore versions: want ErrInvalid, got %v", err)
+	}
+	if paths, _ := s.ListPaths(ctx); len(paths) != 0 {
+		t.Fatalf("wrote %v before failing", paths)
+	}
+}
+
 func TestDiff(t *testing.T) {
 	got := Diff(map[string]string{"A": "1", "B": "2", "D": "4"}, map[string]string{"A": "1", "B": "3", "C": "x"})
 	want := []Change{{"~", "B"}, {"+", "C"}, {"-", "D"}}
@@ -445,5 +481,123 @@ func TestDiff(t *testing.T) {
 	}
 	if got := Diff(nil, nil); got != nil {
 		t.Fatalf("Diff(nil, nil) = %v", got)
+	}
+}
+
+// unreadableService returns a service over an encrypted backend whose
+// version 2 of /app is sealed under another key, and the inner backend.
+func unreadableService(t *testing.T) (*Service, storage.Backend) {
+	t.Helper()
+	inner := newMem()
+	b, err := encrypted.New(inner, bytes.Repeat([]byte{7}, encrypted.KeySize), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := encrypted.New(inner, bytes.Repeat([]byte{9}, encrypted.KeySize), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	s := New(b, nil)
+	s.KeepVersions = 10
+	if err := s.SetKeys(ctx, "/app", map[string]string{"A": "1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.AddVersion(ctx, "/app", time.Now(), map[string]string{"A": "foreign"}, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetKeys(ctx, "/app", map[string]string{"A": "3"}); err != nil {
+		t.Fatal(err)
+	}
+	return s, inner
+}
+
+func storedVersion(t *testing.T, inner storage.Backend, n int) map[string]string {
+	t.Helper()
+	versions, err := inner.Versions(context.Background(), "/app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range versions {
+		if v.Number == n {
+			return v.Data
+		}
+	}
+	return nil
+}
+
+func TestUnreadableVersionHistoryAndAccess(t *testing.T) {
+	ctx := context.Background()
+	s, inner := unreadableService(t)
+	versions, err := s.History(ctx, "/app")
+	if err != nil || len(versions) != 3 {
+		t.Fatalf("History = %v, %v", versions, err)
+	}
+	for _, v := range versions {
+		if v.Unreadable != (v.Number == 2) {
+			t.Fatalf("version %d Unreadable = %v", v.Number, v.Unreadable)
+		}
+	}
+	if _, err := s.Version(ctx, "/app", 2); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Version(unreadable): %v", err)
+	}
+	want := storedVersion(t, inner, 2)
+	if err := s.Rollback(ctx, "/app", 2); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Rollback(unreadable): %v", err)
+	}
+	if got, _ := s.Get(ctx, "/app", false); got["A"] != "3" {
+		t.Fatalf("data after failed rollback: %v", got)
+	}
+	if after, _ := s.History(ctx, "/app"); len(after) != 3 || !maps.Equal(storedVersion(t, inner, 2), want) {
+		t.Fatalf("failed rollback wrote versions: %+v", after)
+	}
+	if err := s.CopyPath(ctx, "/app", "/copy", false); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("CopyPath with unreadable version: %v", err)
+	}
+	if _, err := s.Get(ctx, "/copy", false); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("failed copy wrote data: %v", err)
+	}
+}
+
+func TestDeleteVersionsWithUnreadable(t *testing.T) {
+	ctx := context.Background()
+	s, inner := unreadableService(t)
+	want := storedVersion(t, inner, 2)
+	if err := s.DeleteVersions(ctx, "/app", 1); err != nil {
+		t.Fatal(err)
+	}
+	if got := storedVersion(t, inner, 2); !maps.Equal(got, want) || got == nil {
+		t.Fatalf("unreadable ciphertext changed: %v, want %v", got, want)
+	}
+	if err := s.DeleteVersions(ctx, "/app", 2); err != nil {
+		t.Fatal(err)
+	}
+	versions, _ := s.History(ctx, "/app")
+	if len(versions) != 1 || versions[0].Number != 3 {
+		t.Fatalf("versions after deleting the unreadable one: %+v", versions)
+	}
+}
+
+func TestBackupSkipsUnreadableVersions(t *testing.T) {
+	ctx := context.Background()
+	s, _ := unreadableService(t)
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	backup, err := s.Backup(ctx, true)
+	if err != nil || len(backup) != 1 || len(backup[0].Versions) != 2 {
+		t.Fatalf("Backup = %+v, %v", backup, err)
+	}
+	for _, v := range backup[0].Versions {
+		if v.Unreadable || v.Number == 2 {
+			t.Fatalf("backup kept version %+v", v)
+		}
+	}
+	for _, want := range []string{"level=WARN", "path=/app", "version=2"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("log %q lacks %q", logs.String(), want)
+		}
 	}
 }

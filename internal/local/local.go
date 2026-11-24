@@ -257,6 +257,14 @@ type memory struct {
 	storage.Backend
 	tokens []storage.Token
 	audit  []storage.AuditEvent
+	policy storage.SyncPolicy
+}
+
+func (m *memory) SyncPolicy(context.Context) (storage.SyncPolicy, error) { return m.policy, nil }
+
+func (m *memory) PutSyncPolicy(_ context.Context, p storage.SyncPolicy) error {
+	m.policy = p
+	return nil
 }
 
 func (m *memory) Tokens(context.Context) ([]storage.Token, error) { return m.tokens, nil }

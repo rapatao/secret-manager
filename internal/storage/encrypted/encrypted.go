@@ -17,9 +17,9 @@ import (
 	"github.com/rapatao/secret-manager/internal/storage"
 )
 
-// prefix marks an encrypted value. Values without it are plaintext written
+// Prefix marks an encrypted value. Values without it are plaintext written
 // before encryption was enabled.
-const prefix = "enc:v1:"
+const Prefix = "enc:v1:"
 
 // KeySize is the length of the key in bytes.
 const KeySize = 32
@@ -109,7 +109,7 @@ func (b *Backend) seal(path string, data map[string]string) map[string]string {
 	}
 	out := make(map[string]string, len(data))
 	for k, v := range data {
-		out[k] = prefix + base64.RawStdEncoding.EncodeToString(seal(b.aead, []byte(v), aad(path, k)))
+		out[k] = Prefix + base64.RawStdEncoding.EncodeToString(seal(b.aead, []byte(v), aad(path, k)))
 	}
 	return out
 }
@@ -119,7 +119,7 @@ func (b *Backend) seal(path string, data map[string]string) map[string]string {
 func (b *Backend) open(path string, data map[string]string) (out map[string]string, stale bool, err error) {
 	out = make(map[string]string, len(data))
 	for k, v := range data {
-		enc, ok := strings.CutPrefix(v, prefix)
+		enc, ok := strings.CutPrefix(v, Prefix)
 		if !ok {
 			out[k] = v
 			stale = stale || b.aead != nil
@@ -251,16 +251,37 @@ func (b *Backend) Versions(ctx context.Context, path string) ([]storage.Version,
 	}
 	for i, v := range versions {
 		if versions[i].Data, _, err = b.open(path, v.Data); err != nil {
-			return nil, fmt.Errorf("version %d: %w", v.Number, err)
+			versions[i].Data = nil
+			versions[i].Unreadable = true
 		}
 	}
 	return versions, nil
 }
 
-// ReplaceVersions implements storage.Backend.
+// ReplaceVersions implements storage.Backend. A version flagged Unreadable
+// keeps its stored value unchanged.
 func (b *Backend) ReplaceVersions(ctx context.Context, path string, versions []storage.Version) error {
+	var stored map[int]storage.Version
 	sealed := make([]storage.Version, len(versions))
 	for i, v := range versions {
+		if v.Unreadable {
+			if stored == nil {
+				current, err := b.inner.Versions(ctx, path)
+				if err != nil {
+					return err
+				}
+				stored = make(map[int]storage.Version, len(current))
+				for _, c := range current {
+					stored[c.Number] = c
+				}
+			}
+			c, ok := stored[v.Number]
+			if !ok {
+				return fmt.Errorf("version %d of %s: %w", v.Number, path, storage.ErrNotFound)
+			}
+			sealed[i] = c
+			continue
+		}
 		v.Data = b.seal(path, v.Data)
 		sealed[i] = v
 	}
@@ -281,6 +302,17 @@ func (b *Backend) Tokens(ctx context.Context) ([]storage.Token, error) {
 // PutTokens implements storage.Backend.
 func (b *Backend) PutTokens(ctx context.Context, tokens []storage.Token) error {
 	return b.inner.PutTokens(ctx, tokens)
+}
+
+// SyncPolicy implements storage.Backend. The policy holds no values, so it is
+// not encrypted.
+func (b *Backend) SyncPolicy(ctx context.Context) (storage.SyncPolicy, error) {
+	return b.inner.SyncPolicy(ctx)
+}
+
+// PutSyncPolicy implements storage.Backend.
+func (b *Backend) PutSyncPolicy(ctx context.Context, p storage.SyncPolicy) error {
+	return b.inner.PutSyncPolicy(ctx, p)
 }
 
 // AuditEvents implements storage.Backend. Audit events hold no values, so

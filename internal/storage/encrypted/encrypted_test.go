@@ -54,11 +54,11 @@ func TestStoresCiphertext(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, _ := inner.Get(ctx, "/app")
-	if !strings.HasPrefix(raw["A"], prefix) || strings.Contains(raw["A"], "s3cret") || raw["A"] == raw["B"] {
+	if !strings.HasPrefix(raw["A"], Prefix) || strings.Contains(raw["A"], "s3cret") || raw["A"] == raw["B"] {
 		t.Fatalf("stored values %v", raw)
 	}
 	versions, _ := inner.Versions(ctx, "/app")
-	if !strings.HasPrefix(versions[0].Data["A"], prefix) {
+	if !strings.HasPrefix(versions[0].Data["A"], Prefix) {
 		t.Fatalf("stored version %v", versions[0].Data)
 	}
 
@@ -103,7 +103,7 @@ func TestMigratePlaintext(t *testing.T) {
 	}
 	raw, _ := inner.Get(ctx, "/a")
 	versions, _ := inner.Versions(ctx, "/a")
-	if !strings.HasPrefix(raw["K"], prefix) || !strings.HasPrefix(versions[0].Data["K"], prefix) {
+	if !strings.HasPrefix(raw["K"], Prefix) || !strings.HasPrefix(versions[0].Data["K"], Prefix) {
 		t.Fatalf("still plaintext: %v, %v", raw, versions[0].Data)
 	}
 	if got, _ := b.Get(ctx, "/a"); got["K"] != "/a" {
@@ -195,5 +195,54 @@ func TestParseKey(t *testing.T) {
 		if _, err := ParseKey(bad); err == nil {
 			t.Errorf("ParseKey(%q) accepted", bad)
 		}
+	}
+}
+
+func TestVersionsFlagsUnreadable(t *testing.T) {
+	ctx := context.Background()
+	inner := newFile(t)
+	b := wrap(t, inner, key)
+	other := wrap(t, inner, bytes.Repeat([]byte{9}, KeySize))
+	for _, w := range []*Backend{b, other, b} {
+		if err := w.AddVersion(ctx, "/app", time.Now(), map[string]string{"A": "v"}, 10); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := b.Versions(ctx, "/app")
+	if err != nil || len(got) != 3 {
+		t.Fatalf("Versions = %v, %v", got, err)
+	}
+	if got[0].Unreadable || got[0].Data["A"] != "v" || got[2].Unreadable {
+		t.Fatalf("readable versions flagged: %+v", got)
+	}
+	if !got[1].Unreadable || got[1].Data != nil {
+		t.Fatalf("version 2 = %+v, want unreadable without data", got[1])
+	}
+}
+
+func TestReplaceVersionsKeepsUnreadableCiphertext(t *testing.T) {
+	ctx := context.Background()
+	inner := newFile(t)
+	b := wrap(t, inner, key)
+	other := wrap(t, inner, bytes.Repeat([]byte{9}, KeySize))
+	for _, w := range []*Backend{b, other, b} {
+		if err := w.AddVersion(ctx, "/app", time.Now(), map[string]string{"A": "v"}, 10); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, _ := inner.Versions(ctx, "/app")
+	versions, _ := b.Versions(ctx, "/app")
+	if err := b.ReplaceVersions(ctx, "/app", slices.Delete(versions, 0, 1)); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := inner.Versions(ctx, "/app")
+	if len(after) != 2 || after[0].Number != 2 || after[0].Data["A"] != before[1].Data["A"] {
+		t.Fatalf("stored versions = %+v, want version 2 unchanged", after)
+	}
+	if after[1].Data["A"] == before[2].Data["A"] {
+		t.Fatalf("readable version was not resealed")
+	}
+	if err := b.ReplaceVersions(ctx, "/app", []storage.Version{{Number: 9, Unreadable: true}}); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("unknown unreadable version: %v", err)
 	}
 }

@@ -55,7 +55,7 @@ var pageFuncs = template.FuncMap{
 }
 
 func init() {
-	for _, name := range []string{"login", "summary", "secrets", "path", "integrations", "authorize", "audit", "generate"} {
+	for _, name := range []string{"login", "summary", "secrets", "path", "integrations", "authorize", "audit", "generate", "syncpolicy"} {
 		pages[name] = template.Must(template.New(name).Funcs(pageFuncs).ParseFS(uiFS, "ui/layout.html", "ui/"+name+".html"))
 	}
 }
@@ -262,13 +262,20 @@ func (s *Server) uiPath(w http.ResponseWriter, r *http.Request) {
 	var history []uiVersion
 	changed := map[string]time.Time{}
 	for i, v := range versions {
-		h := uiVersion{Number: v.Number, Time: v.Time, Current: !deleted && i == 0, Same: !deleted && maps.Equal(v.Data, data)}
+		h := uiVersion{Number: v.Number, Time: v.Time, Unreadable: v.Unreadable,
+			Current: !deleted && i == 0, Same: !deleted && !v.Unreadable && maps.Equal(v.Data, data)}
+		if v.Unreadable {
+			history = append(history, h)
+			continue
+		}
 		for _, c := range secrets.Diff(data, v.Data) {
 			h.Restore = append(h.Restore, uiChange{c, data[c.Key], v.Data[c.Key]})
 		}
 		switch {
 		case i+1 < len(versions):
-			h.Changes = secrets.Diff(versions[i+1].Data, v.Data)
+			if !versions[i+1].Unreadable {
+				h.Changes = secrets.Diff(versions[i+1].Data, v.Data)
+			}
 		case v.Number == 1:
 			h.Changes = secrets.Diff(nil, v.Data)
 		}
@@ -314,7 +321,7 @@ func compareVersions(q url.Values, deleted bool, current map[string]string, vers
 		n, err := strconv.Atoi(name)
 		if err == nil {
 			for _, v := range versions {
-				if v.Number == n {
+				if v.Number == n && !v.Unreadable {
 					return v.Data, nil
 				}
 			}
@@ -343,6 +350,8 @@ type uiVersion struct {
 	Current bool
 	Same    bool
 	Restore []uiChange
+
+	Unreadable bool
 }
 
 type uiChange struct {
@@ -591,6 +600,7 @@ func (s *Server) render(w http.ResponseWriter, status int, page string, data map
 		data = map[string]any{}
 	}
 	data["Version"] = s.Version
+	data["SyncPolicyNav"] = s.SyncPolicy != nil
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	if err := pages[page].ExecuteTemplate(w, "layout", data); err != nil {

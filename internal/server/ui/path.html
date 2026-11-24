@@ -132,7 +132,8 @@
 <td class="mono" data-label="Changes">{{range $v.Changes}}<span class="change {{template "op" .Op}}">{{.Op}}{{.Key}}</span> {{else}}<span class="muted">-</span>{{end}}</td>
 <td class="actions">
 {{if $v.Current}}<span class="badge">current</span>{{else if $v.Same}}<span class="muted">same as current</span>{{end}}
-{{if not (or $v.Current $v.Same)}}
+{{if $v.Unreadable}}<span class="badge">unreadable</span>{{end}}
+{{if not (or $v.Current $v.Same $v.Unreadable)}}
 <button type="button" class="small" commandfor="diff-{{$v.Number}}" command="show-modal">Diff</button>
 <dialog id="diff-{{$v.Number}}">
 <form class="stack compare-with" method="get" action="/secrets/path#compare">
@@ -141,13 +142,13 @@
 <label class="inline">Compare
 <select name="from" aria-label="Source">
 {{if $.Deleted}}<option value="" selected disabled>pick a version</option>{{else}}<option value="current" selected>current</option>{{end}}
-{{range $.History}}<option value="{{.Number}}">v{{.Number}}</option>
-{{end}}</select></label>
+{{range $.History}}{{if not .Unreadable}}<option value="{{.Number}}">v{{.Number}}</option>
+{{end}}{{end}}</select></label>
 <label class="inline">with
 <select name="to" aria-label="Target">
 {{if not $.Deleted}}<option value="current">current</option>{{end}}
-{{range $.History}}<option value="{{.Number}}"{{if eq .Number $v.Number}} selected{{end}}>v{{.Number}}</option>
-{{end}}</select></label>
+{{range $.History}}{{if not .Unreadable}}<option value="{{.Number}}"{{if eq .Number $v.Number}} selected{{end}}>v{{.Number}}</option>
+{{end}}{{end}}</select></label>
 <noscript><button type="submit" class="small">Compare</button></noscript>
 </div>
 <div class="compare-view">
