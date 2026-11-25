@@ -13,6 +13,7 @@ import (
 
 	"github.com/zalando/go-keyring"
 
+	"github.com/rapatao/secret-manager/internal/atomicfile"
 	"github.com/rapatao/secret-manager/internal/local"
 )
 
@@ -210,20 +211,5 @@ func writeAtomic(dir, name string, b []byte) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	if p, err := filepath.EvalSymlinks(filepath.Join(dir, name)); err == nil {
-		dir, name = filepath.Split(p)
-	}
-	tmp, err := os.CreateTemp(dir, name+".*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	_, err = tmp.Write(b)
-	if closeErr := tmp.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), filepath.Join(dir, name))
+	return atomicfile.Write(filepath.Join(dir, name), b)
 }

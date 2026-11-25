@@ -1,0 +1,35 @@
+{{define "title"}}Sync policy - {{end}}
+{{define "content"}}
+<h1>Sync policy</h1>
+{{if not .Controller}}<p class="error" role="alert">The SecretSync controller is not running on this server, so the policy has no effect until it runs. It is saved without a preview, and the deletions it causes happen when the controller starts.</p>{{end}}
+{{if .Denied}}<div class="error" role="alert">
+<p>Saving this policy disallows {{len .Denied}} SecretSync(s). The controller deletes every Secret they own, Orphan ones included:</p>
+<ul>{{range .Denied}}<li class="mono">{{.}}</li>{{end}}</ul>
+</div>{{end}}
+<form method="post" action="/sync-policy" class="card stack">
+<input type="hidden" name="base" value="{{.Base}}">
+<div class="body stack">
+<label class="check"><input type="checkbox" name="enabled" value="true"{{if .Enabled}} checked{{end}}> Enabled</label>
+<p class="muted">Enabling the policy deletes the target Secrets of every SecretSync that it does not allow, Orphan ones included. Disabled, SecretSyncs are unrestricted.</p>
+</div>
+<table class="stack-narrow">
+<thead><tr><th>Namespace</th><th>Allowed paths</th><th>Extra target namespaces</th><th>Remove</th></tr></thead>
+<tbody>
+{{range $i, $row := .Rows}}
+<tr>
+<td data-label="Namespace"><input name="namespace" value="{{$row.Namespace}}" class="mono" autocomplete="off" aria-label="Namespace"></td>
+<td data-label="Allowed paths"><textarea name="paths" rows="2" class="mono" aria-label="Allowed paths" placeholder="/apps/team-a">{{$row.Paths}}</textarea></td>
+<td data-label="Extra target namespaces"><input name="targets" value="{{$row.Targets}}" class="mono" autocomplete="off" aria-label="Extra target namespaces"></td>
+<td data-label="Remove" class="actions"><input type="checkbox" name="remove" value="{{$i}}" aria-label="Remove"></td>
+</tr>
+{{end}}
+</tbody>
+</table>
+<div class="body stack">
+<p class="muted">Separate paths and target namespaces with spaces or new lines. A SecretSync may read the listed paths and everything below them, and write to its own namespace and the target namespaces listed. A namespace that is not listed syncs nothing. The last row adds a namespace.</p>
+{{if .Denied}}<input type="hidden" name="digest" value="{{.Digest}}">
+<label>Type <code>delete</code> to confirm <input name="confirm" class="mono" autocomplete="off" required></label>{{end}}
+<div><button type="submit" class="primary">Save</button></div>
+</div>
+</form>
+{{end}}

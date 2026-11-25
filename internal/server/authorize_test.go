@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -71,15 +72,13 @@ func TestAuthorizeLoopback(t *testing.T) {
 	if status, body := do(t, ts, "POST", "/api/v1/authorize/token", "", `{"code":"`+code+`","codeVerifier":"wrong"}`); status != http.StatusBadRequest {
 		t.Fatalf("wrong verifier: %d %s", status, body)
 	}
-	if status, _ := do(t, ts, "POST", "/api/v1/authorize/token", "", `{"code":"`+code+`","codeVerifier":"`+verifier+`"}`); status != http.StatusBadRequest {
-		t.Fatalf("code reused after a failed exchange: %d", status)
-	}
-
-	loc, _ = url.Parse(mustPost(t, c, ts.URL+"/authorize", approve))
-	status, body := do(t, ts, "POST", "/api/v1/authorize/token", "", `{"code":"`+loc.Query().Get("code")+`","codeVerifier":"`+verifier+`"}`)
+	status, body := do(t, ts, "POST", "/api/v1/authorize/token", "", `{"code":"`+code+`","codeVerifier":"`+verifier+`"}`)
 	var issued issuedJSON
 	if err := json.Unmarshal([]byte(body), &issued); status != http.StatusOK || err != nil || issued.Path != "/app" || issued.Expires.IsZero() {
-		t.Fatalf("exchange: %d %s", status, body)
+		t.Fatalf("exchange after a wrong verifier: %d %s", status, body)
+	}
+	if status, _ := do(t, ts, "POST", "/api/v1/authorize/token", "", `{"code":"`+code+`","codeVerifier":"`+verifier+`"}`); status != http.StatusBadRequest {
+		t.Fatalf("code reused: %d", status)
 	}
 	if status, _ := do(t, ts, "GET", "/api/v1/paths", issued.Token, ""); status != http.StatusOK {
 		t.Fatalf("issued token: %d", status)
@@ -147,4 +146,154 @@ func mustPost(t *testing.T, c *http.Client, u string, form url.Values) string {
 	}
 	res.Body.Close()
 	return res.Header.Get("Location")
+}
+
+func TestAuthorizeThrottle(t *testing.T) {
+	t.Run("starts", func(t *testing.T) {
+		ts, logs := newLoggedServer(t)
+		for i := range loginFreeFailures + 1 {
+			if status, body := do(t, ts, "POST", "/api/v1/authorize/device", "", `{"name":"laptop"}`); status != http.StatusOK {
+				t.Fatalf("start %d: %d %s", i, status, body)
+			}
+		}
+		if status, _ := do(t, ts, "POST", "/api/v1/authorize/device", "", `{"name":"laptop"}`); status != http.StatusTooManyRequests {
+			t.Fatalf("start past the limit: %d", status)
+		}
+		c := uiClient(t, ts)
+		_, body := get(t, c, ts.URL+"/audit")
+		if strings.Contains(body, "authorize_start") {
+			t.Fatalf("authorize_start kept:\n%s", body)
+		}
+		if !strings.Contains(logs.String(), `"op":"authorize_start"`) {
+			t.Fatalf("authorize_start not logged:\n%s", logs)
+		}
+		if status, _ := postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL); status != http.StatusOK {
+			t.Fatalf("web sign-in throttled by authorize requests: %d", status)
+		}
+	})
+
+	t.Run("pending polls", func(t *testing.T) {
+		ts := newTestServer(t)
+		_, body := do(t, ts, "POST", "/api/v1/authorize/device", "", `{"name":"laptop"}`)
+		var d deviceJSON
+		if err := json.Unmarshal([]byte(body), &d); err != nil {
+			t.Fatal(err)
+		}
+		for i := range 3 * loginFreeFailures {
+			if status, _ := do(t, ts, "POST", "/api/v1/authorize/token", "", `{"deviceCode":"`+d.DeviceCode+`"}`); status != http.StatusBadRequest {
+				t.Fatalf("poll %d: %d", i, status)
+			}
+			if status, _ := do(t, ts, "POST", "/api/v1/authorize/token", "", `{}`); status != http.StatusBadRequest {
+				t.Fatalf("probe %d: %d", i, status)
+			}
+		}
+	})
+
+	t.Run("invalid codes", func(t *testing.T) {
+		ts, logs := newLoggedServer(t)
+		for i := range loginFreeFailures + 1 {
+			if status, _ := do(t, ts, "POST", "/api/v1/authorize/token", "", `{"deviceCode":"guess"}`); status != http.StatusBadRequest {
+				t.Fatalf("guess %d: %d", i, status)
+			}
+		}
+		if status, _ := do(t, ts, "POST", "/api/v1/authorize/token", "", `{"code":"guess","codeVerifier":"v"}`); status != http.StatusTooManyRequests {
+			t.Fatalf("guess past the limit: %d", status)
+		}
+		c := uiClient(t, ts)
+		_, body := get(t, c, ts.URL+"/audit")
+		if strings.Contains(body, "authorize_token") {
+			t.Fatalf("failed authorize_token kept:\n%s", body)
+		}
+		if !strings.Contains(logs.String(), `"op":"authorize_token"`) {
+			t.Fatalf("failed authorize_token not logged:\n%s", logs)
+		}
+	})
+}
+
+func TestAuthorizeThrottleMessages(t *testing.T) {
+	ts := newTestServer(t)
+	for range loginFreeFailures + 1 {
+		do(t, ts, "POST", "/api/v1/authorize/device", "", `{"name":"laptop"}`)
+	}
+	status, body := do(t, ts, "POST", "/api/v1/authorize/device", "", `{"name":"laptop"}`)
+	if status != http.StatusTooManyRequests || !regexp.MustCompile(`too many login requests from this address, try again in \d+s`).MatchString(body) {
+		t.Fatalf("throttled start: %d %s", status, body)
+	}
+
+	ts = newTestServer(t)
+	for range loginFreeFailures + 1 {
+		do(t, ts, "POST", "/api/v1/authorize/token", "", `{"deviceCode":"guess"}`)
+	}
+	for _, in := range []string{`{"deviceCode":"guess"}`, `{"code":"guess","codeVerifier":"v"}`} {
+		status, body = do(t, ts, "POST", "/api/v1/authorize/token", "", in)
+		if status != http.StatusTooManyRequests || !regexp.MustCompile(`invalid or expired login code; too many failed login requests from this address, try again in \d+s`).MatchString(body) {
+			t.Fatalf("throttled code %s: %d %s", in, status, body)
+		}
+	}
+}
+
+func TestAuthorizeProbeIsNotAudited(t *testing.T) {
+	ts, logs := newLoggedServer(t)
+	for _, in := range []string{`{}`, ``, `{"code":""}`} {
+		if status, _ := do(t, ts, "POST", "/api/v1/authorize/token", "", in); status != http.StatusBadRequest {
+			t.Fatalf("probe %q: %d", in, status)
+		}
+	}
+	if strings.Contains(logs.String(), "authorize_token") {
+		t.Fatalf("probe logged:\n%s", logs)
+	}
+	for range 3 * loginFreeFailures {
+		do(t, ts, "POST", "/api/v1/authorize/token", "", `{}`)
+	}
+	if status, _ := do(t, ts, "POST", "/api/v1/authorize/token", "", `{"deviceCode":"guess"}`); status != http.StatusBadRequest {
+		t.Fatalf("probes were counted: a bogus code got %d", status)
+	}
+	if !strings.Contains(logs.String(), `"op":"authorize_token"`) {
+		t.Fatalf("failed code not logged:\n%s", logs)
+	}
+}
+
+func TestAuthorizeThrottleSparesInFlightLogins(t *testing.T) {
+	var srv *Server
+	ts, _ := newLoggedServer(t, func(s *Server) { srv = s })
+	c := uiClient(t, ts)
+	postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL)
+
+	_, body := do(t, ts, "POST", "/api/v1/authorize/device", "", `{"name":"cli-box"}`)
+	var d deviceJSON
+	if err := json.Unmarshal([]byte(body), &d); err != nil {
+		t.Fatal(err)
+	}
+	verifier := "a-verifier-of-at-least-43-characters-0123456789"
+	loopback := &login{name: "cli-laptop", challenge: pkceChallenge(verifier), code: "loopback-code"}
+	if err := srv.grants.add(loopback); err != nil {
+		t.Fatal(err)
+	}
+	srv.grants.approve(loopback, false, grant{name: "cli-laptop", path: "/"})
+
+	for range loginFreeFailures + 1 {
+		do(t, ts, "POST", "/api/v1/authorize/token", "", `{"deviceCode":"guess"}`)
+	}
+	if status, _ := do(t, ts, "POST", "/api/v1/authorize/device", "", `{"name":"x"}`); status != http.StatusTooManyRequests {
+		t.Fatalf("start while throttled: %d", status)
+	}
+	if status, _ := do(t, ts, "POST", "/api/v1/authorize/token", "", `{"deviceCode":"guess"}`); status != http.StatusTooManyRequests {
+		t.Fatalf("unknown code while throttled: %d", status)
+	}
+	if status, _ := do(t, ts, "POST", "/api/v1/authorize/token", "", `{}`); status != http.StatusBadRequest {
+		t.Fatalf("probe while throttled: %d", status)
+	}
+
+	if status, body := do(t, ts, "POST", "/api/v1/authorize/token", "", `{"deviceCode":"`+d.DeviceCode+`"}`); status != http.StatusBadRequest || !strings.Contains(body, "authorization_pending") {
+		t.Fatalf("pending poll while throttled: %d %s", status, body)
+	}
+	if status, body := postForm(t, c, ts, "/authorize", url.Values{"user_code": {d.UserCode}, "confirm": {"yes"}, "name": {"cli-box"}, "path": {"/"}, "expires": {"never"}}, ts.URL); status != http.StatusOK {
+		t.Fatalf("approve: %d\n%s", status, body)
+	}
+	if status, body := do(t, ts, "POST", "/api/v1/authorize/token", "", `{"deviceCode":"`+d.DeviceCode+`"}`); status != http.StatusOK {
+		t.Fatalf("device token while throttled: %d %s", status, body)
+	}
+	if status, body := do(t, ts, "POST", "/api/v1/authorize/token", "", `{"code":"loopback-code","codeVerifier":"`+verifier+`"}`); status != http.StatusOK {
+		t.Fatalf("code exchange while throttled: %d %s", status, body)
+	}
 }

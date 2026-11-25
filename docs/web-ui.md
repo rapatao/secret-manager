@@ -21,7 +21,7 @@ Keys
 - Values show as a fixed-length mask until Show opens the editor; an edited badge marks a value with unsaved changes. The copy button copies a value to the clipboard.
 - Changed shows when each key was last added or changed, from the versions kept in history.
 - Adding keys, editing values and deleting keys are staged on the page: a deleted key is struck through until saved, and Undo brings it back.
-- A new key cannot reuse the name of an existing key or of another new key; existing keys change in their own row.
+- A new key cannot reuse the name of an existing key or of another new key; existing keys change in their own row. Key names and values follow the rules in [Keys and values](storage.md#keys-and-values); a save with a rejected key or value shows the error and writes nothing.
 - Generate, under a value being added or edited, replaces it with random letters and digits made in the browser, as many as the length next to it (default 32, up to 4096).
 - Import opens a dialog taking pasted text or a file, read as `set --json-file` reads it, a JSON object of string values, when it starts with `{`, otherwise as `set --env-file` reads `KEY=VALUE` lines. Each key becomes a staged addition, or a staged change of an existing key, including one staged for deletion. A line that cannot be read is reported with its number and nothing is staged.
 - Download asks for a format, `.env` or JSON, and saves the keys of the path as `secret-manager export` prints them, in a file named after the path (`/app/db` gives `app-db.env` or `app-db.json`). Unsaved changes are not included.
@@ -31,12 +31,24 @@ History
 - Each version can be compared with the current data and restored after a confirmation dialog, see [History](history.md).
 - Diff, on every version except the current one and those holding the same data, opens a dialog comparing the current data with that version, values included. Its Compare and with selectors at the top pick any source and target, the current data or a version, and changing either runs the comparison in the dialog: the keys added, changed and deleted between the two with their values. Unsaved key edits on the page are kept, and closing the dialog resets it. Without JavaScript, a Compare button reloads the page with the result above the version list and the pair in the URL (`&from=2&to=current`).
 - Each version can be deleted after a confirmation dialog.
+- A version that cannot be decrypted shows an "unreadable" badge and no Diff or Restore button, and the Compare selectors leave it out. Its Delete button stays. See [Unreadable versions](storage.md#unreadable-versions).
 
 Generate
 - The Generate page (`/generate`) makes random values in the browser without saving them, in the formats of [`secret-manager generate`](cli.md#generating-values): a format, a length (bytes for hex and base64, none for UUID) and a count up to 100. Copy copies every value, one per line.
 
 Integrations and logins
 - The Integrations page manages [integrations](integrations.md). `/authorize` approves or denies CLI logins, see [Servers and login](cli.md#servers-and-login).
+
+Sync policy
+- The Sync policy page (`/sync-policy`) edits the [sync policy](secretsync.md#sync-policy) limiting what SecretSyncs may read and write. It is off by default, and the link and the page exist only on a server, not in a [local vault](local-vault.md) Web UI. The summary shows whether the policy is on.
+- Enabled turns the policy on. Enabling it deletes the target Secrets of every SecretSync it does not allow, Orphan ones included.
+- The table has one row per namespace: the namespace, the allowed paths, the extra target namespaces and a Remove checkbox. Separate paths and target namespaces with spaces or new lines. The last row, empty, adds a namespace; rows left empty are ignored. Namespaces must be DNS-1123 labels and paths must look like `/apps/team-a`; a rejected policy shows the error and saves nothing.
+- A notice shows when the SecretSync controller is not running: the policy is saved but has no effect until it runs.
+- When the policy is enabled and the controller runs, every save lists the SecretSyncs, as `namespace/name: reason`, that the new policy disallows and the stored policy does not already disallow. When there are any, the page shows the list and asks to type `delete`. The confirmation is bound to the policy and the list shown: a save is accepted only with `delete` typed and the hidden digest the page carries, which covers the submitted policy and the list. Changing a row after the preview, or a change in the list, makes the next save show the new list and ask again. A save that disallows nothing needs no confirmation. SecretSyncs created between the preview and the save are not previewed.
+- With the controller off the policy is saved without a preview, and the deletions it causes happen when the controller starts.
+- The form carries a hidden digest of the policy it shows. A save is accepted only while the stored policy still has that digest: when another save, from the Web UI, the API or the CLI, changed it first, the page shows an error and the current policy, and nothing is saved. The check covers one server process, the supported single replica.
+- The same policy is available over the [API](api.md) and with [`secret-manager sync-policy`](cli.md#sync-policy), with the same preview. They return the digest of the preview, and `confirm` in the API or `--confirm` in the CLI takes that digest in place of the typed word.
+- Every save is audited, whatever the [event categories](observability.md#event-categories), as `enable_sync_policy`, `disable_sync_policy` or `update_sync_policy`, with the namespaces of the new policy as keys.
 
 Audit
 - The Audit page (`/audit`) lists the newest 500 [audited](observability.md#event-categories) events, newest first: time, source, operation, integration, path, keys, client address and result.
@@ -45,6 +57,6 @@ Audit
 
 The server rejects every change made without its confirmation, or with one that does not match. Filtering paths, editing keys, the Generate page, the copy button and the integration dialogs need JavaScript; browsers without invoker commands (`commandfor`) also use it to open the dialogs.
 
-After 5 failed sign-ins from one address, each further attempt from it must wait 1 second, then 2, 4 and so on up to 1 minute, and gets `429` with `too many failed sign-ins, try again in Ns` until then. A successful sign-in, or 15 minutes without a failure, resets the count. The address is the [client address](client-address.md): without trusted proxies, every client behind a reverse proxy or Ingress shares the proxy address, so the wait never exceeds 1 minute. The counts live in the server's memory.
+After 5 failed sign-ins from one address, each further attempt from it must wait 1 second, then 2, 4 and so on up to 1 minute, and gets `429` with `too many failed sign-ins, try again in 4s` until then, with `Retry-After` set to the same wait in seconds. The wait is written as a Go duration, such as `4s` or `1m0s`. A successful sign-in, or 15 minutes without a failure, resets the count. The address is the [client address](client-address.md), with an IPv6 address counted by its `/64` prefix: without trusted proxies, every client behind a reverse proxy or Ingress shares the proxy address, so the wait never exceeds 1 minute. The counts live in the server's memory.
 
 Sessions last 12 hours and survive server restarts; changing the admin token signs every session out. Signing out deletes the session cookie in the browser. The session cookie is `Secure`: use HTTPS (a reverse proxy or Ingress with TLS) or `localhost`.

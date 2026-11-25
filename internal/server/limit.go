@@ -1,6 +1,7 @@
 package server
 
 import (
+	"net/netip"
 	"sync"
 	"time"
 )
@@ -18,11 +19,31 @@ const (
 // each failure past loginFreeFailures doubles the wait, from 1s up to
 // loginMaxWait. Without trusted proxies, clients behind one proxy share an
 // address, so the wait stays short.
-// ponytail: in memory and per replica, pruned on each failure; fine for the
-// single-replica server.
+// IPv6 clients are counted by their /64 prefix, since one host can use any
+// address of its prefix. ponytail: in memory and per replica, pruned at most
+// once per loginPrune; fine for the single-replica server.
 type loginLimiter struct {
 	mu      sync.Mutex
 	clients map[string]*loginFailures
+	pruned  time.Time
+}
+
+// loginPrune is the least time between two prunings of forgotten clients.
+const loginPrune = time.Minute
+
+// limitKey returns the key a client address is counted under: an IPv4 address
+// as is, an IPv6 address as its /64 prefix.
+func limitKey(addr string) string {
+	a, err := netip.ParseAddr(addr)
+	if err != nil {
+		return addr
+	}
+	a = a.Unmap()
+	if !a.Is6() {
+		return a.String()
+	}
+	p, _ := a.Prefix(64)
+	return p.String()
 }
 
 type loginFailures struct {
@@ -39,7 +60,7 @@ func newLoginLimiter() *loginLimiter {
 func (l *loginLimiter) wait(addr string, now time.Time) time.Duration {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if f, ok := l.clients[addr]; ok && now.Before(f.until) {
+	if f, ok := l.clients[limitKey(addr)]; ok && now.Before(f.until) {
 		return f.until.Sub(now)
 	}
 	return 0
@@ -48,11 +69,15 @@ func (l *loginLimiter) wait(addr string, now time.Time) time.Duration {
 func (l *loginLimiter) fail(addr string, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for a, f := range l.clients {
-		if now.Sub(f.last) > loginForget {
-			delete(l.clients, a)
+	if now.Sub(l.pruned) >= loginPrune {
+		for a, f := range l.clients {
+			if now.Sub(f.last) > loginForget {
+				delete(l.clients, a)
+			}
 		}
+		l.pruned = now
 	}
+	addr = limitKey(addr)
 	f, ok := l.clients[addr]
 	if !ok {
 		f = &loginFailures{}
@@ -68,5 +93,5 @@ func (l *loginLimiter) fail(addr string, now time.Time) {
 func (l *loginLimiter) succeed(addr string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	delete(l.clients, addr)
+	delete(l.clients, limitKey(addr))
 }

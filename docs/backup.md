@@ -1,8 +1,8 @@
 # Backup
 
-`secret-manager backup` prints every path and its data as JSON; `--output F` writes it to `F` with `0600` permissions instead. `--history` adds the versions of each path. Versions of deleted paths are not included.
+`secret-manager backup` prints every path and its data as JSON; `--output F` writes it to `F` with `0600` permissions instead. `--history` adds the versions of each path. Versions of deleted paths are not included, nor are versions that cannot be decrypted; the server logs a warning naming each path and version it left out.
 
-`secret-manager restore F` (`-` for stdin) replaces the data of every path in the file. Paths not in the file are kept. Each changed path is recorded as a new version and its targets are synced, like any other write. Versions in the file are restored only for paths that have none yet, renumbered from 1 and limited to `--history-limit`; a path that already has versions only gets a new one for the restored data. Restoring the same file twice changes nothing. Every path and key is checked before anything is written.
+`secret-manager restore F` (`-` for stdin) replaces the data of every path in the file. Paths not in the file are kept. Each changed path is recorded as a new version and its targets are synced, like any other write. Versions in the file are restored only for paths that have none yet, renumbered from 1 and limited to `--history-limit`; a path that already has versions only gets a new one for the restored data. Restoring the same file twice changes nothing. Every path, key and value, including those of the versions in the file, is checked before anything is written: one invalid entry rejects the whole restore with `400`, naming the path, and nothing changes. After that check the paths are written one at a time, and a storage error stops the restore at that path with `500`, so the paths before it stay restored; running the same restore again finishes it.
 
 `backup` encrypts the document with a passphrase: the one in `SECRET_MANAGER_BACKUP_PASSPHRASE` when set, else one prompted for twice on the terminal. The key is derived from the passphrase with Argon2id (3 passes, 64 MiB, 4 threads, random 16-byte salt) and the document is encrypted with AES-256-GCM into `{"encryption": "argon2id+aes-256-gcm", "salt": "<base64>", "time": 3, "memory": 65536, "threads": 4, "data": "<base64>"}`. The passphrase needs at least 8 characters; a shorter one is rejected at the prompt, in the Web UI, and in `SECRET_MANAGER_BACKUP_PASSPHRASE`, where the server refuses to start. An empty answer at the prompt, or `--no-encrypt`, writes every value in plain text. Without a terminal, `SECRET_MANAGER_BACKUP_PASSPHRASE` or `--no-encrypt`, `backup` fails.
 
@@ -11,6 +11,8 @@
 ## Scheduled backups
 
 With `--backup-dir DIR`, the server writes a backup to `DIR/backup-<UTC time>.json` (`0600`) every `--backup-interval` (default `24h`) and keeps the newest `--backup-keep` files (default `7`). `--backup-history` adds versions. The first backup is written one interval after the server starts. Each run is logged as an audit entry with `source` `schedule` and `op` `backup` (category [`backups`](observability.md#event-categories)); a failed run is logged at `WARN` and tried again on the next interval.
+
+`DIR` can be a symlink. A symlink at a backup file name that points to an existing file is followed: the backup replaces that file and the link stays. A dangling link, or one in a loop, is replaced by a regular file. Pruning removes the links and files it matches by name, never the file a link points to. `DIR` must not be writable by untrusted users, see [Security notes](security-notes.md).
 
 With `SECRET_MANAGER_BACKUP_PASSPHRASE` set on the server, every scheduled backup is encrypted with that passphrase like `secret-manager backup` does, and the summary page shows the schedule as encrypted. Restore one with `secret-manager restore` and the same passphrase.
 

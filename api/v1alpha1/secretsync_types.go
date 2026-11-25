@@ -59,6 +59,7 @@ type Target struct {
 	// +optional
 	CreationPolicy CreationPolicy `json:"creationPolicy,omitempty"`
 	// Type of the Secret. Defaults to Opaque.
+	// +kubebuilder:validation:Enum="";Opaque;kubernetes.io/dockerconfigjson;kubernetes.io/tls;kubernetes.io/basic-auth;kubernetes.io/ssh-auth
 	// +optional
 	Type corev1.SecretType `json:"type,omitempty"`
 	// +optional
@@ -74,8 +75,11 @@ type SecretSyncSpec struct {
 	// +kubebuilder:validation:MinItems=1
 	Sources []Source `json:"sources"`
 	// RefreshInterval is the resync period. Changes made through
-	// secret-manager are applied immediately.
+	// secret-manager are applied immediately. At most 1h.
 	// +kubebuilder:default="60s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:MaxLength=32
+	// +kubebuilder:validation:XValidation:rule="duration(self) <= duration('1h')",message="refreshInterval must be at most 1h"
 	// +optional
 	RefreshInterval *metav1.Duration `json:"refreshInterval,omitempty"`
 	// +kubebuilder:validation:MinItems=1

@@ -1068,9 +1068,14 @@ func TestEventCategories(t *testing.T) {
 			t.Fatalf("failed authorize_token:\n%s", out)
 		}
 		_, body := get(t, c, ts.URL+"/audit")
-		for _, op := range []string{"list_paths", "backup", "authorize_start", "login"} {
+		for _, op := range []string{"list_paths", "backup", "login"} {
 			if kept := strings.Contains(body, "<code>"+op+"</code>"); kept != (level == LevelAudit) {
 				t.Fatalf("level %s: %s kept %v on the audit page:\n%s", level, op, kept, body)
+			}
+		}
+		for _, op := range []string{"authorize_start", "authorize_token"} {
+			if strings.Contains(body, "<code>"+op+"</code>") {
+				t.Fatalf("level %s: %s kept on the audit page:\n%s", level, op, body)
 			}
 		}
 	}
@@ -1352,5 +1357,83 @@ func TestUIBackup(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func newUnreadableServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	inner := k8sstorage.New(fake.NewClientBuilder().Build(), "sm")
+	mk := func(b byte) *encrypted.Backend {
+		e, err := encrypted.New(inner, bytes.Repeat([]byte{b}, encrypted.KeySize), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	svc := secrets.New(mk(7), nil)
+	svc.KeepVersions = 10
+	sum := sha256.Sum256([]byte(apiToken))
+	if err := inner.PutTokens(context.Background(), []storage.Token{{Name: "full", Hash: hex.EncodeToString(sum[:]), Path: "/"}}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(svc, tokens.New(inner), token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewTLSServer(s)
+	t.Cleanup(ts.Close)
+	if err := svc.SetKeys(context.Background(), "/app", map[string]string{"A": "1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mk(9).AddVersion(context.Background(), "/app", time.Now(), map[string]string{"A": "foreign"}, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SetKeys(context.Background(), "/app", map[string]string{"A": "3"}); err != nil {
+		t.Fatal(err)
+	}
+	return ts
+}
+
+func TestUnreadableVersion(t *testing.T) {
+	ts := newUnreadableServer(t)
+	code, body := do(t, ts, "GET", "/api/v1/history?path=/app", apiToken, "")
+	var list struct {
+		Versions []struct {
+			Version    int
+			Keys       []string
+			Unreadable bool
+		}
+	}
+	if err := json.Unmarshal([]byte(body), &list); code != http.StatusOK || err != nil || len(list.Versions) != 3 {
+		t.Fatalf("history: %d %s", code, body)
+	}
+	for _, v := range list.Versions {
+		if v.Unreadable != (v.Version == 2) || (v.Unreadable && len(v.Keys) != 0) {
+			t.Fatalf("history entry %+v: %s", v, body)
+		}
+	}
+	if strings.Count(body, `"unreadable"`) != 1 {
+		t.Fatalf("only the unreadable version carries the flag: %s", body)
+	}
+	if code, _ := do(t, ts, "GET", "/api/v1/history/2?path=/app", apiToken, ""); code != http.StatusBadRequest {
+		t.Fatalf("read unreadable version: %d", code)
+	}
+	if code, _ := do(t, ts, "POST", "/api/v1/history/2/rollback?path=/app", apiToken, ""); code != http.StatusBadRequest {
+		t.Fatalf("rollback unreadable version: %d", code)
+	}
+
+	c := uiClient(t, ts)
+	postForm(t, c, ts, "/login", url.Values{"token": {token}}, ts.URL)
+	_, page := get(t, c, ts.URL+"/secrets/path?path=/app")
+	if !strings.Contains(page, `<span class="badge">unreadable</span>`) || strings.Contains(page, `id="restore-2"`) ||
+		strings.Contains(page, `id="diff-2"`) || !strings.Contains(page, `id="delete-version-2"`) || !strings.Contains(page, `id="restore-1"`) {
+		t.Fatalf("path page:\n%s", page)
+	}
+	if code, _ := get(t, c, ts.URL+"/"); code != http.StatusOK {
+		t.Fatalf("dashboard: %d", code)
+	}
+
+	if code, _ := do(t, ts, "DELETE", "/api/v1/history/2?path=/app", apiToken, ""); code != http.StatusNoContent {
+		t.Fatalf("delete unreadable version: %d", code)
 	}
 }

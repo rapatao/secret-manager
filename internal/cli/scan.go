@@ -244,10 +244,25 @@ func scanHistory(ctx context.Context, dir string, paths []string, secrets []secr
 		return nil, err
 	}
 	leaks, perr := parseHistory(out, secrets)
-	if err := cmd.Wait(); err != nil {
-		return nil, fmt.Errorf("git log: %w: %s", err, strings.TrimSpace(stderr.String()))
+	if err := finishGit(cmd, perr, &stderr); err != nil {
+		return nil, err
 	}
-	return leaks, perr
+	return leaks, nil
+}
+
+// finishGit waits for cmd, killing it first when parsing its output failed
+// because nothing drains the pipe anymore. The parse error wins over the
+// resulting kill error.
+func finishGit(cmd *exec.Cmd, perr error, stderr *bytes.Buffer) error {
+	if perr != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return perr
+	}
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("git log: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
 }
 
 // parseHistory reads `git log -p --format="commit %H"` output and scans the

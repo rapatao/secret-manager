@@ -9,6 +9,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/rapatao/secret-manager/internal/atomicfile"
 	"github.com/rapatao/secret-manager/internal/storage/encrypted"
 )
 
@@ -74,7 +75,7 @@ func (s *Server) BackupToDir(ctx context.Context, sched BackupSchedule) (string,
 		}
 	}
 	name := filepath.Join(sched.Dir, "backup-"+doc.Time.Format("20060102T150405Z")+".json")
-	if err := writeFileAtomic(name, raw); err != nil {
+	if err := atomicfile.Write(name, raw); err != nil {
 		return "", fmt.Errorf("write %s: %w", name, err)
 	}
 
@@ -89,23 +90,4 @@ func (s *Server) BackupToDir(ctx context.Context, sched BackupSchedule) (string,
 		}
 	}
 	return name, nil
-}
-
-func writeFileAtomic(name string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(name), ".backup-*.tmp")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	_, err = tmp.Write(data)
-	if err == nil {
-		err = tmp.Sync()
-	}
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), name)
 }

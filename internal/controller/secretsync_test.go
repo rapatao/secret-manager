@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -17,6 +18,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	"github.com/rapatao/secret-manager/api/v1alpha1"
 	"github.com/rapatao/secret-manager/internal/reload"
@@ -35,6 +38,11 @@ type env struct {
 
 func newEnv(t *testing.T, objs ...client.Object) *env {
 	t.Helper()
+	return newEnvWith(t, interceptor.Funcs{}, objs...)
+}
+
+func newEnvWith(t *testing.T, funcs interceptor.Funcs, objs ...client.Object) *env {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -46,6 +54,7 @@ func newEnv(t *testing.T, objs ...client.Object) *env {
 		WithScheme(scheme).
 		WithObjects(objs...).
 		WithStatusSubresource(&v1alpha1.SecretSync{}).
+		WithInterceptorFuncs(funcs).
 		Build()
 	svc := secrets.New(k8sstorage.New(c, "secret-manager"), nil)
 	rec := events.NewFakeRecorder(100)
@@ -192,6 +201,162 @@ func TestSyncUpdatesAndRestartsDeployments(t *testing.T) {
 	}
 }
 
+func reloadDeployment(name string, secretNames ...string) *appsv1.Deployment {
+	d := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "app", Name: name, Annotations: map[string]string{reload.Annotation: "true"},
+	}}
+	c := corev1.Container{Name: "web"}
+	for _, n := range secretNames {
+		c.EnvFrom = append(c.EnvFrom, corev1.EnvFromSource{
+			SecretRef: &corev1.SecretEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: n}},
+		})
+	}
+	d.Spec.Template.Spec.Containers = []corev1.Container{c}
+	return d
+}
+
+func TestSyncRetriesFailedRestart(t *testing.T) {
+	ss := secretSync(v1alpha1.Target{Name: "creds"})
+	d := reloadDeployment("web", "creds")
+	failFirst := true
+	e := newEnvWith(t, interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, p client.Patch, opts ...client.PatchOption) error {
+		if _, ok := obj.(*appsv1.Deployment); ok && failFirst {
+			failFirst = false
+			return errors.New("boom")
+		}
+		return c.Patch(ctx, obj, p, opts...)
+	}}, ss, d)
+	e.set("/kubernetes", map[string]string{"A": "1"})
+	e.reconcile(ss)
+	before, err := e.secret("app", "creds")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e.set("/kubernetes", map[string]string{"A": "2"})
+	if _, err := e.r.Reconcile(e.ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ss)}); err != nil {
+		t.Fatal(err)
+	}
+	if c := e.ready(ss); c == nil || c.Status != metav1.ConditionFalse || c.Reason != "SyncFailed" {
+		t.Fatalf("ready condition %+v", c)
+	}
+	s, err := e.secret("app", "creds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(s.Data["A"]) != "2" {
+		t.Fatalf("data not updated: %v", s.Data)
+	}
+	if s.Annotations[HashAnnotation] != before.Annotations[HashAnnotation] {
+		t.Fatalf("hash advanced after failed restart: %v", s.Annotations)
+	}
+
+	e.reconcile(ss)
+	s, err = e.secret("app", "creds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Annotations[HashAnnotation] == before.Annotations[HashAnnotation] {
+		t.Fatal("hash not advanced after retry")
+	}
+	var got appsv1.Deployment
+	if err := e.c.Get(e.ctx, client.ObjectKeyFromObject(d), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Spec.Template.Annotations[reload.HashAnnotation] != s.Annotations[HashAnnotation] {
+		t.Fatalf("deployment not restarted: %v", got.Spec.Template.Annotations)
+	}
+	if c := e.ready(ss); c == nil || c.Status != metav1.ConditionTrue {
+		t.Fatalf("ready condition %+v", c)
+	}
+}
+
+func deploymentPatchCounter(count *int, failFirst bool) interceptor.Funcs {
+	return interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, p client.Patch, opts ...client.PatchOption) error {
+		if _, ok := obj.(*appsv1.Deployment); ok {
+			*count++
+			if failFirst && *count == 1 {
+				return errors.New("boom")
+			}
+		}
+		return c.Patch(ctx, obj, p, opts...)
+	}}
+}
+
+func TestSyncRevertAfterFailedRestartRestartsWorkload(t *testing.T) {
+	ss := secretSync(v1alpha1.Target{Name: "creds"})
+	d := reloadDeployment("web", "creds")
+	patches := 0
+	e := newEnvWith(t, deploymentPatchCounter(&patches, true), ss, d)
+	e.set("/kubernetes", map[string]string{"A": "1"})
+	e.reconcile(ss)
+	orig, err := e.secret("app", "creds")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	e.set("/kubernetes", map[string]string{"A": "2"})
+	if _, err := e.r.Reconcile(e.ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ss)}); err != nil {
+		t.Fatal(err)
+	}
+	e.set("/kubernetes", map[string]string{"A": "1"})
+	e.reconcile(ss)
+	e.reconcile(ss)
+
+	var got appsv1.Deployment
+	if err := e.c.Get(e.ctx, client.ObjectKeyFromObject(d), &got); err != nil {
+		t.Fatal(err)
+	}
+	if want := orig.Annotations[HashAnnotation]; got.Spec.Template.Annotations[reload.HashAnnotation] != want {
+		t.Fatalf("deployment hash %v, want %s", got.Spec.Template.Annotations, want)
+	}
+	if patches != 2 {
+		t.Fatalf("deployment patched %d times, want 2 (failed + revert)", patches)
+	}
+}
+
+func TestSyncChangeOfOneSecretRestartsSharedWorkloadOnce(t *testing.T) {
+	ss := secretSync(
+		v1alpha1.Target{Name: "one", Template: &v1alpha1.Template{Data: map[string]string{"K": "{{ .A }}"}}},
+		v1alpha1.Target{Name: "two", Template: &v1alpha1.Template{Data: map[string]string{"K": "const"}}},
+	)
+	d := reloadDeployment("web", "one", "two")
+	patches := 0
+	e := newEnvWith(t, deploymentPatchCounter(&patches, false), ss, d)
+	e.set("/kubernetes", map[string]string{"A": "1"})
+	e.reconcile(ss)
+	e.set("/kubernetes", map[string]string{"A": "2"})
+	e.reconcile(ss)
+	if patches != 1 {
+		t.Fatalf("deployment patched %d times, want 1", patches)
+	}
+	e.reconcile(ss)
+	e.reconcile(ss)
+	if patches != 1 {
+		t.Fatalf("deployment patched %d times after resyncs, want 1", patches)
+	}
+}
+
+func TestSyncUnchangedDoesNotRestartSharedWorkload(t *testing.T) {
+	ss := secretSync(v1alpha1.Target{Name: "one"}, v1alpha1.Target{Name: "two", Template: &v1alpha1.Template{Data: map[string]string{"B": "{{ .A }}x"}}})
+	d := reloadDeployment("web", "one", "two")
+	patches := 0
+	e := newEnvWith(t, interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, p client.Patch, opts ...client.PatchOption) error {
+		if _, ok := obj.(*appsv1.Deployment); ok {
+			patches++
+		}
+		return c.Patch(ctx, obj, p, opts...)
+	}}, ss, d)
+	e.set("/kubernetes", map[string]string{"A": "1"})
+	e.reconcile(ss)
+	for range 3 {
+		e.reconcile(ss)
+	}
+	if patches != 0 {
+		t.Fatalf("deployment patched %d times without a change", patches)
+	}
+}
+
 func TestSyncRepairsDrift(t *testing.T) {
 	ss := secretSync(v1alpha1.Target{Name: "creds"})
 	e := newEnv(t, ss)
@@ -315,10 +480,10 @@ func TestRequestsForPath(t *testing.T) {
 }
 
 func TestChangesNotifyNeverBlocks(t *testing.T) {
-	c := make(Changes, 1)
+	c := Changes{paths: make(chan event.TypedGenericEvent[string], 1)}
 	c.Notify("/a")
 	c.Notify("/b")
-	if got := (<-c).Object; got != "/a" {
+	if got := (<-c.paths).Object; got != "/a" {
 		t.Fatalf("got %s", got)
 	}
 }

@@ -17,6 +17,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/rapatao/secret-manager/internal/local"
+	"github.com/rapatao/secret-manager/internal/server"
 )
 
 // unlockVault returns the key of the vault at path, creating the vault when
@@ -125,7 +126,7 @@ func (c *CLI) ui(ctx context.Context, args []string) error {
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
 	defer stop()
-	srv := &http.Server{Handler: v, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: v, ReadHeaderTimeout: server.ReadHeaderTimeout, ReadTimeout: server.ReadTimeout, WriteTimeout: server.WriteTimeout, IdleTimeout: server.IdleTimeout}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -166,7 +167,7 @@ func (c *CLI) checkVaultLock(st store, server, path, key string) (string, error)
 	}
 	lock := cfg.lock(server)
 	after, err := parseLockAfter(lock.After)
-	if err != nil || key != "" && after == 0 {
+	if err != nil || (key != "" && after == 0) {
 		return key, err
 	}
 	now := time.Now()

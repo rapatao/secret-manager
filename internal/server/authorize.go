@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -156,6 +158,12 @@ func (g *grants) find(match func(*login) bool, take bool) (*login, bool) {
 		return l, true
 	}
 	return nil, false
+}
+
+func (g *grants) approve(l *login, deny bool, gr grant) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	l.approved, l.denied, l.grant = !deny, deny, gr
 }
 
 func equal(a, b string) bool {
@@ -403,9 +411,7 @@ func (s *Server) uiAuthorize(w http.ResponseWriter, r *http.Request) {
 			s.redirectWithError(w, r, back, err)
 			return
 		}
-		s.grants.mu.Lock()
-		l.approved, l.denied, l.grant = !deny, deny, g
-		s.grants.mu.Unlock()
+		s.grants.approve(l, deny, g)
 		s.render(w, http.StatusOK, "authorize", map[string]any{"Done": true, "Denied": deny})
 		return
 	}
@@ -470,14 +476,19 @@ type deviceJSON struct {
 // apiAuthorizeDevice starts a device login. It needs no token: the login
 // gives nothing until an admin approves its user code in the Web UI.
 func (s *Server) apiAuthorizeDevice(w http.ResponseWriter, r *http.Request) {
+	addr, throttled := s.authorizeThrottled(w, r, "authorize_start", throttledStart)
+	if throttled {
+		return
+	}
 	var in struct{ Name string }
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&in); err != nil {
 		writeError(w, http.StatusBadRequest, `body must be {"name": ...}`)
 		return
 	}
+	s.authorizeLimits.fail(addr, time.Now())
 	l := &login{name: in.Name, userCode: newUserCode(), deviceCode: rand.Text()}
 	err := s.grants.add(l)
-	s.auditAt(s.Events.Logins, r, "api", "authorize_start", "", nil, err, "name", in.Name)
+	s.auditAt(s.authorizeLevel(), r, "api", "authorize_start", "", nil, err, "name", in.Name)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -489,6 +500,38 @@ func (s *Server) apiAuthorizeDevice(w http.ResponseWriter, r *http.Request) {
 		ExpiresIn:       int(s.grants.ttl.Seconds()),
 		Interval:        2,
 	})
+}
+
+// authorizeLevel is the level of the unauthenticated CLI login events: they
+// are logged but never kept in the audit store, which a client could flood.
+func (s *Server) authorizeLevel() Level {
+	return min(s.Events.Logins, LevelLog)
+}
+
+// Messages of a throttled login start and of a throttled request with a code
+// that matches no login, which formats the seconds to wait. Neither tells
+// whether a code exists.
+const (
+	throttledStart = "too many login requests from this address, try again in %ds"
+	throttledCode  = "invalid or expired login code; too many failed login requests from this address, try again in %ds"
+)
+
+// authorizeThrottled answers 429 with message, which formats the seconds to
+// wait, when the client must wait before its next login start or request with
+// a code that matches no login. Requests that match a login are never
+// throttled.
+func (s *Server) authorizeThrottled(w http.ResponseWriter, r *http.Request, op, message string) (string, bool) {
+	addr := s.clientAddr(r)
+	wait := s.authorizeLimits.wait(addr, time.Now())
+	if wait <= 0 {
+		return addr, false
+	}
+	secs := int(math.Ceil(wait.Seconds()))
+	err := fmt.Errorf(message, secs)
+	s.auditAt(s.authorizeLevel(), r, "api", op, "", nil, err)
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	writeError(w, http.StatusTooManyRequests, err.Error())
+	return addr, true
 }
 
 type issuedJSON struct {
@@ -512,10 +555,9 @@ func (s *Server) apiAuthorizeToken(w http.ResponseWriter, r *http.Request) {
 	var ok bool
 	switch {
 	case in.Code != "":
-		l, ok = s.grants.find(func(l *login) bool { return equal(l.code, in.Code) }, true)
-		if ok && !equal(l.challenge, pkceChallenge(in.CodeVerifier)) {
-			ok = false
-		}
+		l, ok = s.grants.find(func(l *login) bool {
+			return equal(l.code, in.Code) && equal(l.challenge, pkceChallenge(in.CodeVerifier))
+		}, true)
 	case in.DeviceCode != "":
 		l, ok = s.grants.find(func(l *login) bool { return equal(l.deviceCode, in.DeviceCode) && (l.approved || l.denied) }, true)
 		if !ok {
@@ -526,12 +568,21 @@ func (s *Server) apiAuthorizeToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !ok {
-		s.auditAt(s.Events.Logins, r, "api", "authorize_token", "", nil, errLoginInvalid)
+		if in.Code == "" && in.DeviceCode == "" {
+			writeError(w, http.StatusBadRequest, errLoginInvalid.Error())
+			return
+		}
+		addr, throttled := s.authorizeThrottled(w, r, "authorize_token", throttledCode)
+		if throttled {
+			return
+		}
+		s.authorizeLimits.fail(addr, time.Now())
+		s.auditAt(s.authorizeLevel(), r, "api", "authorize_token", "", nil, errLoginInvalid)
 		writeError(w, http.StatusBadRequest, errLoginInvalid.Error())
 		return
 	}
 	if l.denied {
-		s.auditAt(s.Events.Logins, r, "api", "authorize_token", "", nil, errLoginDenied, "name", l.name)
+		s.auditAt(s.authorizeLevel(), r, "api", "authorize_token", "", nil, errLoginDenied, "name", l.name)
 		writeError(w, http.StatusForbidden, errLoginDenied.Error())
 		return
 	}

@@ -46,7 +46,8 @@ events:
   reads: none
   # Reads without values: server info, path lists and version lists.
   lists: none
-  # Web UI sign-ins and CLI logins: log or audit.
+  # Web UI sign-ins and CLI logins: log or audit. CLI login starts and failed
+  # code exchanges are only logged.
   logins: audit
   # Backups and restores: log or audit.
   backups: audit
@@ -82,7 +83,7 @@ cacheMaxAge: 168h
 
 # Writes a backup of every path to a PersistentVolume every interval and keeps
 # the newest files. Backups hold secret values in plain JSON unless
-# encryption.existingSecret is set, which also encrypts Web UI downloads.
+# backup.encryption.existingSecret is set, which also encrypts Web UI downloads.
 backup:
   enabled: false
   interval: 24h
@@ -104,6 +105,8 @@ backup:
 # Runs the SecretSync controller, which writes Secrets in any namespace and
 # restarts workloads, with cluster-wide RBAC. When false, the server only
 # stores secrets and its RBAC is limited to Secrets in the release namespace.
+# What SecretSyncs may read and write is limited by the sync policy, kept by the
+# server and edited in the Web UI. It is off by default.
 controller:
   enabled: true
 

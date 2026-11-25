@@ -59,9 +59,7 @@ func SealBackup(passphrase string, doc []byte) ([]byte, error) {
 		return nil, err
 	}
 	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		return nil, err
-	}
+	_, _ = rand.Read(salt)
 	env := backupEnvelope{Encryption: BackupCipher, Salt: base64.StdEncoding.EncodeToString(salt), Time: backupTime, Memory: backupMemory, Threads: backupThreads}
 	aead, err := newAEAD(env.key(passphrase, salt))
 	if err != nil {

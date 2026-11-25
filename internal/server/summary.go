@@ -71,8 +71,11 @@ func (s *Server) uiSummary(w http.ResponseWriter, r *http.Request) {
 		for i, v := range versions {
 			c := recentChange{Path: p, Number: v.Number, Time: v.Time}
 			switch {
+			case v.Unreadable:
 			case i+1 < len(versions):
-				c.Changes = secrets.Diff(versions[i+1].Data, v.Data)
+				if !versions[i+1].Unreadable {
+					c.Changes = secrets.Diff(versions[i+1].Data, v.Data)
+				}
 			case v.Number == 1:
 				c.Changes = secrets.Diff(nil, v.Data)
 			}
@@ -105,17 +108,29 @@ func (s *Server) uiSummary(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var policyOn, policyUnknown bool
+	if s.SyncPolicy != nil {
+		p, err := s.SyncPolicy.Get(ctx)
+		if err != nil {
+			s.logFailure(r, err)
+			policyUnknown = true
+		}
+		policyOn = p.Enabled
+	}
+
 	s.render(w, http.StatusOK, "summary", map[string]any{
-		"Paths":        len(paths),
-		"Deleted":      len(deleted),
-		"Keys":         keys,
-		"Versions":     versionCount,
-		"Recent":       recent,
-		"Integrations": stats,
-		"Settings":     s.Settings,
-		"HistoryLimit": s.secrets.KeepVersions,
-		"CacheMaxAge":  cacheLabel(s.CacheMaxAge),
-		"LastBackup":   s.lastBackup.Load(),
-		"BackupEvery":  shortDuration(s.Settings.Backups.Interval),
+		"SyncPolicyUnknown": policyUnknown,
+		"SyncPolicyOn":      policyOn,
+		"Paths":             len(paths),
+		"Deleted":           len(deleted),
+		"Keys":              keys,
+		"Versions":          versionCount,
+		"Recent":            recent,
+		"Integrations":      stats,
+		"Settings":          s.Settings,
+		"HistoryLimit":      s.secrets.KeepVersions,
+		"CacheMaxAge":       cacheLabel(s.CacheMaxAge),
+		"LastBackup":        s.lastBackup.Load(),
+		"BackupEvery":       shortDuration(s.Settings.Backups.Interval),
 	})
 }

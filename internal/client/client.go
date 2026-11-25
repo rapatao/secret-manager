@@ -29,6 +29,10 @@ type Client struct {
 type Error struct {
 	Status  int
 	Message string
+	// Denied lists the SecretSyncs of a 409 from PutSyncPolicy, and Digest
+	// identifies that preview.
+	Denied []string
+	Digest string
 }
 
 func (e *Error) Error() string {
@@ -184,6 +188,8 @@ type Version struct {
 	Time    time.Time         `json:"time"`
 	Keys    []string          `json:"keys"`
 	Data    map[string]string `json:"data"`
+
+	Unreadable bool `json:"unreadable"`
 }
 
 // History lists the versions of path, newest first.
@@ -228,6 +234,61 @@ func (c *Client) Restore(ctx context.Context, backup json.RawMessage) (int, erro
 	var out struct{ Paths int }
 	err := c.do(ctx, http.MethodPost, "/api/v1/restore", nil, backup, &out)
 	return out.Paths, err
+}
+
+// SyncRule limits the SecretSyncs of one namespace.
+type SyncRule struct {
+	Paths            []string `json:"paths"`
+	TargetNamespaces []string `json:"targetNamespaces,omitempty"`
+}
+
+// SyncPolicy is the SecretSync policy of the server.
+type SyncPolicy struct {
+	Enabled    bool                `json:"enabled"`
+	Namespaces map[string]SyncRule `json:"namespaces,omitempty"`
+}
+
+// DeniedError is returned by PutSyncPolicy when saving the policy would
+// disallow SecretSyncs, which lose their target Secrets, and confirm is not the
+// digest of this preview. Digest is the confirm that saves the same policy.
+type DeniedError struct {
+	Denied []string
+	Digest string
+}
+
+func (e *DeniedError) Error() string {
+	return fmt.Sprintf("the policy disallows %d SecretSyncs, which lose their target Secrets", len(e.Denied))
+}
+
+// policyDigestHeader carries the digest of the stored policy.
+const policyDigestHeader = "X-Sync-Policy-Digest"
+
+// GetSyncPolicy returns the SecretSync policy and its digest, which
+// PutSyncPolicy takes as base.
+func (c *Client) GetSyncPolicy(ctx context.Context) (SyncPolicy, string, error) {
+	var out SyncPolicy
+	var header http.Header
+	err := c.doHeader(ctx, http.MethodGet, "/api/v1/sync-policy", nil, nil, &out, &header)
+	return out, header.Get(policyDigestHeader), err
+}
+
+// PutSyncPolicy replaces the SecretSync policy whose digest is base, as
+// GetSyncPolicy returned it, and returns the stored one. When the stored
+// policy has another digest nothing is saved and the error is a *Error with
+// status 409. A policy that disallows SecretSyncs the stored policy allows is
+// not saved unless confirm is the digest of that preview; the error is a
+// *DeniedError carrying the list and the digest to send as confirm.
+func (c *Client) PutSyncPolicy(ctx context.Context, p SyncPolicy, base, confirm string) (SyncPolicy, error) {
+	q := url.Values{"base": {base}}
+	if confirm != "" {
+		q.Set("confirm", confirm)
+	}
+	var out SyncPolicy
+	err := c.do(ctx, http.MethodPut, "/api/v1/sync-policy", q, p, &out)
+	if apiErr := (*Error)(nil); errors.As(err, &apiErr) && apiErr.Status == http.StatusConflict && apiErr.Denied != nil {
+		return SyncPolicy{}, &DeniedError{Denied: apiErr.Denied, Digest: apiErr.Digest}
+	}
+	return out, err
 }
 
 // Login is the integration token issued for an approved CLI login.
@@ -306,6 +367,11 @@ func (c *Client) PollDevice(ctx context.Context, d Device) (Login, error) {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, in, out any) error {
+	return c.doHeader(ctx, method, path, query, in, out, nil)
+}
+
+// doHeader is do that also returns the response headers when header is set.
+func (c *Client) doHeader(ctx context.Context, method, path string, query url.Values, in, out any, header *http.Header) error {
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
@@ -336,9 +402,16 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	defer res.Body.Close()
 
 	if res.StatusCode >= 300 {
-		var e struct{ Error string }
-		_ = json.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&e)
-		return &Error{Status: res.StatusCode, Message: e.Error}
+		var e struct {
+			Error  string
+			Denied []string
+			Digest string
+		}
+		_ = json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&e)
+		return &Error{Status: res.StatusCode, Message: e.Error, Denied: e.Denied, Digest: e.Digest}
+	}
+	if header != nil {
+		*header = res.Header
 	}
 	if out == nil {
 		return nil

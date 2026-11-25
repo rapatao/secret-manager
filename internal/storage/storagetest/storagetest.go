@@ -217,7 +217,81 @@ func Run(t *testing.T, newBackend func() storage.Backend) {
 		}
 	})
 
+	t.Run("prune by rank after gaps", func(t *testing.T) {
+		b := newBackend()
+		at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+		for range 5 {
+			if err := b.AddVersion(ctx, "/a", at, map[string]string{"K": "v"}, 10); err != nil {
+				t.Fatal(err)
+			}
+		}
+		kept := []storage.Version{
+			{Number: 5, Time: at, Data: map[string]string{"K": "v"}},
+			{Number: 3, Time: at, Data: map[string]string{"K": "v"}},
+			{Number: 2, Time: at, Data: map[string]string{"K": "v"}},
+		}
+		if err := b.ReplaceVersions(ctx, "/a", kept); err != nil {
+			t.Fatal(err)
+		}
+		if err := b.AddVersion(ctx, "/a", at, map[string]string{"K": "v"}, 3); err != nil {
+			t.Fatal(err)
+		}
+		got, err := b.Versions(ctx, "/a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var numbers []int
+		for _, v := range got {
+			numbers = append(numbers, v.Number)
+		}
+		if want := []int{6, 5, 3}; !slices.Equal(numbers, want) {
+			t.Fatalf("versions %v, want %v", numbers, want)
+		}
+	})
+
+	t.Run("keep below one is an error", func(t *testing.T) {
+		b := newBackend()
+		for _, keep := range []int{0, -1} {
+			if err := b.AddVersion(ctx, "/a", time.Now(), map[string]string{"K": "v"}, keep); err == nil {
+				t.Fatalf("AddVersion keep=%d: want error", keep)
+			}
+		}
+		if got, err := b.Versions(ctx, "/a"); err != nil || len(got) != 0 {
+			t.Fatalf("Versions after rejected adds = %v, %v", got, err)
+		}
+	})
+
 	t.Run("audit events", func(t *testing.T) { runAudit(t, newBackend) })
+
+	t.Run("sync policy", func(t *testing.T) {
+		b := newBackend()
+		if got, err := b.SyncPolicy(ctx); err != nil || got.Enabled || len(got.Namespaces) != 0 {
+			t.Fatalf("SyncPolicy on empty backend = %+v, %v", got, err)
+		}
+		want := storage.SyncPolicy{Enabled: true, Namespaces: map[string]storage.SyncRule{
+			"team-a": {Paths: []string{"/a", "/b/c"}, TargetNamespaces: []string{"team-b"}},
+			"team-b": {Paths: []string{}},
+		}}
+		if err := b.PutSyncPolicy(ctx, want); err != nil {
+			t.Fatal(err)
+		}
+		got, err := b.SyncPolicy(ctx)
+		if err != nil || !got.Enabled || len(got.Namespaces) != 2 ||
+			!slices.Equal(got.Namespaces["team-a"].Paths, want.Namespaces["team-a"].Paths) ||
+			!slices.Equal(got.Namespaces["team-a"].TargetNamespaces, []string{"team-b"}) ||
+			len(got.Namespaces["team-b"].Paths) != 0 {
+			t.Fatalf("SyncPolicy = %+v, %v", got, err)
+		}
+		if paths, _ := b.List(ctx, "/"); len(paths) != 0 {
+			t.Fatalf("policy listed as paths: %v", paths)
+		}
+		if err := b.PutSyncPolicy(ctx, storage.SyncPolicy{}); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := b.SyncPolicy(ctx); err != nil || got.Enabled || len(got.Namespaces) != 0 {
+			t.Fatalf("SyncPolicy after overwrite = %+v, %v", got, err)
+		}
+	})
 
 	t.Run("tokens", func(t *testing.T) {
 		b := newBackend()

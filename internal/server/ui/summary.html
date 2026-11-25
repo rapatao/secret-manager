@@ -48,6 +48,7 @@
 <tr><td>Encryption</td><td>{{if .Encryption}}on{{else}}off{{end}}</td></tr>
 <tr><td>SecretSync controller</td><td>{{if .Controller}}on{{else}}off{{end}}</td></tr>
 {{end}}
+{{if .SyncPolicyNav}}<tr><td>SecretSync policy</td><td><a href="/sync-policy">{{if .SyncPolicyUnknown}}unknown{{else if .SyncPolicyOn}}on{{else}}off{{end}}</a></td></tr>{{end}}
 <tr><td>History limit</td><td>{{if .HistoryLimit}}{{.HistoryLimit}} versions per path{{else}}disabled{{end}}</td></tr>
 <tr><td>Offline cache default</td><td>{{.CacheMaxAge}}</td></tr>
 {{with .Settings.Backups}}

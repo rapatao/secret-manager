@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -17,6 +16,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/rapatao/secret-manager/internal/storage"
@@ -41,16 +41,23 @@ const (
 	historyPrefix = "smh"
 	// AuditLabel marks the Secret holding the audit events.
 	AuditLabel = "secretmanager.rapatao.com/audit"
+	// SyncPolicyLabel marks the Secret holding the SecretSync policy.
+	SyncPolicyLabel = "secretmanager.rapatao.com/sync-policy"
+	// SyncOwnerLabel marks Secrets written by a SecretSync. The controller
+	// sets the same label; this backend never trusts a Secret that has it.
+	SyncOwnerLabel = "secretmanager.rapatao.com/owner"
 	// PathHashLabel identifies the path of a history Secret by the first 32
 	// hex digits of its SHA-256, as label values cannot hold every path.
 	PathHashLabel = "secretmanager.rapatao.com/path-hash"
 
-	// tokensName and auditName cannot collide with a path Secret: those are
-	// "sm" or start with "sm.".
+	// tokensName, auditName and policyName cannot collide with a path Secret:
+	// those are "sm" or start with "sm.".
 	tokensName = "sm-tokens"
 	auditName  = "sm-audit"
+	policyName = "sm-sync-policy"
 	tokensKey  = "tokens"
 	auditKey   = "events"
+	policyKey  = "policy"
 )
 
 // Backend implements storage.Backend on top of Secrets in a single namespace.
@@ -83,11 +90,27 @@ func dotted(path string) string {
 	return strings.ReplaceAll(strings.TrimSuffix(path, "/"), "/", ".")
 }
 
+// ReservedName reports whether a Secret called name belongs to this backend:
+// a path, history or JSON document Secret.
+func ReservedName(name string) bool {
+	switch name {
+	case namePrefix, tokensName, auditName, policyName:
+		return true
+	}
+	return strings.HasPrefix(name, namePrefix+".") || strings.HasPrefix(name, historyPrefix+".")
+}
+
+// managed reports whether s carries label and was not written by a SecretSync.
+func managed(s *corev1.Secret, label string) bool {
+	_, owned := s.Labels[SyncOwnerLabel]
+	return s.Labels[label] == "true" && !owned
+}
+
 // Get implements storage.Backend.
 func (b *Backend) Get(ctx context.Context, path string) (map[string]string, error) {
 	var s corev1.Secret
 	err := b.c.Get(ctx, client.ObjectKey{Namespace: b.ns, Name: SecretName(path)}, &s)
-	if apierrors.IsNotFound(err) || (err == nil && s.Labels[StoreLabel] != "true") {
+	if apierrors.IsNotFound(err) || (err == nil && !managed(&s, StoreLabel)) {
 		return nil, storage.ErrNotFound
 	}
 	if err != nil {
@@ -127,7 +150,7 @@ func (b *Backend) Put(ctx context.Context, path string, data map[string]string) 
 		return nil
 	case err != nil:
 		return fmt.Errorf("get secret for %s: %w", path, err)
-	case s.Labels[StoreLabel] != "true":
+	case !managed(&s, StoreLabel):
 		return fmt.Errorf("secret %s/%s exists and is not managed by secret-manager", b.ns, s.Name)
 	}
 
@@ -140,14 +163,15 @@ func (b *Backend) Put(ctx context.Context, path string, data map[string]string) 
 
 // Delete implements storage.Backend.
 func (b *Backend) Delete(ctx context.Context, path string) error {
-	if _, err := b.Get(ctx, path); err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil
-		}
-		return err
+	var s corev1.Secret
+	err := b.c.Get(ctx, client.ObjectKey{Namespace: b.ns, Name: SecretName(path)}, &s)
+	if apierrors.IsNotFound(err) || (err == nil && !managed(&s, StoreLabel)) {
+		return nil
 	}
-	s := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: b.ns, Name: SecretName(path)}}
-	if err := client.IgnoreNotFound(b.c.Delete(ctx, s)); err != nil {
+	if err != nil {
+		return fmt.Errorf("get secret for %s: %w", path, err)
+	}
+	if err := client.IgnoreNotFound(b.c.Delete(ctx, &s, client.Preconditions{UID: &s.UID})); err != nil {
 		return fmt.Errorf("delete secret for %s: %w", path, err)
 	}
 	return nil
@@ -161,7 +185,11 @@ func (b *Backend) List(ctx context.Context, prefix string) ([]string, error) {
 	}
 	var paths []string
 	for _, s := range list.Items {
-		if p := s.Annotations[PathAnnotation]; storage.Under(p, prefix) {
+		p := s.Annotations[PathAnnotation]
+		if !managed(&s, StoreLabel) || s.Name != SecretName(p) {
+			continue
+		}
+		if storage.Under(p, prefix) {
 			paths = append(paths, p)
 		}
 	}
@@ -171,7 +199,10 @@ func (b *Backend) List(ctx context.Context, prefix string) ([]string, error) {
 
 // AddVersion implements storage.Backend.
 func (b *Backend) AddVersion(ctx context.Context, path string, at time.Time, data map[string]string, keep int) error {
-	versions, err := b.Versions(ctx, path)
+	if keep < 1 {
+		return fmt.Errorf("add version of %s: keep must be at least 1, got %d", path, keep)
+	}
+	versions, uids, err := b.versions(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -184,7 +215,8 @@ func (b *Backend) AddVersion(ctx context.Context, path string, at time.Time, dat
 	}
 	for _, v := range versions[min(keep-1, len(versions)):] {
 		old := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: b.ns, Name: VersionName(path, v.Number)}}
-		if err := client.IgnoreNotFound(b.c.Delete(ctx, old)); err != nil {
+		uid := uids[v.Number]
+		if err := client.IgnoreNotFound(b.c.Delete(ctx, old, client.Preconditions{UID: &uid})); err != nil {
 			return fmt.Errorf("prune version %d of %s: %w", v.Number, path, err)
 		}
 	}
@@ -214,17 +246,13 @@ func (b *Backend) versionSecret(path string, v storage.Version) *corev1.Secret {
 
 // ReplaceVersions implements storage.Backend.
 func (b *Backend) ReplaceVersions(ctx context.Context, path string, versions []storage.Version) error {
-	existing, err := b.Versions(ctx, path)
+	_, stored, err := b.versions(ctx, path)
 	if err != nil {
 		return err
 	}
-	stored := map[int]bool{}
-	for _, v := range existing {
-		stored[v.Number] = true
-	}
 	for _, v := range versions {
 		want := b.versionSecret(path, v)
-		if !stored[v.Number] {
+		if _, ok := stored[v.Number]; !ok {
 			if err := b.c.Create(ctx, want); err != nil {
 				return fmt.Errorf("create version %d of %s: %w", v.Number, path, err)
 			}
@@ -235,18 +263,29 @@ func (b *Backend) ReplaceVersions(ctx context.Context, path string, versions []s
 		if err := b.c.Get(ctx, client.ObjectKeyFromObject(want), &s); err != nil {
 			return fmt.Errorf("get version %d of %s: %w", v.Number, path, err)
 		}
+		if !managed(&s, HistoryLabel) {
+			return fmt.Errorf("secret %s/%s exists and is not managed by secret-manager", b.ns, s.Name)
+		}
 		s.Labels, s.Annotations, s.Data = want.Labels, want.Annotations, want.Data
 		if err := b.c.Update(ctx, &s); err != nil {
 			return fmt.Errorf("update version %d of %s: %w", v.Number, path, err)
 		}
 	}
-	for n := range stored {
+	for n, uid := range stored {
 		old := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: b.ns, Name: VersionName(path, n)}}
-		if err := client.IgnoreNotFound(b.c.Delete(ctx, old)); err != nil {
+		if err := client.IgnoreNotFound(b.c.Delete(ctx, old, client.Preconditions{UID: &uid})); err != nil {
 			return fmt.Errorf("delete version %d of %s: %w", n, path, err)
 		}
 	}
 	return nil
+}
+
+// versionOf returns the path and number of a history Secret, and whether s is
+// one this backend wrote: managed, with a name that matches its annotations.
+func versionOf(s *corev1.Secret) (path string, n int, ok bool) {
+	path = s.Annotations[PathAnnotation]
+	n, err := strconv.Atoi(s.Annotations[VersionAnnotation])
+	return path, n, err == nil && path != "" && managed(s, HistoryLabel) && s.Name == VersionName(path, n)
 }
 
 // PathHash returns the PathHashLabel value of path.
@@ -264,8 +303,8 @@ func (b *Backend) LabelVersions(ctx context.Context) (int, error) {
 	}
 	labeled := 0
 	for _, s := range list.Items {
-		path := s.Annotations[PathAnnotation]
-		if path == "" || s.Labels[PathHashLabel] == PathHash(path) {
+		path, _, ok := versionOf(&s)
+		if !ok || s.Labels[PathHashLabel] == PathHash(path) {
 			continue
 		}
 		s.Labels[PathHashLabel] = PathHash(path)
@@ -285,7 +324,7 @@ func (b *Backend) VersionedPaths(ctx context.Context) ([]string, error) {
 	}
 	var paths []string
 	for _, s := range list.Items {
-		if p := s.Annotations[PathAnnotation]; p != "" && !slices.Contains(paths, p) {
+		if p, _, ok := versionOf(&s); ok && !slices.Contains(paths, p) {
 			paths = append(paths, p)
 		}
 	}
@@ -295,19 +334,29 @@ func (b *Backend) VersionedPaths(ctx context.Context) ([]string, error) {
 
 // Versions implements storage.Backend.
 func (b *Backend) Versions(ctx context.Context, path string) ([]storage.Version, error) {
+	versions, _, err := b.versions(ctx, path)
+	return versions, err
+}
+
+// versions is Versions that also returns the UID of each version's Secret.
+func (b *Backend) versions(ctx context.Context, path string) ([]storage.Version, map[int]types.UID, error) {
 	var list corev1.SecretList
 	labels := client.MatchingLabels{HistoryLabel: "true", PathHashLabel: PathHash(path)}
 	if err := b.c.List(ctx, &list, client.InNamespace(b.ns), labels); err != nil {
-		return nil, fmt.Errorf("list versions: %w", err)
+		return nil, nil, fmt.Errorf("list versions: %w", err)
 	}
 	var versions []storage.Version
+	uids := map[int]types.UID{}
 	for _, s := range list.Items {
-		if s.Annotations[PathAnnotation] != path {
+		if s.Annotations[PathAnnotation] != path || !managed(&s, HistoryLabel) || !strings.HasPrefix(s.Name, historyPrefix+dotted(path)+".") {
 			continue
 		}
 		n, err := strconv.Atoi(s.Annotations[VersionAnnotation])
 		if err != nil {
-			return nil, fmt.Errorf("secret %s: bad version annotation: %w", s.Name, err)
+			return nil, nil, fmt.Errorf("secret %s: bad version annotation: %w", s.Name, err)
+		}
+		if s.Name != VersionName(path, n) {
+			continue
 		}
 		at, _ := time.Parse(time.RFC3339, s.Annotations[TimeAnnotation])
 		data := make(map[string]string, len(s.Data))
@@ -315,15 +364,16 @@ func (b *Backend) Versions(ctx context.Context, path string) ([]storage.Version,
 			data[k] = string(v)
 		}
 		versions = append(versions, storage.Version{Number: n, Time: at, Data: data})
+		uids[n] = s.UID
 	}
 	slices.SortFunc(versions, func(a, b storage.Version) int { return b.Number - a.Number })
-	return versions, nil
+	return versions, uids, nil
 }
 
 // Tokens implements storage.Backend.
 func (b *Backend) Tokens(ctx context.Context) ([]storage.Token, error) {
 	var tokens []storage.Token
-	err := b.getJSON(ctx, tokensName, tokensKey, &tokens)
+	err := b.getJSON(ctx, tokensName, TokensLabel, tokensKey, &tokens)
 	return tokens, err
 }
 
@@ -332,10 +382,22 @@ func (b *Backend) PutTokens(ctx context.Context, tokens []storage.Token) error {
 	return b.putJSON(ctx, tokensName, TokensLabel, tokensKey, tokens)
 }
 
+// SyncPolicy implements storage.Backend.
+func (b *Backend) SyncPolicy(ctx context.Context) (storage.SyncPolicy, error) {
+	var p storage.SyncPolicy
+	err := b.getJSON(ctx, policyName, SyncPolicyLabel, policyKey, &p)
+	return p, err
+}
+
+// PutSyncPolicy implements storage.Backend.
+func (b *Backend) PutSyncPolicy(ctx context.Context, p storage.SyncPolicy) error {
+	return b.putJSON(ctx, policyName, SyncPolicyLabel, policyKey, p)
+}
+
 // AuditEvents implements storage.Backend.
 func (b *Backend) AuditEvents(ctx context.Context) ([]storage.AuditEvent, error) {
 	var events []storage.AuditEvent
-	err := b.getJSON(ctx, auditName, auditKey, &events)
+	err := b.getJSON(ctx, auditName, AuditLabel, auditKey, &events)
 	return events, err
 }
 
@@ -344,9 +406,18 @@ func (b *Backend) PutAuditEvents(ctx context.Context, events []storage.AuditEven
 	return b.putJSON(ctx, auditName, AuditLabel, auditKey, events)
 }
 
-// getJSON decodes the JSON document stored under key in the Secret name into
-// v, and leaves v unchanged when the Secret does not exist.
-func (b *Backend) getJSON(ctx context.Context, name, key string, v any) error {
+// errNotManaged names the Secret s and why this backend does not trust it.
+func (b *Backend) errNotManaged(s *corev1.Secret, label string) error {
+	if _, owned := s.Labels[SyncOwnerLabel]; owned {
+		return fmt.Errorf("secret %s/%s carries the label %s, so a SecretSync wrote it; delete it or fix that SecretSync", b.ns, s.Name, SyncOwnerLabel)
+	}
+	return fmt.Errorf("secret %s/%s exists without the label %s=true, so secret-manager does not trust it; delete it, or restore the label only if you wrote or verified its content", b.ns, s.Name, label)
+}
+
+// getJSON decodes the JSON document stored under key in the Secret name,
+// labeled label, into v, and leaves v unchanged when the Secret does not
+// exist. A Secret that is not managed is an error.
+func (b *Backend) getJSON(ctx context.Context, name, label, key string, v any) error {
 	var s corev1.Secret
 	err := b.c.Get(ctx, client.ObjectKey{Namespace: b.ns, Name: name}, &s)
 	if apierrors.IsNotFound(err) {
@@ -354,6 +425,9 @@ func (b *Backend) getJSON(ctx context.Context, name, key string, v any) error {
 	}
 	if err != nil {
 		return fmt.Errorf("get secret %s: %w", name, err)
+	}
+	if !managed(&s, label) {
+		return b.errNotManaged(&s, label)
 	}
 	if err := json.Unmarshal(s.Data[key], v); err != nil {
 		return fmt.Errorf("secret %s: parse: %w", name, err)
@@ -383,6 +457,9 @@ func (b *Backend) putJSON(ctx context.Context, name, label, key string, v any) e
 	}
 	if err != nil {
 		return fmt.Errorf("get secret %s: %w", name, err)
+	}
+	if !managed(&s, label) {
+		return b.errNotManaged(&s, label)
 	}
 	s.Data = map[string][]byte{key: raw}
 	if err := b.c.Update(ctx, &s); err != nil {

@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"maps"
 	"os"
-	"path/filepath"
 	"slices"
 	"sync"
 	"time"
 
+	"github.com/rapatao/secret-manager/internal/atomicfile"
 	"github.com/rapatao/secret-manager/internal/storage"
 )
 
@@ -30,6 +30,7 @@ type state struct {
 	Versions map[string][]storage.Version `json:"versions"`
 	Tokens   []storage.Token              `json:"tokens,omitempty"`
 	Audit    []storage.AuditEvent         `json:"audit,omitempty"`
+	Policy   *storage.SyncPolicy          `json:"syncPolicy,omitempty"`
 	Meta     map[string]string            `json:"meta,omitempty"`
 }
 
@@ -110,33 +111,7 @@ func (b *Backend) save() error {
 	if err != nil {
 		return err
 	}
-	target := resolveLink(b.path)
-	tmp, err := os.CreateTemp(filepath.Dir(target), filepath.Base(target)+".tmp*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	_, err = tmp.Write(raw)
-	if err == nil {
-		err = tmp.Sync()
-	}
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), target)
-}
-
-// resolveLink returns the file path points to, so a symlinked store is
-// rewritten in place instead of being replaced by a regular file. A missing or
-// dangling path is returned unchanged.
-func resolveLink(path string) string {
-	if p, err := filepath.EvalSymlinks(path); err == nil {
-		return p
-	}
-	return path
+	return atomicfile.Write(b.path, raw)
 }
 
 // Get implements storage.Backend.
@@ -189,6 +164,9 @@ func (b *Backend) List(_ context.Context, prefix string) ([]string, error) {
 
 // AddVersion implements storage.Backend.
 func (b *Backend) AddVersion(_ context.Context, path string, at time.Time, data map[string]string, keep int) error {
+	if keep < 1 {
+		return fmt.Errorf("add version of %s: keep must be at least 1, got %d", path, keep)
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	vs := b.state.Versions[path]
@@ -256,6 +234,25 @@ func (b *Backend) PutTokens(_ context.Context, tokens []storage.Token) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.state.Tokens = slices.Clone(tokens)
+	return b.commit()
+}
+
+// SyncPolicy implements storage.Backend.
+func (b *Backend) SyncPolicy(_ context.Context) (storage.SyncPolicy, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.state.Policy == nil {
+		return storage.SyncPolicy{}, nil
+	}
+	return b.state.Policy.Clone(), nil
+}
+
+// PutSyncPolicy implements storage.Backend.
+func (b *Backend) PutSyncPolicy(_ context.Context, p storage.SyncPolicy) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	c := p.Clone()
+	b.state.Policy = &c
 	return b.commit()
 }
 
