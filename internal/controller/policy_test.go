@@ -33,7 +33,11 @@ func (e *env) policy(p storage.SyncPolicy) {
 	if e.r.Policy == nil {
 		e.r.Policy = syncpolicy.New(k8sstorage.New(e.c, "secret-manager"), nil)
 	}
-	if _, err := e.r.Policy.Put(e.ctx, p); err != nil {
+	cur, err := e.r.Policy.Get(e.ctx)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if _, err := e.r.Policy.Put(e.ctx, cur, p); err != nil {
 		e.t.Fatal(err)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -173,8 +174,19 @@ func policyForm(enabled bool, ns, paths, targets string) url.Values {
 	return f
 }
 
+var baseRe = regexp.MustCompile(`name="base" value="([0-9a-f]*)"`)
+
 func post(t *testing.T, c *http.Client, base string, form url.Values) (int, string) {
 	t.Helper()
+	if !form.Has("base") {
+		form = maps.Clone(form)
+		_, page := get(t, c, base+"/sync-policy")
+		m := baseRe.FindStringSubmatch(page)
+		if m == nil {
+			t.Fatalf("no base in page:\n%s", page)
+		}
+		form.Set("base", m[1])
+	}
 	req, _ := http.NewRequest(http.MethodPost, base+"/sync-policy", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Origin", base)
@@ -281,7 +293,7 @@ func TestSyncPolicyConfirmation(t *testing.T) {
 
 func TestSyncPolicyRoundTripAndOps(t *testing.T) {
 	base, c, store, _ := newPolicyServer(t, nil, false)
-	if _, err := store.Put(context.Background(), storage.SyncPolicy{Enabled: true, Namespaces: map[string]storage.SyncRule{
+	if _, err := store.Put(context.Background(), storage.SyncPolicy{}, storage.SyncPolicy{Enabled: true, Namespaces: map[string]storage.SyncRule{
 		"team-a": {Paths: []string{"/a", "/b"}, TargetNamespaces: []string{"team-b"}},
 	}}); err != nil {
 		t.Fatal(err)
@@ -308,6 +320,80 @@ func TestSyncPolicyRoundTripAndOps(t *testing.T) {
 	}
 }
 
+func TestSyncPolicyChangeSincePageWasReadConflicts(t *testing.T) {
+	base, c, store, calls := newPolicyServer(t, nil, true)
+	_, page := get(t, c, base+"/sync-policy")
+	m := baseRe.FindStringSubmatch(page)
+	if m == nil {
+		t.Fatalf("no base in page:\n%s", page)
+	}
+	other := storage.SyncPolicy{Enabled: true, Namespaces: map[string]storage.SyncRule{"other": {Paths: []string{"/o"}}}}
+	if _, err := store.Put(context.Background(), storage.SyncPolicy{}, other); err != nil {
+		t.Fatal(err)
+	}
+	before := *calls
+
+	for name, f := range map[string]url.Values{"stale base": policyForm(true, "team-a", "/a", ""), "no base": policyForm(true, "team-a", "/a", "")} {
+		if name == "stale base" {
+			f.Set("base", m[1])
+		} else {
+			f.Set("base", "")
+		}
+		code, body := post(t, c, base, f)
+		if code != http.StatusOK || !strings.Contains(body, "changed since it was read") || !strings.Contains(body, `value="other"`) {
+			t.Fatalf("%s: %d\n%s", name, code, body)
+		}
+	}
+	if p, _ := store.Get(context.Background()); p.Namespaces["team-a"].Paths != nil || *calls != before {
+		t.Fatalf("a conflicting save changed the policy: %+v", p)
+	}
+	if _, audit := get(t, c, base+"/audit"); !strings.Contains(audit, "changed since it was read") {
+		t.Fatalf("conflict not audited:\n%s", audit)
+	}
+
+	f := policyForm(true, "team-a", "/a", "")
+	if code, body := post(t, c, base, f); code != http.StatusOK || strings.Contains(body, "changed since") {
+		t.Fatalf("save on the current policy: %d\n%s", code, body)
+	}
+	if p, _ := store.Get(context.Background()); p.Namespaces["team-a"].Paths == nil {
+		t.Fatalf("not saved: %+v", p)
+	}
+}
+
+func TestSyncPolicyConfirmPageKeepsTheBase(t *testing.T) {
+	base, c, store, _ := newPolicyServer(t, previewByPaths, true)
+	_, page := get(t, c, base+"/sync-policy")
+	m := baseRe.FindStringSubmatch(page)
+	if m == nil {
+		t.Fatal("no base in page")
+	}
+	if _, err := store.Put(context.Background(), storage.SyncPolicy{}, storage.SyncPolicy{Namespaces: map[string]storage.SyncRule{"other": {Paths: []string{"/o"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	f := policyForm(true, "team-a", "/a", "")
+	f.Set("base", m[1])
+	if _, body := post(t, c, base, f); !strings.Contains(body, "changed since it was read") {
+		t.Fatalf("stale base accepted:\n%s", body)
+	}
+
+	cur, _ := store.Get(context.Background())
+	f.Set("base", baseDigest(cur))
+	_, body := post(t, c, base, f)
+	if got := baseRe.FindStringSubmatch(body); got == nil || got[1] != baseDigest(cur) || !strings.Contains(body, `name="digest"`) {
+		t.Fatalf("confirmation page lost the base:\n%s", body)
+	}
+}
+
+func TestPolicyDigestIsUnambiguous(t *testing.T) {
+	p := storage.SyncPolicy{Enabled: true}
+	if policyDigest(p, []string{"a\nb"}) == policyDigest(p, []string{"a", "b"}) {
+		t.Fatal("entries joined with a newline collide")
+	}
+	if policyDigest(p, nil) != policyDigest(p, []string{}) {
+		t.Fatal("no list and an empty list differ")
+	}
+}
+
 func TestSyncPolicyEscapesInput(t *testing.T) {
 	base, c, _, _ := newPolicyServer(t, nil, true)
 	_, body := post(t, c, base, policyForm(true, "<script>alert(1)</script>", "/x", ""))
@@ -323,7 +409,9 @@ func TestSyncPolicyHiddenWithoutStore(t *testing.T) {
 	if code, _ := get(t, c, ts.URL+"/sync-policy"); code != http.StatusNotFound {
 		t.Fatalf("GET: %d", code)
 	}
-	if code, _ := post(t, c, ts.URL, policyForm(true, "a", "/x", "")); code != http.StatusNotFound {
+	f := policyForm(true, "a", "/x", "")
+	f.Set("base", "x")
+	if code, _ := post(t, c, ts.URL, f); code != http.StatusNotFound {
 		t.Fatalf("POST: %d", code)
 	}
 	if _, body := get(t, c, ts.URL+"/"); strings.Contains(body, "/sync-policy") {

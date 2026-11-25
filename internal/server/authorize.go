@@ -476,7 +476,7 @@ type deviceJSON struct {
 // apiAuthorizeDevice starts a device login. It needs no token: the login
 // gives nothing until an admin approves its user code in the Web UI.
 func (s *Server) apiAuthorizeDevice(w http.ResponseWriter, r *http.Request) {
-	addr, throttled := s.authorizeThrottled(w, r, "authorize_start")
+	addr, throttled := s.authorizeThrottled(w, r, "authorize_start", throttledStart)
 	if throttled {
 		return
 	}
@@ -508,17 +508,26 @@ func (s *Server) authorizeLevel() Level {
 	return min(s.Events.Logins, LevelLog)
 }
 
-// authorizeThrottled answers 429 when the client must wait before its next
-// login start or request with a code that matches no login. Requests that
-// match a login are never throttled.
-func (s *Server) authorizeThrottled(w http.ResponseWriter, r *http.Request, op string) (string, bool) {
+// Messages of a throttled login start and of a throttled request with a code
+// that matches no login, which formats the seconds to wait. Neither tells
+// whether a code exists.
+const (
+	throttledStart = "too many login requests from this address, try again in %ds"
+	throttledCode  = "invalid or expired login code; too many failed login requests from this address, try again in %ds"
+)
+
+// authorizeThrottled answers 429 with message, which formats the seconds to
+// wait, when the client must wait before its next login start or request with
+// a code that matches no login. Requests that match a login are never
+// throttled.
+func (s *Server) authorizeThrottled(w http.ResponseWriter, r *http.Request, op, message string) (string, bool) {
 	addr := s.clientAddr(r)
 	wait := s.authorizeLimits.wait(addr, time.Now())
 	if wait <= 0 {
 		return addr, false
 	}
 	secs := int(math.Ceil(wait.Seconds()))
-	err := fmt.Errorf("too many failed login requests, try again in %ds", secs)
+	err := fmt.Errorf(message, secs)
 	s.auditAt(s.authorizeLevel(), r, "api", op, "", nil, err)
 	w.Header().Set("Retry-After", strconv.Itoa(secs))
 	writeError(w, http.StatusTooManyRequests, err.Error())
@@ -559,13 +568,15 @@ func (s *Server) apiAuthorizeToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !ok {
-		if in.Code != "" || in.DeviceCode != "" {
-			addr, throttled := s.authorizeThrottled(w, r, "authorize_token")
-			if throttled {
-				return
-			}
-			s.authorizeLimits.fail(addr, time.Now())
+		if in.Code == "" && in.DeviceCode == "" {
+			writeError(w, http.StatusBadRequest, errLoginInvalid.Error())
+			return
 		}
+		addr, throttled := s.authorizeThrottled(w, r, "authorize_token", throttledCode)
+		if throttled {
+			return
+		}
+		s.authorizeLimits.fail(addr, time.Now())
 		s.auditAt(s.authorizeLevel(), r, "api", "authorize_token", "", nil, errLoginInvalid)
 		writeError(w, http.StatusBadRequest, errLoginInvalid.Error())
 		return

@@ -4,12 +4,59 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rapatao/secret-manager/internal/client"
+	"github.com/rapatao/secret-manager/internal/storage"
 )
+
+func TestMemoryBackendDoesNotShareMemory(t *testing.T) {
+	ctx := context.Background()
+	m := &memory{}
+
+	policy := storage.SyncPolicy{Enabled: true, Namespaces: map[string]storage.SyncRule{"a": {Paths: []string{"/x"}}}}
+	if err := m.PutSyncPolicy(ctx, policy); err != nil {
+		t.Fatal(err)
+	}
+	policy.Namespaces["a"].Paths[0] = "/changed"
+	policy.Namespaces["b"] = storage.SyncRule{}
+	got, _ := m.SyncPolicy(ctx)
+	got.Namespaces["a"].Paths[0] = "/changed-too"
+	if again, _ := m.SyncPolicy(ctx); again.Namespaces["a"].Paths[0] != "/x" || len(again.Namespaces) != 1 {
+		t.Fatalf("policy shared with a caller: %+v", again)
+	}
+
+	d := time.Hour
+	tokens := []storage.Token{{Name: "t", CacheMaxAge: &d, AllowedFrom: []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}}}
+	if err := m.PutTokens(ctx, tokens); err != nil {
+		t.Fatal(err)
+	}
+	tokens[0].Name = "changed"
+	tokens[0].AllowedFrom[0] = netip.MustParsePrefix("0.0.0.0/0")
+	*tokens[0].CacheMaxAge = time.Minute
+	got2, _ := m.Tokens(ctx)
+	got2[0].AllowedFrom[0] = netip.MustParsePrefix("0.0.0.0/0")
+	*got2[0].CacheMaxAge = time.Second
+	again, _ := m.Tokens(ctx)
+	if again[0].Name != "t" || again[0].AllowedFrom[0].String() != "10.0.0.0/8" || *again[0].CacheMaxAge != time.Hour {
+		t.Fatalf("tokens shared with a caller: %+v", again)
+	}
+
+	events := []storage.AuditEvent{{Op: "x", Keys: []string{"k"}}}
+	if err := m.PutAuditEvents(ctx, events); err != nil {
+		t.Fatal(err)
+	}
+	events[0].Keys[0] = "changed"
+	got3, _ := m.AuditEvents(ctx)
+	got3[0].Keys[0] = "changed-too"
+	if again, _ := m.AuditEvents(ctx); again[0].Keys[0] != "k" {
+		t.Fatalf("audit events shared with a caller: %+v", again)
+	}
+}
 
 func TestVault(t *testing.T) {
 	ctx := context.Background()

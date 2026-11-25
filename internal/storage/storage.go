@@ -37,8 +37,8 @@ type Backend interface {
 	// version, deleted paths included.
 	VersionedPaths(ctx context.Context) ([]string, error)
 	// ReplaceVersions replaces every stored version of path with versions,
-	// newest first, keeping their numbers and times. An empty versions
-	// removes every version of path.
+	// keeping their numbers and times. versions must be ordered newest first.
+	// An empty versions removes every version of path.
 	ReplaceVersions(ctx context.Context, path string, versions []Version) error
 
 	// Tokens returns every stored access token, or none.

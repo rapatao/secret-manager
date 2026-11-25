@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -207,6 +208,49 @@ func TestAuthorizeThrottle(t *testing.T) {
 			t.Fatalf("failed authorize_token not logged:\n%s", logs)
 		}
 	})
+}
+
+func TestAuthorizeThrottleMessages(t *testing.T) {
+	ts := newTestServer(t)
+	for range loginFreeFailures + 1 {
+		do(t, ts, "POST", "/api/v1/authorize/device", "", `{"name":"laptop"}`)
+	}
+	status, body := do(t, ts, "POST", "/api/v1/authorize/device", "", `{"name":"laptop"}`)
+	if status != http.StatusTooManyRequests || !regexp.MustCompile(`too many login requests from this address, try again in \d+s`).MatchString(body) {
+		t.Fatalf("throttled start: %d %s", status, body)
+	}
+
+	ts = newTestServer(t)
+	for range loginFreeFailures + 1 {
+		do(t, ts, "POST", "/api/v1/authorize/token", "", `{"deviceCode":"guess"}`)
+	}
+	for _, in := range []string{`{"deviceCode":"guess"}`, `{"code":"guess","codeVerifier":"v"}`} {
+		status, body = do(t, ts, "POST", "/api/v1/authorize/token", "", in)
+		if status != http.StatusTooManyRequests || !regexp.MustCompile(`invalid or expired login code; too many failed login requests from this address, try again in \d+s`).MatchString(body) {
+			t.Fatalf("throttled code %s: %d %s", in, status, body)
+		}
+	}
+}
+
+func TestAuthorizeProbeIsNotAudited(t *testing.T) {
+	ts, logs := newLoggedServer(t)
+	for _, in := range []string{`{}`, ``, `{"code":""}`} {
+		if status, _ := do(t, ts, "POST", "/api/v1/authorize/token", "", in); status != http.StatusBadRequest {
+			t.Fatalf("probe %q: %d", in, status)
+		}
+	}
+	if strings.Contains(logs.String(), "authorize_token") {
+		t.Fatalf("probe logged:\n%s", logs)
+	}
+	for range 3 * loginFreeFailures {
+		do(t, ts, "POST", "/api/v1/authorize/token", "", `{}`)
+	}
+	if status, _ := do(t, ts, "POST", "/api/v1/authorize/token", "", `{"deviceCode":"guess"}`); status != http.StatusBadRequest {
+		t.Fatalf("probes were counted: a bogus code got %d", status)
+	}
+	if !strings.Contains(logs.String(), `"op":"authorize_token"`) {
+		t.Fatalf("failed code not logged:\n%s", logs)
+	}
 }
 
 func TestAuthorizeThrottleSparesInFlightLogins(t *testing.T) {

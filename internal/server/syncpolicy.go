@@ -4,10 +4,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -31,9 +33,10 @@ func policyRows(p storage.SyncPolicy) []policyRow {
 	return append(rows, policyRow{})
 }
 
-func (s *Server) renderPolicy(w http.ResponseWriter, r *http.Request, status int, p storage.SyncPolicy, denied []string, digest string) {
+func (s *Server) renderPolicy(w http.ResponseWriter, r *http.Request, status int, p storage.SyncPolicy, denied []string, digest, base string) {
 	s.render(w, status, "syncpolicy", map[string]any{
 		"Digest":     digest,
+		"Base":       base,
 		"Enabled":    p.Enabled,
 		"Rows":       policyRows(p),
 		"Controller": s.Settings.Controller,
@@ -52,7 +55,7 @@ func (s *Server) uiSyncPolicy(w http.ResponseWriter, r *http.Request) {
 		s.uiError(w, r, err)
 		return
 	}
-	s.renderPolicy(w, r, http.StatusOK, p, nil, "")
+	s.renderPolicy(w, r, http.StatusOK, p, nil, "", baseDigest(p))
 }
 
 // parsePolicy reads the policy form. Rows with nothing in them are skipped.
@@ -101,8 +104,14 @@ func (s *Server) newlyDenied(r *http.Request, old, p storage.SyncPolicy) ([]stri
 
 // policyDigest binds a confirmation to the policy and the list shown with it.
 func policyDigest(p storage.SyncPolicy, denied []string) string {
-	doc, _ := json.Marshal(p)
-	sum := sha256.Sum256([]byte(string(doc) + "\n" + strings.Join(denied, "\n")))
+	if denied == nil {
+		denied = []string{}
+	}
+	doc, _ := json.Marshal(struct {
+		Policy storage.SyncPolicy
+		Denied []string
+	}{p, denied})
+	sum := sha256.Sum256(doc)
 	return hex.EncodeToString(sum[:])
 }
 
@@ -128,9 +137,19 @@ func (s *Server) uiSaveSyncPolicy(w http.ResponseWriter, r *http.Request) {
 		fail(err)
 		return
 	}
+	conflict := func() {
+		msg := syncpolicy.ErrConflict.Error() + "; the current policy is shown, review it and save again"
+		http.Redirect(w, r, "/sync-policy?error="+url.QueryEscape(msg), http.StatusSeeOther)
+	}
 	old, err := s.SyncPolicy.Get(r.Context())
 	if err != nil {
 		s.uiError(w, r, err)
+		return
+	}
+	base := r.PostFormValue("base")
+	if base != baseDigest(old) {
+		s.auditPolicy(r, "ui", old, p, syncpolicy.ErrConflict)
+		conflict()
 		return
 	}
 	if p.Enabled && s.PolicyPreview != nil {
@@ -141,11 +160,15 @@ func (s *Server) uiSaveSyncPolicy(w http.ResponseWriter, r *http.Request) {
 		}
 		digest := policyDigest(p, denied)
 		if len(denied) > 0 && (r.PostFormValue("confirm") != "delete" || r.PostFormValue("digest") != digest) {
-			s.renderPolicy(w, r, http.StatusOK, p, denied, digest)
+			s.renderPolicy(w, r, http.StatusOK, p, denied, digest, base)
 			return
 		}
 	}
 	err = s.putSyncPolicy(r, "ui", old, p)
+	if errors.Is(err, syncpolicy.ErrConflict) {
+		conflict()
+		return
+	}
 	if err != nil {
 		fail(err)
 		return
@@ -153,9 +176,25 @@ func (s *Server) uiSaveSyncPolicy(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/sync-policy", http.StatusSeeOther)
 }
 
-// putSyncPolicy stores p and audits the change from old.
+// PolicyDigestHeader carries the digest of the stored sync policy in the
+// responses of GET and PUT /api/v1/sync-policy.
+const PolicyDigestHeader = "X-Sync-Policy-Digest"
+
+// baseDigest identifies the stored policy p. A save names the digest it read
+// as its base and is refused when the stored policy has another.
+func baseDigest(p storage.SyncPolicy) string { return policyDigest(p, nil) }
+
+// putSyncPolicy stores p over old, which must still be the stored policy, and
+// audits the change.
 func (s *Server) putSyncPolicy(r *http.Request, source string, old, p storage.SyncPolicy) error {
-	_, err := s.SyncPolicy.Put(r.Context(), p)
+	_, err := s.SyncPolicy.Put(r.Context(), old, p)
+	s.auditPolicy(r, source, old, p, err)
+	return err
+}
+
+// auditPolicy audits the change from old to p, which failed with err when it
+// is not nil.
+func (s *Server) auditPolicy(r *http.Request, source string, old, p storage.SyncPolicy, err error) {
 	op := "update_sync_policy"
 	switch {
 	case !old.Enabled && p.Enabled:
@@ -164,7 +203,6 @@ func (s *Server) putSyncPolicy(r *http.Request, source string, old, p storage.Sy
 		op = "disable_sync_policy"
 	}
 	s.audit(r, source, op, "", slices.Sorted(maps.Keys(p.Namespaces)), err)
-	return err
 }
 
 func (s *Server) apiGetSyncPolicy(w http.ResponseWriter, r *http.Request) {
@@ -178,14 +216,22 @@ func (s *Server) apiGetSyncPolicy(w http.ResponseWriter, r *http.Request) {
 		s.serviceError(w, r, err)
 		return
 	}
+	w.Header().Set(PolicyDigestHeader, baseDigest(p))
 	writeJSON(w, http.StatusOK, p)
 }
 
-// apiPutSyncPolicy replaces the policy. When the new policy disallows
-// SecretSyncs the stored one does not, it needs ?confirm=delete.
+// apiPutSyncPolicy replaces the policy the request names with ?base, the
+// digest GET returned. When the new policy disallows SecretSyncs the stored
+// one does not, the answer is a 409 listing them with the digest of this
+// preview, and the save needs ?confirm set to that digest.
 func (s *Server) apiPutSyncPolicy(w http.ResponseWriter, r *http.Request) {
 	if s.SyncPolicy == nil {
 		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	base := r.URL.Query().Get("base")
+	if base == "" {
+		writeError(w, http.StatusBadRequest, "base is required: send the "+PolicyDigestHeader+" header of GET /api/v1/sync-policy as ?base=")
 		return
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
@@ -205,24 +251,35 @@ func (s *Server) apiPutSyncPolicy(w http.ResponseWriter, r *http.Request) {
 		s.serviceError(w, r, err)
 		return
 	}
+	if baseDigest(old) != base {
+		s.auditPolicy(r, "api", old, p, syncpolicy.ErrConflict)
+		writeError(w, http.StatusConflict, syncpolicy.ErrConflict.Error()+"; read it again")
+		return
+	}
 	if p.Enabled && s.PolicyPreview != nil {
 		denied, err := s.newlyDenied(r, old, p)
 		if err != nil {
 			s.serviceError(w, r, err)
 			return
 		}
-		if len(denied) > 0 && r.URL.Query().Get("confirm") != "delete" {
+		digest := policyDigest(p, denied)
+		if len(denied) > 0 && r.URL.Query().Get("confirm") != digest {
 			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":  fmt.Sprintf("the policy disallows %d SecretSyncs, which lose their target Secrets; repeat with confirm=delete to save it", len(denied)),
+				"error":  fmt.Sprintf("the policy disallows %d SecretSyncs, which lose their target Secrets; repeat with confirm=%s to save it", len(denied), digest),
 				"denied": denied,
 				"count":  len(denied),
+				"digest": digest,
 			})
 			return
 		}
 	}
-	if err := s.putSyncPolicy(r, "api", old, p); err != nil {
+	if err := s.putSyncPolicy(r, "api", old, p); errors.Is(err, syncpolicy.ErrConflict) {
+		writeError(w, http.StatusConflict, err.Error()+"; read it again")
+		return
+	} else if err != nil {
 		s.serviceError(w, r, err)
 		return
 	}
+	w.Header().Set(PolicyDigestHeader, baseDigest(p))
 	writeJSON(w, http.StatusOK, p)
 }

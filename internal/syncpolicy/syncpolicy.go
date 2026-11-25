@@ -3,7 +3,9 @@
 package syncpolicy
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -64,14 +66,37 @@ func (s *Store) Get(ctx context.Context) (storage.SyncPolicy, error) {
 	return s.policy.Clone(), nil
 }
 
-// Put validates and stores p, then calls onChange. It returns the stored,
-// normalized policy.
-func (s *Store) Put(ctx context.Context, p storage.SyncPolicy) (storage.SyncPolicy, error) {
+// ErrConflict is returned by Put when the stored policy is not the one the
+// caller based its change on.
+var ErrConflict = errors.New("the sync policy changed since it was read")
+
+// Same reports whether a and b are the same policy. A policy without
+// namespaces equals one with an empty namespace map, and the zero policy is
+// the policy of a store that holds none.
+func Same(a, b storage.SyncPolicy) bool {
+	x, _ := json.Marshal(a)
+	y, _ := json.Marshal(b)
+	return bytes.Equal(x, y)
+}
+
+// Put validates p and stores it when the stored policy is old, checked under
+// the store's lock, then calls onChange. It returns the stored, normalized
+// policy, or ErrConflict when the stored policy differs from old. The check
+// covers this process only, so the server must run as a single replica.
+func (s *Store) Put(ctx context.Context, old, p storage.SyncPolicy) (storage.SyncPolicy, error) {
 	p, err := Validate(p)
 	if err != nil {
 		return storage.SyncPolicy{}, err
 	}
 	s.mu.Lock()
+	if err := s.load(ctx); err != nil {
+		s.mu.Unlock()
+		return storage.SyncPolicy{}, err
+	}
+	if !Same(s.policy, old) {
+		s.mu.Unlock()
+		return storage.SyncPolicy{}, ErrConflict
+	}
 	if err := s.backend.PutSyncPolicy(ctx, p); err != nil {
 		s.mu.Unlock()
 		return storage.SyncPolicy{}, err
@@ -144,7 +169,7 @@ func Check(p storage.SyncPolicy, ns string, sources []SourceRef, targetNamespace
 	for _, src := range sources {
 		path, err := secrets.NormalizePath(src.Path)
 		if err != nil {
-			return fmt.Errorf("%w: %w", ErrDenied, err)
+			return fmt.Errorf("%w: %s", ErrDenied, err.Error())
 		}
 		if !slices.ContainsFunc(rule.Paths, func(allowed string) bool { return storage.Under(path, allowed) }) {
 			kind := "path"

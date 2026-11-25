@@ -5,7 +5,10 @@ import (
 	"errors"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/rapatao/secret-manager/internal/secrets"
@@ -58,7 +61,7 @@ func TestStorePut(t *testing.T) {
 	in := storage.SyncPolicy{Enabled: true, Namespaces: map[string]storage.SyncRule{
 		"team-a": {Paths: []string{"/b/", "/a", "/a"}, TargetNamespaces: []string{"z", "y", "y"}},
 	}}
-	out, err := s.Put(ctx, in)
+	out, err := s.Put(ctx, storage.SyncPolicy{}, in)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,11 +98,53 @@ func TestStorePutFailureKeepsPolicy(t *testing.T) {
 	calls := 0
 	s := New(failingBackend{putErr: boom}, func() { calls++ })
 	s.loaded = true
-	if _, err := s.Put(ctx, storage.SyncPolicy{Enabled: true}); !errors.Is(err, boom) {
+	if _, err := s.Put(ctx, storage.SyncPolicy{}, storage.SyncPolicy{Enabled: true}); !errors.Is(err, boom) {
 		t.Fatalf("Put = %v", err)
 	}
 	if p, _ := s.Get(ctx); p.Enabled || calls != 0 {
 		t.Fatalf("policy changed after failed Put: %+v, calls %d", p, calls)
+	}
+}
+
+func TestStorePutConflict(t *testing.T) {
+	ctx := context.Background()
+	calls := 0
+	s := New(newFile(t), func() { calls++ })
+
+	first := storage.SyncPolicy{Enabled: true, Namespaces: map[string]storage.SyncRule{"a": {Paths: []string{"/a"}}}}
+	if _, err := s.Put(ctx, storage.SyncPolicy{Namespaces: map[string]storage.SyncRule{}}, first); err != nil {
+		t.Fatalf("an empty map is the zero policy: %v", err)
+	}
+	if _, err := s.Put(ctx, storage.SyncPolicy{}, storage.SyncPolicy{}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale base: %v", err)
+	}
+	if p, _ := s.Get(ctx); !p.Enabled || calls != 1 {
+		t.Fatalf("stale Put changed the policy: %+v, calls %d", p, calls)
+	}
+	cur, _ := s.Get(ctx)
+	if _, err := s.Put(ctx, cur, storage.SyncPolicy{}); err != nil {
+		t.Fatalf("current base: %v", err)
+	}
+}
+
+func TestStorePutConcurrent(t *testing.T) {
+	ctx := context.Background()
+	s := New(newFile(t), nil)
+	var wg sync.WaitGroup
+	var won atomic.Int32
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p := storage.SyncPolicy{Enabled: true, Namespaces: map[string]storage.SyncRule{"ns" + strconv.Itoa(i): {Paths: []string{"/a"}}}}
+			if _, err := s.Put(ctx, storage.SyncPolicy{}, p); err == nil {
+				won.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if won.Load() != 1 {
+		t.Fatalf("%d saves based on the same policy succeeded", won.Load())
 	}
 }
 
@@ -173,6 +218,9 @@ func TestCheck(t *testing.T) {
 			}
 			if !errors.Is(err, ErrDenied) || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Check = %v, want ErrDenied containing %q", err, tt.want)
+			}
+			if errors.Is(err, secrets.ErrInvalid) {
+				t.Fatalf("Check = %v, a denial must not also be an invalid input", err)
 			}
 		})
 	}

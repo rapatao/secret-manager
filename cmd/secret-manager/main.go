@@ -154,7 +154,7 @@ func runServer(args []string) error {
 	var mgr manager.Manager
 	if *runController || *storageName == "kubernetes" {
 		var err error
-		if mgr, err = newManager(*metricsAddr); err != nil {
+		if mgr, err = newManager(); err != nil {
 			return err
 		}
 	}
@@ -265,7 +265,24 @@ func runServer(args []string) error {
 		return fmt.Errorf("load audit events: %w", err)
 	}
 	handler.Settings = server.Settings{Storage: *storageName, Encryption: key != nil, Controller: *runController, Backups: sched}
-	httpServer := &http.Server{Addr: *addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 10 * time.Minute, IdleTimeout: 2 * time.Minute}
+	httpServer := &http.Server{
+		Addr:              *addr,
+		Handler:           handler,
+		ReadHeaderTimeout: server.ReadHeaderTimeout,
+		ReadTimeout:       server.ReadTimeout,
+		WriteTimeout:      server.WriteTimeout,
+		IdleTimeout:       server.IdleTimeout,
+	}
+	var metricsServer *http.Server
+	if *metricsAddr != "0" {
+		metricsServer = &http.Server{
+			Addr:              *metricsAddr,
+			Handler:           metricsMux(),
+			ReadHeaderTimeout: server.ReadHeaderTimeout,
+			WriteTimeout:      time.Minute,
+			IdleTimeout:       server.IdleTimeout,
+		}
+	}
 
 	slog.Info("starting secret-manager", "version", version, "storage", *storageName, "controller", *runController,
 		"encryption", key != nil, "backup_dir", sched.Dir, "events", handler.Events.String())
@@ -291,20 +308,27 @@ func runServer(args []string) error {
 		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error { return serve(ctx, httpServer) })); err != nil {
 			return err
 		}
+		if metricsServer != nil {
+			if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error { return serve(ctx, metricsServer) })); err != nil {
+				return err
+			}
+		}
 		return mgr.Start(ctx)
 	}
 
 	errc := make(chan error, 2)
 	go func() { errc <- serve(ctx, httpServer) }()
-	if *metricsAddr != "0" {
-		metricsServer := &http.Server{
-			Addr:              *metricsAddr,
-			Handler:           promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{}),
-			ReadHeaderTimeout: 10 * time.Second,
-		}
+	if metricsServer != nil {
 		go func() { errc <- serve(ctx, metricsServer) }()
 	}
 	return <-errc
+}
+
+// metricsMux serves the controller-runtime metrics registry at /metrics.
+func metricsMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(ctrlmetrics.Registry, promhttp.HandlerOpts{ErrorHandling: promhttp.ContinueOnError}))
+	return mux
 }
 
 // envKey parses the base64 key in the environment variable name, nil when
@@ -321,7 +345,7 @@ func envKey(name string) ([]byte, error) {
 	return key, nil
 }
 
-func newManager(metricsAddr string) (manager.Manager, error) {
+func newManager() (manager.Manager, error) {
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		return nil, err
@@ -336,7 +360,7 @@ func newManager(metricsAddr string) (manager.Manager, error) {
 	}
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:  scheme,
-		Metrics: metricsserver.Options{BindAddress: metricsAddr},
+		Metrics: metricsserver.Options{BindAddress: "0"},
 		Client: client.Options{Cache: &client.CacheOptions{
 			// Read Secrets and workloads directly: no cluster-wide cache of
 			// every Secret, and storage reads always see the latest write.

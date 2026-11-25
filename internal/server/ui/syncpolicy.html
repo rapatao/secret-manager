@@ -7,6 +7,7 @@
 <ul>{{range .Denied}}<li class="mono">{{.}}</li>{{end}}</ul>
 </div>{{end}}
 <form method="post" action="/sync-policy" class="card stack">
+<input type="hidden" name="base" value="{{.Base}}">
 <div class="body stack">
 <label class="check"><input type="checkbox" name="enabled" value="true"{{if .Enabled}} checked{{end}}> Enabled</label>
 <p class="muted">Enabling the policy deletes the target Secrets of every SecretSync that it does not allow, Orphan ones included. Disabled, SecretSyncs are unrestricted.</p>

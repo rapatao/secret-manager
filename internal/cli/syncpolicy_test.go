@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -13,6 +14,8 @@ import (
 	k8sstorage "github.com/rapatao/secret-manager/internal/storage/kubernetes"
 	"github.com/rapatao/secret-manager/internal/syncpolicy"
 )
+
+var confirmRe = regexp.MustCompile(`--confirm ([0-9a-f]+)`)
 
 const cliPolicy = `{"enabled":true,"namespaces":{"team-a":{"paths":["/apps"]}}}`
 
@@ -37,11 +40,16 @@ func TestSyncPolicyGetSet(t *testing.T) {
 	if code := h.run("sync-policy", "set", "--file", "-"); code != 1 {
 		t.Fatalf("exit %d, stderr: %s", code, h.stderr.String())
 	}
-	for _, want := range []string{"disallows 1 SecretSyncs", "team-a/app: path not allowed", "--confirm"} {
+	for _, want := range []string{"disallows 1 SecretSyncs", "team-a/app: path not allowed", "run again with --confirm "} {
 		if !strings.Contains(h.stderr.String(), want) {
 			t.Fatalf("stderr lacks %q:\n%s", want, h.stderr.String())
 		}
 	}
+	m := confirmRe.FindStringSubmatch(h.stderr.String())
+	if m == nil {
+		t.Fatalf("no digest in:\n%s", h.stderr.String())
+	}
+	digest := m[1]
 	if out := h.mustRun("sync-policy", "get"); strings.Contains(out, "team-a") {
 		t.Fatalf("saved without confirmation:\n%s", out)
 	}
@@ -50,11 +58,49 @@ func TestSyncPolicyGetSet(t *testing.T) {
 	if err := os.WriteFile(file, []byte(cliPolicy), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if out := h.mustRun("sync-policy", "set", "--file", file, "--confirm"); !strings.Contains(out, `"team-a"`) {
+	if code := h.run("sync-policy", "set", "--file", file, "--confirm", "delete"); code != 1 || !strings.Contains(h.stderr.String(), digest) {
+		t.Fatalf("a made-up confirmation: exit %d, stderr: %s", code, h.stderr.String())
+	}
+	if out := h.mustRun("sync-policy", "get"); strings.Contains(out, "team-a") {
+		t.Fatalf("saved with a wrong confirmation:\n%s", out)
+	}
+	if out := h.mustRun("sync-policy", "set", "--file", file, "--confirm", digest); !strings.Contains(out, `"team-a"`) {
 		t.Fatalf("set output:\n%s", out)
 	}
 	if out := h.mustRun("sync-policy", "get"); !strings.Contains(out, `"enabled": true`) || !strings.Contains(out, "/apps") {
 		t.Fatalf("get output:\n%s", out)
+	}
+}
+
+func TestSyncPolicySetConflict(t *testing.T) {
+	h := newPolicyHarness(t)
+	store := h.srv.SyncPolicy
+	changed := false
+	h.srv.PolicyPreview = func(ctx context.Context, _ storage.SyncPolicy) ([]string, error) {
+		if !changed {
+			changed = true
+			cur, _ := store.Get(ctx)
+			_, err := store.Put(ctx, cur, storage.SyncPolicy{Enabled: true, Namespaces: map[string]storage.SyncRule{"other": {Paths: []string{"/o"}}}})
+			return nil, err
+		}
+		return nil, nil
+	}
+	h.stdin = cliPolicy
+	if code := h.run("sync-policy", "set", "--file", "-"); code != 1 {
+		t.Fatalf("exit %d, stderr: %s", code, h.stderr.String())
+	}
+	for _, want := range []string{"changed since it was read", "Nothing was saved"} {
+		if !strings.Contains(h.stderr.String(), want) {
+			t.Fatalf("stderr lacks %q:\n%s", want, h.stderr.String())
+		}
+	}
+	if p, _ := store.Get(context.Background()); p.Namespaces["team-a"].Paths != nil {
+		t.Fatalf("overwrote the concurrent change: %+v", p)
+	}
+
+	h.stdin = cliPolicy
+	if code := h.run("sync-policy", "set", "--file", "-"); code != 0 {
+		t.Fatalf("second run: exit %d, stderr: %s", code, h.stderr.String())
 	}
 }
 
@@ -81,8 +127,8 @@ func TestSyncPolicySetRejectsBadDocument(t *testing.T) {
 		t.Fatalf("stderr: %s", h.stderr.String())
 	}
 
-	h.stdin = cliPolicy + "\n\n"
-	if code := h.run("sync-policy", "set", "--file", "-", "--confirm"); code != 0 {
+	h.stdin = `{"enabled":false}` + "\n\n"
+	if code := h.run("sync-policy", "set", "--file", "-"); code != 0 {
 		t.Fatalf("trailing newline rejected: exit %d, stderr: %s", code, h.stderr.String())
 	}
 }

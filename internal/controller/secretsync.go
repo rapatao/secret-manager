@@ -281,8 +281,26 @@ func (r *SecretSyncReconciler) resolve(ctx context.Context, ss *v1alpha1.SecretS
 	return values, nil
 }
 
-// checkTarget rejects target metadata and names reserved for the server.
+// allowedTypes are the Secret types a target may have, besides the empty type,
+// which means Opaque.
+var allowedTypes = []corev1.SecretType{
+	corev1.SecretTypeOpaque,
+	corev1.SecretTypeDockerConfigJson,
+	corev1.SecretTypeTLS,
+	corev1.SecretTypeBasicAuth,
+	corev1.SecretTypeSSHAuth,
+}
+
+// checkTarget rejects a target type, metadata and name the controller must not
+// write.
 func (r *SecretSyncReconciler) checkTarget(t v1alpha1.Target, ns string) error {
+	if t.Type != "" && !slices.Contains(allowedTypes, t.Type) {
+		allowed := make([]string, len(allowedTypes))
+		for i, a := range allowedTypes {
+			allowed[i] = string(a)
+		}
+		return fmt.Errorf("secret type %s is not allowed; use one of %s", t.Type, strings.Join(allowed, ", "))
+	}
 	var keys []string
 	for _, m := range []map[string]string{t.Metadata.Labels, t.Metadata.Annotations} {
 		for k := range m {
@@ -295,7 +313,7 @@ func (r *SecretSyncReconciler) checkTarget(t v1alpha1.Target, ns string) error {
 		slices.Sort(keys)
 		return fmt.Errorf("metadata keys under %s are reserved: %s", reservedPrefix, strings.Join(slices.Compact(keys), ", "))
 	}
-	if r.StorageNamespace != "" && ns == r.StorageNamespace && k8sstorage.ReservedName(t.Name) {
+	if r.reservedTarget(ns, t.Name) {
 		return fmt.Errorf("the name %s is reserved for the server's storage in namespace %s", t.Name, ns)
 	}
 	return nil
@@ -399,10 +417,17 @@ func (r *SecretSyncReconciler) syncTarget(ctx context.Context, ss *v1alpha1.Secr
 	return r.Client.Update(ctx, &existing)
 }
 
+// reservedTarget reports whether a Secret called name in ns is one the server
+// stores under.
+func (r *SecretSyncReconciler) reservedTarget(ns, name string) bool {
+	return r.StorageNamespace != "" && ns == r.StorageNamespace && k8sstorage.ReservedName(name)
+}
+
 // release deletes Owner-policy Secrets of ss not listed in keep and detaches
-// Orphan-policy ones. A nil keep releases every target. With force, Orphan
-// Secrets are deleted too. Every owned Secret is attempted and the failures
-// are joined.
+// Orphan-policy ones, except those named like the server's own Secrets, which
+// are deleted. A nil keep releases every target. With force, Orphan Secrets
+// are deleted too and every owned Secret is attempted, the failures joined.
+// Without force the first failure stops the release.
 func (r *SecretSyncReconciler) release(ctx context.Context, ss *v1alpha1.SecretSync, keep map[string]bool, force bool) error {
 	var list corev1.SecretList
 	if err := r.Client.List(ctx, &list, client.MatchingLabels{OwnerLabel: hashOwner(ownerKey(ss))}); err != nil {
@@ -411,27 +436,32 @@ func (r *SecretSyncReconciler) release(ctx context.Context, ss *v1alpha1.SecretS
 	var errs []error
 	for i := range list.Items {
 		s := &list.Items[i]
-		if keep[s.Namespace+"/"+s.Name] {
+		if keep[s.Namespace+"/"+s.Name] || s.Annotations[OwnerAnnotation] != ownerKey(ss) {
 			continue
 		}
 		var err error
-		if force {
-			if s.Annotations[OwnerAnnotation] != ownerKey(ss) {
-				continue
-			}
-			err = r.Client.Delete(ctx, s)
+		reserved := r.reservedTarget(s.Namespace, s.Name)
+		switch {
+		case force:
+			err = r.Client.Delete(ctx, s, client.Preconditions{UID: &s.UID})
 			if apierrors.IsNotFound(err) {
 				err = nil
 			} else if err == nil {
 				log.FromContext(ctx).Info("deleted Secret of a SecretSync not allowed by the sync policy", "secret", s.Namespace+"/"+s.Name, "owner", ownerKey(ss))
 				r.Recorder.Eventf(ss, nil, corev1.EventTypeWarning, "Released", "DeleteSecret", "Deleted Secret %s/%s: SecretSync not allowed", s.Namespace, s.Name)
 			}
-		} else if s.Labels[PolicyLabel] == string(v1alpha1.CreationPolicyOrphan) {
+		case s.Labels[PolicyLabel] == string(v1alpha1.CreationPolicyOrphan) && !reserved:
 			s.Labels = withoutReserved(s.Labels)
 			s.Annotations = withoutReserved(s.Annotations)
 			err = r.Client.Update(ctx, s)
-		} else {
-			err = client.IgnoreNotFound(r.Client.Delete(ctx, s))
+		default:
+			err = r.Client.Delete(ctx, s, client.Preconditions{UID: &s.UID})
+			if apierrors.IsNotFound(err) {
+				err = nil
+			} else if err == nil && reserved && s.Labels[PolicyLabel] == string(v1alpha1.CreationPolicyOrphan) {
+				log.FromContext(ctx).Info("deleted Orphan Secret named like a server Secret", "secret", s.Namespace+"/"+s.Name, "owner", ownerKey(ss))
+				r.Recorder.Eventf(ss, nil, corev1.EventTypeWarning, "Released", "DeleteSecret", "Deleted Secret %s/%s: name reserved for the server's storage", s.Namespace, s.Name)
+			}
 		}
 		if err != nil {
 			if !force {

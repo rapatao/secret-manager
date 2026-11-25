@@ -59,6 +59,7 @@ type Target struct {
 	// +optional
 	CreationPolicy CreationPolicy `json:"creationPolicy,omitempty"`
 	// Type of the Secret. Defaults to Opaque.
+	// +kubebuilder:validation:Enum="";Opaque;kubernetes.io/dockerconfigjson;kubernetes.io/tls;kubernetes.io/basic-auth;kubernetes.io/ssh-auth
 	// +optional
 	Type corev1.SecretType `json:"type,omitempty"`
 	// +optional

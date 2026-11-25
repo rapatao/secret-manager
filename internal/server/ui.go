@@ -528,6 +528,7 @@ func (s *Server) uiExport(w http.ResponseWriter, r *http.Request) {
 // backup passphrase when it has one, else with the passphrase in the form,
 // else, when the form says plain, in plain text.
 func (s *Server) uiBackup(w http.ResponseWriter, r *http.Request) {
+	extendWriteDeadline(w)
 	var err error
 	passphrase := s.Settings.Backups.Passphrase
 	if passphrase == "" {

@@ -32,6 +32,28 @@ func TestInfoAndRequire(t *testing.T) {
 	}
 }
 
+func TestPutSyncPolicyDeniedCarriesDigest(t *testing.T) {
+	var query string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.RawQuery
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"x","denied":["a/b: no"],"count":1,"digest":"abc123"}`))
+	}))
+	defer ts.Close()
+
+	_, err := New(ts.URL, "t").PutSyncPolicy(context.Background(), SyncPolicy{Enabled: true}, "base1", "")
+	var denied *DeniedError
+	if !errors.As(err, &denied) || denied.Digest != "abc123" || len(denied.Denied) != 1 {
+		t.Fatalf("error %v", err)
+	}
+	if query != "base=base1" {
+		t.Fatalf("query %q", query)
+	}
+	if _, err := New(ts.URL, "t").PutSyncPolicy(context.Background(), SyncPolicy{}, "base1", "abc123"); err == nil || query != "base=base1&confirm=abc123" {
+		t.Fatalf("query %q, error %v", query, err)
+	}
+}
+
 func TestInfoFromServerWithoutInfo(t *testing.T) {
 	ts := httptest.NewServer(http.NotFoundHandler())
 	defer ts.Close()

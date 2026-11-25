@@ -29,8 +29,10 @@ type Client struct {
 type Error struct {
 	Status  int
 	Message string
-	// Denied lists the SecretSyncs of a 409 from PutSyncPolicy.
+	// Denied lists the SecretSyncs of a 409 from PutSyncPolicy, and Digest
+	// identifies that preview.
 	Denied []string
+	Digest string
 }
 
 func (e *Error) Error() string {
@@ -247,34 +249,44 @@ type SyncPolicy struct {
 }
 
 // DeniedError is returned by PutSyncPolicy when saving the policy would
-// disallow SecretSyncs, which lose their target Secrets, and confirm is false.
+// disallow SecretSyncs, which lose their target Secrets, and confirm is not the
+// digest of this preview. Digest is the confirm that saves the same policy.
 type DeniedError struct {
 	Denied []string
+	Digest string
 }
 
 func (e *DeniedError) Error() string {
 	return fmt.Sprintf("the policy disallows %d SecretSyncs, which lose their target Secrets", len(e.Denied))
 }
 
-// GetSyncPolicy returns the SecretSync policy.
-func (c *Client) GetSyncPolicy(ctx context.Context) (SyncPolicy, error) {
+// policyDigestHeader carries the digest of the stored policy.
+const policyDigestHeader = "X-Sync-Policy-Digest"
+
+// GetSyncPolicy returns the SecretSync policy and its digest, which
+// PutSyncPolicy takes as base.
+func (c *Client) GetSyncPolicy(ctx context.Context) (SyncPolicy, string, error) {
 	var out SyncPolicy
-	err := c.do(ctx, http.MethodGet, "/api/v1/sync-policy", nil, nil, &out)
-	return out, err
+	var header http.Header
+	err := c.doHeader(ctx, http.MethodGet, "/api/v1/sync-policy", nil, nil, &out, &header)
+	return out, header.Get(policyDigestHeader), err
 }
 
-// PutSyncPolicy replaces the SecretSync policy and returns the stored one.
-// Without confirm, a policy that disallows SecretSyncs the stored policy
-// allows is not saved and the error is a *DeniedError.
-func (c *Client) PutSyncPolicy(ctx context.Context, p SyncPolicy, confirm bool) (SyncPolicy, error) {
-	var q url.Values
-	if confirm {
-		q = url.Values{"confirm": {"delete"}}
+// PutSyncPolicy replaces the SecretSync policy whose digest is base, as
+// GetSyncPolicy returned it, and returns the stored one. When the stored
+// policy has another digest nothing is saved and the error is a *Error with
+// status 409. A policy that disallows SecretSyncs the stored policy allows is
+// not saved unless confirm is the digest of that preview; the error is a
+// *DeniedError carrying the list and the digest to send as confirm.
+func (c *Client) PutSyncPolicy(ctx context.Context, p SyncPolicy, base, confirm string) (SyncPolicy, error) {
+	q := url.Values{"base": {base}}
+	if confirm != "" {
+		q.Set("confirm", confirm)
 	}
 	var out SyncPolicy
 	err := c.do(ctx, http.MethodPut, "/api/v1/sync-policy", q, p, &out)
 	if apiErr := (*Error)(nil); errors.As(err, &apiErr) && apiErr.Status == http.StatusConflict && apiErr.Denied != nil {
-		return SyncPolicy{}, &DeniedError{Denied: apiErr.Denied}
+		return SyncPolicy{}, &DeniedError{Denied: apiErr.Denied, Digest: apiErr.Digest}
 	}
 	return out, err
 }
@@ -355,6 +367,11 @@ func (c *Client) PollDevice(ctx context.Context, d Device) (Login, error) {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, in, out any) error {
+	return c.doHeader(ctx, method, path, query, in, out, nil)
+}
+
+// doHeader is do that also returns the response headers when header is set.
+func (c *Client) doHeader(ctx context.Context, method, path string, query url.Values, in, out any, header *http.Header) error {
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
@@ -388,9 +405,13 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		var e struct {
 			Error  string
 			Denied []string
+			Digest string
 		}
 		_ = json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&e)
-		return &Error{Status: res.StatusCode, Message: e.Error, Denied: e.Denied}
+		return &Error{Status: res.StatusCode, Message: e.Error, Denied: e.Denied, Digest: e.Digest}
+	}
+	if header != nil {
+		*header = res.Header
 	}
 	if out == nil {
 		return nil

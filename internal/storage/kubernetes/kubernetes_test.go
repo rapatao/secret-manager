@@ -3,14 +3,18 @@ package kubernetes
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/rapatao/secret-manager/internal/storage"
 	"github.com/rapatao/secret-manager/internal/storage/storagetest"
@@ -217,6 +221,93 @@ func TestIgnoresSecretsWithWrongName(t *testing.T) {
 		if err := b.c.Get(ctx, client.ObjectKey{Namespace: "ns", Name: name}, &s); err != nil {
 			t.Fatalf("prune removed %s: %v", name, err)
 		}
+	}
+}
+
+func historySecret(path string, n int, uid types.UID) *corev1.Secret {
+	return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "ns", Name: VersionName(path, n), UID: uid,
+		Labels:      map[string]string{HistoryLabel: "true", PathHashLabel: PathHash(path)},
+		Annotations: map[string]string{PathAnnotation: path, VersionAnnotation: strconv.Itoa(n), TimeAnnotation: "2026-01-02T03:04:05Z"},
+	}}
+}
+
+type deleteRecorder struct {
+	uids map[string]types.UID
+	// enforce rejects a delete whose UID differs from the stored Secret's,
+	// as the API server does.
+	enforce bool
+}
+
+func (d *deleteRecorder) funcs() interceptor.Funcs {
+	return interceptor.Funcs{Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+		var o client.DeleteOptions
+		o.ApplyOptions(opts)
+		if o.Preconditions == nil || o.Preconditions.UID == nil {
+			d.uids[obj.GetName()] = "missing"
+			return c.Delete(ctx, obj, opts...)
+		}
+		d.uids[obj.GetName()] = *o.Preconditions.UID
+		if d.enforce {
+			var cur corev1.Secret
+			if err := c.Get(ctx, client.ObjectKeyFromObject(obj), &cur); err == nil && cur.UID != *o.Preconditions.UID {
+				return apierrors.NewConflict(corev1.Resource("secrets"), obj.GetName(), errors.New("uid mismatch"))
+			}
+		}
+		return c.Delete(ctx, obj, opts...)
+	}}
+}
+
+func TestVersionDeletesCarryUIDPrecondition(t *testing.T) {
+	ctx := context.Background()
+
+	rec := &deleteRecorder{uids: map[string]types.UID{}}
+	b := New(fake.NewClientBuilder().WithInterceptorFuncs(rec.funcs()).
+		WithObjects(historySecret("/app", 1, "u1"), historySecret("/app", 2, "u2"), historySecret("/app", 3, "u3")).Build(), "ns")
+	if err := b.AddVersion(ctx, "/app", time.Now(), map[string]string{"A": "1"}, 2); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.uids) != 2 || rec.uids[VersionName("/app", 2)] != "u2" || rec.uids[VersionName("/app", 1)] != "u1" {
+		t.Fatalf("prune deletes %v", rec.uids)
+	}
+
+	rec = &deleteRecorder{uids: map[string]types.UID{}}
+	b = New(fake.NewClientBuilder().WithInterceptorFuncs(rec.funcs()).
+		WithObjects(historySecret("/app", 1, "u1"), historySecret("/app", 2, "u2")).Build(), "ns")
+	keep := []storage.Version{{Number: 2, Time: time.Now(), Data: map[string]string{"A": "1"}}}
+	if err := b.ReplaceVersions(ctx, "/app", keep); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.uids) != 1 || rec.uids[VersionName("/app", 1)] != "u1" {
+		t.Fatalf("replace deletes %v", rec.uids)
+	}
+}
+
+func TestRecreatedVersionIsNotDeleted(t *testing.T) {
+	ctx := context.Background()
+	rec := &deleteRecorder{uids: map[string]types.UID{}, enforce: true}
+	funcs := rec.funcs()
+	swapped := false
+	funcs.Create = func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		if !swapped {
+			swapped = true
+			_ = c.Delete(ctx, historySecret("/app", 1, ""))
+			if err := c.Create(ctx, historySecret("/app", 1, "other")); err != nil {
+				return err
+			}
+		}
+		return c.Create(ctx, obj, opts...)
+	}
+	raw := fake.NewClientBuilder().WithInterceptorFuncs(funcs).WithObjects(historySecret("/app", 1, "u1")).Build()
+	b := New(raw, "ns")
+
+	err := b.AddVersion(ctx, "/app", time.Now(), map[string]string{"A": "1"}, 1)
+	if err == nil || !apierrors.IsConflict(errors.Unwrap(err)) {
+		t.Fatalf("want a conflict, got %v", err)
+	}
+	var s corev1.Secret
+	if err := raw.Get(ctx, client.ObjectKey{Namespace: "ns", Name: VersionName("/app", 1)}, &s); err != nil || s.UID != "other" {
+		t.Fatalf("recreated Secret deleted: %v, %v", s.UID, err)
 	}
 }
 

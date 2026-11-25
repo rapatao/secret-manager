@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -97,7 +98,7 @@ func Create(path, passphrase string) ([]byte, error) {
 		return nil, err
 	}
 	salt := make([]byte, 16)
-	rand.Read(salt)
+	_, _ = rand.Read(salt)
 	p := defaultParams
 	key := p.derive(passphrase, salt)
 	err = fb.SetMeta(map[string]string{
@@ -260,23 +261,47 @@ type memory struct {
 	policy storage.SyncPolicy
 }
 
-func (m *memory) SyncPolicy(context.Context) (storage.SyncPolicy, error) { return m.policy, nil }
+func (m *memory) SyncPolicy(context.Context) (storage.SyncPolicy, error) {
+	return m.policy.Clone(), nil
+}
 
 func (m *memory) PutSyncPolicy(_ context.Context, p storage.SyncPolicy) error {
-	m.policy = p
+	m.policy = p.Clone()
 	return nil
 }
 
-func (m *memory) Tokens(context.Context) ([]storage.Token, error) { return m.tokens, nil }
+func (m *memory) Tokens(context.Context) ([]storage.Token, error) { return cloneTokens(m.tokens), nil }
 
 func (m *memory) PutTokens(_ context.Context, t []storage.Token) error {
-	m.tokens = t
+	m.tokens = cloneTokens(t)
 	return nil
 }
 
-func (m *memory) AuditEvents(context.Context) ([]storage.AuditEvent, error) { return m.audit, nil }
+func (m *memory) AuditEvents(context.Context) ([]storage.AuditEvent, error) {
+	return cloneEvents(m.audit), nil
+}
 
 func (m *memory) PutAuditEvents(_ context.Context, e []storage.AuditEvent) error {
-	m.audit = e
+	m.audit = cloneEvents(e)
 	return nil
+}
+
+func cloneTokens(tokens []storage.Token) []storage.Token {
+	out := slices.Clone(tokens)
+	for i := range out {
+		out[i].AllowedFrom = slices.Clone(out[i].AllowedFrom)
+		if d := out[i].CacheMaxAge; d != nil {
+			v := *d
+			out[i].CacheMaxAge = &v
+		}
+	}
+	return out
+}
+
+func cloneEvents(events []storage.AuditEvent) []storage.AuditEvent {
+	out := slices.Clone(events)
+	for i := range out {
+		out[i].Keys = slices.Clone(out[i].Keys)
+	}
+	return out
 }

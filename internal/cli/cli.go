@@ -113,10 +113,12 @@ const Usage = `Client commands:
                                                or prompted for
   sync-policy get                              print the SecretSync policy as JSON; needs
                                                a token for /
-  sync-policy set --file F|- [--confirm]       replace the policy with the JSON in F or stdin;
+  sync-policy set --file F|- [--confirm DIGEST]
+                                               replace the policy with the JSON in F or stdin;
                                                when it disallows SecretSyncs, which lose
-                                               their target Secrets, list them, exit 1 and
-                                               save nothing unless --confirm
+                                               their target Secrets, list them with a digest,
+                                               exit 1 and save nothing unless --confirm is
+                                               that digest
   run     --path P [--recursive] [--prefer-cache] [--no-mask] [--min-length 1] -- CMD [ARGS...]
                                                run CMD with secrets as env vars; secret
                                                values in its output print as ***
@@ -1217,10 +1219,10 @@ func (c *CLI) syncPolicy(ctx context.Context, args []string) error {
 	}
 	f := c.flags("sync-policy "+sub, false, false)
 	var file *string
-	var confirm *bool
+	var confirm *string
 	if sub == "set" {
 		file = f.fs.String("file", "", "policy JSON file, - for stdin")
-		confirm = f.fs.Bool("confirm", false, "save even when SecretSyncs lose their target Secrets")
+		confirm = f.fs.String("confirm", "", "digest of the preview listing the SecretSyncs that lose their target Secrets")
 	}
 	api, err := f.parse(rest)
 	if err != nil {
@@ -1240,7 +1242,7 @@ func (c *CLI) syncPolicy(ctx context.Context, args []string) error {
 		return fmt.Errorf("server %s has no SecretSync policy; it needs the sync-policy capability, which a local vault does not have", f.server)
 	}
 	if sub == "get" {
-		p, err := api.GetSyncPolicy(ctx)
+		p, _, err := api.GetSyncPolicy(ctx)
 		if err != nil {
 			return err
 		}
@@ -1268,14 +1270,24 @@ func (c *CLI) syncPolicy(ctx context.Context, args []string) error {
 	if dec.Decode(&struct{}{}) != io.EOF {
 		return fmt.Errorf("%w: %s is not a sync policy document: unexpected data after the document", errUsage, source)
 	}
-	saved, err := api.PutSyncPolicy(ctx, p, *confirm)
+	_, base, err := api.GetSyncPolicy(ctx)
+	if err != nil {
+		return err
+	}
+	saved, err := api.PutSyncPolicy(ctx, p, base, *confirm)
+	var changed *client.Error
+	if errors.As(err, &changed) && changed.Status == http.StatusConflict {
+		fmt.Fprintln(c.Stderr, "error:", changed.Message)
+		fmt.Fprintln(c.Stderr, "Nothing was saved.")
+		return &exitError{code: 1}
+	}
 	var denied *client.DeniedError
 	if errors.As(err, &denied) {
 		fmt.Fprintf(c.Stderr, "the policy disallows %d SecretSyncs, which lose all their target Secrets:\n", len(denied.Denied))
 		for _, d := range denied.Denied {
 			fmt.Fprintln(c.Stderr, "  "+d)
 		}
-		fmt.Fprintln(c.Stderr, "Nothing was saved. Run again with --confirm to save the policy and delete those Secrets.")
+		fmt.Fprintf(c.Stderr, "Nothing was saved. To save this policy and delete those Secrets, run again with --confirm %s\n", denied.Digest)
 		return &exitError{code: 1}
 	}
 	if err != nil {

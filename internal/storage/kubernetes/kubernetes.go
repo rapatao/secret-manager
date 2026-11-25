@@ -16,6 +16,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/rapatao/secret-manager/internal/storage"
@@ -201,7 +202,7 @@ func (b *Backend) AddVersion(ctx context.Context, path string, at time.Time, dat
 	if keep < 1 {
 		return fmt.Errorf("add version of %s: keep must be at least 1, got %d", path, keep)
 	}
-	versions, err := b.Versions(ctx, path)
+	versions, uids, err := b.versions(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -214,7 +215,8 @@ func (b *Backend) AddVersion(ctx context.Context, path string, at time.Time, dat
 	}
 	for _, v := range versions[min(keep-1, len(versions)):] {
 		old := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: b.ns, Name: VersionName(path, v.Number)}}
-		if err := client.IgnoreNotFound(b.c.Delete(ctx, old)); err != nil {
+		uid := uids[v.Number]
+		if err := client.IgnoreNotFound(b.c.Delete(ctx, old, client.Preconditions{UID: &uid})); err != nil {
 			return fmt.Errorf("prune version %d of %s: %w", v.Number, path, err)
 		}
 	}
@@ -244,17 +246,13 @@ func (b *Backend) versionSecret(path string, v storage.Version) *corev1.Secret {
 
 // ReplaceVersions implements storage.Backend.
 func (b *Backend) ReplaceVersions(ctx context.Context, path string, versions []storage.Version) error {
-	existing, err := b.Versions(ctx, path)
+	_, stored, err := b.versions(ctx, path)
 	if err != nil {
 		return err
 	}
-	stored := map[int]bool{}
-	for _, v := range existing {
-		stored[v.Number] = true
-	}
 	for _, v := range versions {
 		want := b.versionSecret(path, v)
-		if !stored[v.Number] {
+		if _, ok := stored[v.Number]; !ok {
 			if err := b.c.Create(ctx, want); err != nil {
 				return fmt.Errorf("create version %d of %s: %w", v.Number, path, err)
 			}
@@ -273,9 +271,9 @@ func (b *Backend) ReplaceVersions(ctx context.Context, path string, versions []s
 			return fmt.Errorf("update version %d of %s: %w", v.Number, path, err)
 		}
 	}
-	for n := range stored {
+	for n, uid := range stored {
 		old := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: b.ns, Name: VersionName(path, n)}}
-		if err := client.IgnoreNotFound(b.c.Delete(ctx, old)); err != nil {
+		if err := client.IgnoreNotFound(b.c.Delete(ctx, old, client.Preconditions{UID: &uid})); err != nil {
 			return fmt.Errorf("delete version %d of %s: %w", n, path, err)
 		}
 	}
@@ -336,19 +334,26 @@ func (b *Backend) VersionedPaths(ctx context.Context) ([]string, error) {
 
 // Versions implements storage.Backend.
 func (b *Backend) Versions(ctx context.Context, path string) ([]storage.Version, error) {
+	versions, _, err := b.versions(ctx, path)
+	return versions, err
+}
+
+// versions is Versions that also returns the UID of each version's Secret.
+func (b *Backend) versions(ctx context.Context, path string) ([]storage.Version, map[int]types.UID, error) {
 	var list corev1.SecretList
 	labels := client.MatchingLabels{HistoryLabel: "true", PathHashLabel: PathHash(path)}
 	if err := b.c.List(ctx, &list, client.InNamespace(b.ns), labels); err != nil {
-		return nil, fmt.Errorf("list versions: %w", err)
+		return nil, nil, fmt.Errorf("list versions: %w", err)
 	}
 	var versions []storage.Version
+	uids := map[int]types.UID{}
 	for _, s := range list.Items {
 		if s.Annotations[PathAnnotation] != path || !managed(&s, HistoryLabel) || !strings.HasPrefix(s.Name, historyPrefix+dotted(path)+".") {
 			continue
 		}
 		n, err := strconv.Atoi(s.Annotations[VersionAnnotation])
 		if err != nil {
-			return nil, fmt.Errorf("secret %s: bad version annotation: %w", s.Name, err)
+			return nil, nil, fmt.Errorf("secret %s: bad version annotation: %w", s.Name, err)
 		}
 		if s.Name != VersionName(path, n) {
 			continue
@@ -359,9 +364,10 @@ func (b *Backend) Versions(ctx context.Context, path string) ([]storage.Version,
 			data[k] = string(v)
 		}
 		versions = append(versions, storage.Version{Number: n, Time: at, Data: data})
+		uids[n] = s.UID
 	}
 	slices.SortFunc(versions, func(a, b storage.Version) int { return b.Number - a.Number })
-	return versions, nil
+	return versions, uids, nil
 }
 
 // Tokens implements storage.Backend.

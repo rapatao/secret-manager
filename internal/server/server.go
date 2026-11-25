@@ -34,6 +34,24 @@ const maxBodyBytes = 1 << 20
 // outgrow this limit.
 const maxRestoreBytes = 64 << 20
 
+// Timeouts of the http.Server serving a Server. ReadTimeout bounds reading a
+// whole request, which includes a restore upload. WriteTimeout bounds a
+// response; handlers streaming a backup or reading a restore extend it with
+// extendWriteDeadline.
+const (
+	ReadHeaderTimeout = 10 * time.Second
+	ReadTimeout       = 10 * time.Minute
+	WriteTimeout      = 2 * time.Minute
+	IdleTimeout       = 2 * time.Minute
+)
+
+// extendWriteDeadline lets the response of a backup or restore take as long
+// as the longest request plus WriteTimeout. A writer without deadline support
+// keeps the server's timeout.
+func extendWriteDeadline(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(ReadTimeout + WriteTimeout))
+}
+
 // BackupFormat is the version of the backup document. Restore rejects other
 // formats.
 const BackupFormat = 1
@@ -488,6 +506,7 @@ type backupPathJSON struct {
 }
 
 func (s *Server) apiBackup(w http.ResponseWriter, r *http.Request) {
+	extendWriteDeadline(w)
 	out, err := s.backup(r.Context(), r.URL.Query().Get("history") == "true")
 	s.auditAt(s.Events.Backups, r, "api", "backup", "", nil, err)
 	if err != nil {
@@ -514,6 +533,7 @@ func (s *Server) backup(ctx context.Context, withHistory bool) (backupJSON, erro
 }
 
 func (s *Server) apiRestore(w http.ResponseWriter, r *http.Request) {
+	extendWriteDeadline(w)
 	var in backupJSON
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRestoreBytes)).Decode(&in); err != nil {
 		writeError(w, http.StatusBadRequest, "body must be a backup document")

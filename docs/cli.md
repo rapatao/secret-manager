@@ -125,8 +125,8 @@ $ secret-manager sync-policy set --file policy.json
 the policy disallows 2 SecretSyncs, which lose all their target Secrets:
   team-a/db: denied by sync policy: namespace team-a may not read path /prod/db
   team-a/web: denied by sync policy: namespace team-a may not write to namespace team-c
-Nothing was saved. Run again with --confirm to save the policy and delete those Secrets.
-$ secret-manager sync-policy set --file policy.json --confirm
+Nothing was saved. To save this policy and delete those Secrets, run again with --confirm 9f2c41e0a7b35d86c1e04f7a52d9b8e3a16c70d4f58e2b9a3c6d1e07f4a85b2c
+$ secret-manager sync-policy set --file policy.json --confirm 9f2c41e0a7b35d86c1e04f7a52d9b8e3a16c70d4f58e2b9a3c6d1e07f4a85b2c
 {
   "enabled": true,
   "namespaces": {
@@ -142,7 +142,7 @@ $ secret-manager sync-policy set --file policy.json --confirm
 }
 ```
 
-The document has the shape `{"enabled": true, "namespaces": {"team-a": {"paths": ["/apps/team-a"], "targetNamespaces": ["team-b"]}}}`, see [API](api.md). Both commands need a token for `/` (read-write for `set`) and a server with the `sync-policy` capability; a [local vault](local-vault.md) has none. Without `--confirm`, `set` exits with 1 when the new policy disallows SecretSyncs that the stored policy does not already disallow. The list is computed by the server on every call, so `--confirm` applies to the SecretSyncs that exist at that moment.
+The document has the shape `{"enabled": true, "namespaces": {"team-a": {"paths": ["/apps/team-a"], "targetNamespaces": ["team-b"]}}}`, see [API](api.md). Both commands need a token for `/` (read-write for `set`) and a server with the `sync-policy` capability; a [local vault](local-vault.md) has none. Without `--confirm`, `set` exits with 1 when the new policy disallows SecretSyncs that the stored policy does not already disallow: it prints them and a digest. `--confirm DIGEST` saves the policy only when the digest still matches the policy and the list the server computes on that call, so it cannot apply a different policy or a different list than the one printed; otherwise `set` prints the new list and digest and exits with 1. `set` reads the current policy just before saving and saves over exactly that version, so it only guards that short window: it replaces whatever is stored and does not detect changes made since you last ran `get`. When someone else changes the policy within that window, it prints the server's message, `Nothing was saved.`, and exits with 1; run it again.
 
 ## Resolution order
 
